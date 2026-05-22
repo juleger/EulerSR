@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+meshes/
+results/
+figures/
+uv.lock

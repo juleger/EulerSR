@@ -1,0 +1,29 @@
+[project]
+name = "GenerativePDE"
+version = "0.1.0"
+description = "Generative PDE solvers and examples"
+readme = "README.md"
+requires-python = "==3.11.*"
+dependencies = [
+    "numpy>=1.26.0,<2.0",
+    "matplotlib>=3.9.4",
+    "meshio>=5.3.5",
+    "meshpy>=2023.1.1",
+    "scikit-learn>=1.6.1",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.31.0",
+    "flax>=0.8.5",
+    "optax>=0.2.4",
+    "jax[cpu]>=0.4.30",
+]
+
+[project.optional-dependencies]
+# Install JAX for CPU: `pip install .[jax]` or `pip install "jax[cpu]" -f https://storage.googleapis.com/jax-releases/jax_releases.html`
+jax = ["jax[cpu]>=0.4.30"]
+
+[tool.uv]
+required-environments = ["sys_platform == 'darwin' and platform_machine == 'x86_64'"]
+
