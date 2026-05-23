@@ -2,18 +2,15 @@ from argparse import ArgumentParser
 from pathlib import Path
 import json
 import sys
+import os
 
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-# Compact: pre-create a cropped 'hot' colormap (first 80%) to avoid overly bright tails
-try:
-    _base_hot = mpl.cm.get_cmap("hot")
-    _hot_colors = _base_hot(np.linspace(0.0, 0.8, 256))
-    HOT_CMAP_CROPPED = mpl.colors.LinearSegmentedColormap.from_list("hot_cropped", _hot_colors)
-except Exception:
-    HOT_CMAP_CROPPED = mpl.cm.get_cmap("hot")
 
+base_hot = mpl.cm.get_cmap("hot")
+hot_colors = base_hot(np.linspace(0.0, 0.8, 256))
+HOT_CMAP_CROPPED = mpl.colors.LinearSegmentedColormap.from_list("hot_cropped", hot_colors)
 repo_root = Path(__file__).resolve().parents[1]
 
 from jax_fvm.src.mesh import Mesh
@@ -143,8 +140,20 @@ def build_run_summary(cfg, mesh, cd, wall_time_s):
 
 
 def export_run_summary(out_dirs, summary):
-    """Write a machine-readable summary for batch scripts and post-processing."""
+    # Exporte le résumé de la simulation (temps de calcul, C_D, etc...) dans un fichier JSON
     path = out_dirs["res"] / "summary.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary written : {path}")
+
+def configure_jax_cpu_runtime():
+    # Configuration JAX pour parallélisation CPU efficace
+    # Evite l'hyperthreading
+    cpu_count = os.cpu_count() // 2 or 1 
+    os.environ["XLA_FLAGS"] = f"--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads={cpu_count}"
+    os.environ["JAX_ENABLE_X64"] = "true"
+    os.environ["OMP_NUM_THREADS"] = str(cpu_count)
+    os.environ["MKL_NUM_THREADS"] = str(cpu_count)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(cpu_count)
+    os.environ["VECLIB_MAXIMUM_THREADS"] = str(cpu_count)
+    os.environ["JAX_NUM_THREADS"] = str(cpu_count)

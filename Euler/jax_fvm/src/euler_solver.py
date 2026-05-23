@@ -1,3 +1,4 @@
+import os
 import jax.numpy as jnp
 import jax
 import sys
@@ -10,8 +11,6 @@ import jax_fvm.src.helper as helper # pyright: ignore[reportMissingImports]
 import matplotlib.pyplot as plt
 
 sys.modules.setdefault("jax_fvm.src.solvers.Euler.Euler", sys.modules[__name__])
-jax.config.update('jax_enable_x64', True)
-jax.config.update("jax_debug_nans", True)
 size = 14
 params = {
     'text.usetex': True,

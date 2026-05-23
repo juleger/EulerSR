@@ -1,12 +1,20 @@
+import os
+from utils import configure_jax_cpu_runtime
+
+configure_jax_cpu_runtime()
+
+nproc = os.cpu_count() // 2 or 1
+
+import jax
 import numpy as np
 import jax.numpy as jnp
-
 from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, load_mesh, print_config, setup_dirs
 
 import jax_fvm.src.helper as helper
 import jax_fvm.src.euler_solver as Euler
 from graph import export_graph
 import time
+
 
 CFG = {
     # Configuration globale, modifiable via CLI
@@ -16,7 +24,7 @@ CFG = {
     # Physique
     "rho_inf": 1.0,  # Densité amont
     "p_inf": 1.0,  # Pression amont
-    "Mach": 1.2,  # Nombre de Mach du flux entrant
+    "Mach": 2.0,  # Nombre de Mach du flux entrant
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
@@ -24,10 +32,10 @@ CFG = {
     "flux": "HLLC",  # Rusanov | Roe | HLLC
     "reconstruction": "MUSCL",  # constant | muscl
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 2.0,  # Temps final de la simulation
+    "tf": 1.0,  # Temps final de la simulation
 
     # Fichier de maillage
-    "mesh_path": "meshes/diamond/diamond_h0.05.npy",
+    "mesh_path": "meshes/diamond/diamond_h0.07.npy",
 
     # Export
     "export": {
@@ -68,23 +76,31 @@ def run(W, mesh, inlet, cfg, out_dirs):
     N = int(cfg["tf"] / dt) + 1
     n_snaps = max(1, int(exp["n_snaps"]))
 
-    snap_steps = set(np.rint(np.linspace(1, N, n_snaps)).astype(int).tolist())
-    snap_steps.add(N)
+    snap_steps = sorted(set(np.rint(np.linspace(1, N, n_snaps)).astype(int).tolist()) | {N})
     if n_snaps == 1:
-        snap_steps = {N}
+        snap_steps = [N]
 
     print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
+
+    print("\n Parallélisation JAX :")
+    print(f"    Backend : {jax.default_backend()} (nprocs = {nproc})")
+    print(f"    Device(s) : {jax.devices()}")
+
+    # Warm-up pour compilation JIT
+    print("\nCompilation JIT (warm-up)...")
+    W = fn(W, mesh, dt, **kw)
+    jax.block_until_ready(W) 
 
     t = 0.0
     W_snapshots = {}
     ct = 0
-    
+
     print("\nRésolution numérique en cours...")
     start_time = time.time()
     for n in range(1, N + 1):
         W = fn(W, mesh, dt, **kw)
         t += float(dt)
-        if n in snap_steps:
+        if n in set(snap_steps):
             export_snapshot(W, mesh, t, cfg, out_dirs, helper)
             W_snapshots[round(t, 6)] = np.array(W)
             ct += 1
