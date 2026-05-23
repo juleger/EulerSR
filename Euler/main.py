@@ -1,9 +1,7 @@
 import os
 from utils import configure_jax_cpu_runtime
 
-configure_jax_cpu_runtime()
-
-nproc = os.cpu_count() // 2 or 1
+#configure_jax_cpu_runtime() #facultatif car JAX par défaut est bien configuré
 
 import jax
 import numpy as np
@@ -30,12 +28,12 @@ CFG = {
     # Solveur
     "time_scheme": "SSP_RK2",  # EE | RK2 | RK4 | SSP_RK2
     "flux": "HLLC",  # Rusanov | Roe | HLLC
-    "reconstruction": "MUSCL",  # constant | muscl
+    "reconstruction": "muscl",  # constant | muscl
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 1.0,  # Temps final de la simulation
+    "tf": 2.0,  # Temps final de la simulation
 
     # Fichier de maillage
-    "mesh_path": "meshes/diamond/diamond_h0.07.npy",
+    "mesh_path": "meshes/diamond/diamond_h0.05.npy",
 
     # Export
     "export": {
@@ -82,10 +80,6 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
     print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
 
-    print("\n Parallélisation JAX :")
-    print(f"    Backend : {jax.default_backend()} (nprocs = {nproc})")
-    print(f"    Device(s) : {jax.devices()}")
-
     # Warm-up pour compilation JIT
     print("\nCompilation JIT (warm-up)...")
     W = fn(W, mesh, dt, **kw)
@@ -97,16 +91,13 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
     print("\nRésolution numérique en cours...")
     start_time = time.time()
-    for n in range(1, N + 1):
-        W = fn(W, mesh, dt, **kw)
-        t += float(dt)
-        if n in set(snap_steps):
-            export_snapshot(W, mesh, t, cfg, out_dirs, helper)
-            W_snapshots[round(t, 6)] = np.array(W)
-            ct += 1
-        # On affiche la progression tous les 10%
-        if n % max(1, N // 10) == 0 or n == N:
-            print(f"    step {n}/{N}  ({100 * n / N:.1f}%)")
+
+    def scan_body(W, _):
+        return fn(W, mesh, dt, **kw), None
+    
+    W, _ = jax.lax.scan(scan_body, W, None, length = N)
+    export_snapshot(W, mesh, CFG["tf"], cfg, out_dirs, helper)
+    W_snapshots[round(CFG["tf"], 6)] = np.array(W)
 
     end_time = time.time()
     wall_time_s = end_time - start_time

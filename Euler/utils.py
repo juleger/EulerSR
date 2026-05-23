@@ -58,7 +58,9 @@ def format_h(mesh):
 def format_snapshot_name(cfg, t):
     mach = f"M{cfg['Mach']:.1f}"
     flux = str(cfg["flux"]).upper()
-    return f"{mach}_{flux}_t{t:.2f}"
+    reconstruction = str(cfg["reconstruction"]).upper()
+    time_scheme = str(cfg["time_scheme"])
+    return f"{mach}_{flux}_{reconstruction}_{time_scheme}"
 
 def setup_dirs(cfg, mesh):
     # Préparation des dossiers de sortie
@@ -104,7 +106,7 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
     if exp["figures"]:
         prims = helper.getPrimitive(W, gamma=gamma, M=1.0)
         Mach_field = helper.get_mach_number(prims, gamma=gamma)
-        cmaps = ["inferno", "viridis", "plasma", "cividis", HOT_CMAP_CROPPED]
+        cmaps = ["inferno", "viridis", "plasma", "viridis", HOT_CMAP_CROPPED]
         title_map = {
             "rho": "Masse volumique $\\rho$",
             "u": "Vitesse $u$",
@@ -117,12 +119,10 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
         for i, s in enumerate(fields):
             tex = texs[i]
             title = title_map.get(s, tex)
-            subtitle = f"t={t:.2f}s, M={cfg['Mach']}, flux={cfg['flux']}, h={mesh.metadata.get('h', 'n/a')}"
+            subtitle = f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {cfg['reconstruction']}, {cfg['time_scheme']}"
             field = Mach_field if s == "M" else prims[:, i]
-            cmap_obj = cmaps[i]
-
-            mesh.plot_solution(field, labels=tex, filename=out_dirs["fig"] / f"{snapshot_name}_{s}.png",
-                dpi=300, title=title, subtitle=subtitle, cmap=cmap_obj)
+            mesh.plot_solution(field, labels=tex, filename=out_dirs["fig"] / f"{s}_{snapshot_name}.png",
+                dpi=400, title=title, subtitle=subtitle, cmap=cmaps[i % len(cmaps)])
 
 
 def build_run_summary(cfg, mesh, cd, wall_time_s):
@@ -157,3 +157,4 @@ def configure_jax_cpu_runtime():
     os.environ["OPENBLAS_NUM_THREADS"] = str(cpu_count)
     os.environ["VECLIB_MAXIMUM_THREADS"] = str(cpu_count)
     os.environ["JAX_NUM_THREADS"] = str(cpu_count)
+    print(f"JAX configuré pour CPU avec {cpu_count} threads (hyperthreading désactivé)")

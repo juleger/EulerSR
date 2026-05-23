@@ -73,10 +73,10 @@ def plot_solution(mesh, field_data, labels = r'$\rho$', cmap=None, dpi = 300, fi
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     if title:
-        fig.subplots_adjust(top=0.90)
+        fig.subplots_adjust(top=0.85)
         fig.suptitle(title, y=1.0, fontweight='bold', fontsize=plt.rcParams['axes.titlesize']+4)
     if subtitle:
-        fig.text(0.5, 0.945, subtitle, ha='center', va='top', fontsize=plt.rcParams['axes.titlesize']-2)
+        fig.text(0.5, 0.945, subtitle, ha='center', va='top', fontsize=plt.rcParams['axes.titlesize']-4)
     clb = fig.colorbar(tpc, cax = cax)
     # place colorbar label on the right side (not on top)
     clb.ax.yaxis.set_label_position('right')

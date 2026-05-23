@@ -219,20 +219,20 @@ def Rusanov(W_L, W_R, normals, **kwargs):
 	C_R = jnp.sqrt(jnp.abs(gamma*P_R/rho_R)) / M + jnp.abs(u_R * nx + v_R * ny)
 	C_max = jnp.maximum(C_R, C_L)
 
-	use_entropy = kwargs.get('entropy', kwargs.get('entropy_dissipation', True))
+	return 0.5 * C_max[...,None] * (W_R - W_L)
+	# use_entropy = kwargs.get('entropy', kwargs.get('entropy_dissipation', True))
 
-	def entropy_branch(_):
-		Eta_L = helper.getEntropyVariables(W_L, gamma=gamma)
-		Eta_R = helper.getEntropyVariables(W_R, gamma=gamma)
-		Eta_bar = 0.5 * (Eta_L + Eta_R)
-		_, dissipation = jax.jvp(lambda x: helper.getConserved_from_Entropy(x, gamma=gamma),
-			(Eta_bar,), (Eta_R - Eta_L,))
-		return 0.5 * C_max[..., None] * dissipation
+	# def entropy_branch(_):
+	# 	Eta_L = helper.getEntropyVariables(W_L, gamma=gamma)
+	# 	Eta_R = helper.getEntropyVariables(W_R, gamma=gamma)
+	# 	Eta_bar = 0.5 * (Eta_L + Eta_R)
+	# 	_, dissipation = jax.jvp(lambda x: helper.getConserved_from_Entropy(x, gamma=gamma),
+	# 		(Eta_bar,), (Eta_R - Eta_L,))
+	# 	return 0.5 * C_max[..., None] * dissipation
 
-	def plain_branch(_):
-		return 0.5 * C_max[..., None] * (W_R - W_L)
-
-	return jax.lax.cond(jnp.asarray(use_entropy), entropy_branch, plain_branch, operand=None)
+	# def plain_branch(_):
+	# 	return 0.5 * C_max[..., None] * (W_R - W_L)
+	
 def LaxFriedrichs(W_L, W_R, normals, **kwargs):
 	# Lax Friedrichs global, très diffusif
 	gamma = kwargs.get('gamma', 1.4)
