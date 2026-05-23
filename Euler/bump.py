@@ -4,10 +4,8 @@ import numpy as np
 import meshpy.triangle as triangle
 
 repo_root = Path(__file__).resolve().parents[1]
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
 
-from jax_fvm.src.mesh.mesh import Mesh
+from jax_fvm.src.mesh import Mesh
 
 WALL, INLET, OUTLET = 2, 3, 4
 mesh_dir = repo_root / "meshes" / "bump"

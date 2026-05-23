@@ -3,12 +3,13 @@ import jax
 import sys
 from functools import partial
 
-sys.path.append('../../../..')  
-from jax_fvm.src.mesh.mesh import Mesh # pyright: ignore[reportMissingImports]
-import jax_fvm.src.mesh.plot as plot # pyright: ignore[reportMissingImports]
+from jax_fvm.src.mesh import Mesh # pyright: ignore[reportMissingImports]
+import jax_fvm.src.plot as plot # pyright: ignore[reportMissingImports]
 import time
-import jax_fvm.src.solvers.helper as helper # pyright: ignore[reportMissingImports]
+import jax_fvm.src.helper as helper # pyright: ignore[reportMissingImports]
 import matplotlib.pyplot as plt
+
+sys.modules.setdefault("jax_fvm.src.solvers.Euler.Euler", sys.modules[__name__])
 jax.config.update('jax_enable_x64', True)
 jax.config.update("jax_debug_nans", True)
 size = 14

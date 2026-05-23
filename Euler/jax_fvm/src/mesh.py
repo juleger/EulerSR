@@ -3,11 +3,12 @@ import meshio
 import meshpy.triangle as triangle
 import jax.numpy as jnp
 import numpy as np
-sys.path.append('../../..')  
-import jax_fvm.src.mesh.plot as plot
+import jax_fvm.src.plot as plot
 import jax
 from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
+
+sys.modules.setdefault("jax_fvm.src.mesh.mesh", sys.modules[__name__])
 
 size = 14
 params = {

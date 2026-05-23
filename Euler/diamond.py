@@ -5,10 +5,8 @@ import numpy as np
 import meshpy.triangle as triangle
 
 repo_root = Path(__file__).resolve().parents[1]
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
 
-from jax_fvm.src.mesh.mesh import Mesh
+from jax_fvm.src.mesh import Mesh
 
 WALL, INLET, OUTLET = 2, 3, 4
 mesh_dir = repo_root / "meshes" / "diamond"
@@ -17,8 +15,8 @@ mesh_dir.mkdir(parents=True, exist_ok=True)
 # Dataclass pour les paramètres "adaptatifs" du maillage diamant
 @dataclass(frozen=True)
 class DiamondMeshSize:
-    growth_rate: float = 0.05
-    left_growth_rate: float = 0.09
+    growth_rate: float = 0.065
+    left_growth_rate: float = 0.10
     obstacle_factor: float = 1.0
     max_size_factor: float = 2.0
     left_margin_factor: float = 1.0
@@ -100,11 +98,13 @@ def local_size(point, cx, cy, chord, height, h, size_params=DEFAULT_SIZE_PARAMS)
     # Le maillage devient plus grossier plus rapidement quand on se rapproche de l'inlet
     if px < x_le - size_params.left_margin_factor * height:
         growth_rate = size_params.left_growth_rate
+        max_size_factor = size_params.max_size_factor
     else:
         growth_rate = size_params.growth_rate
+        max_size_factor = size_params.max_size_factor * 4
 
     target = h * (1.0 + growth_rate * dist / growth_length)
-    return float(np.clip(target, h, size_params.max_size_factor * h))
+    return float(np.clip(target, h, max_size_factor * h))
 
 
 def diamond_refinement(cx, cy, chord, height, h, size_params=DEFAULT_SIZE_PARAMS):
@@ -203,13 +203,13 @@ def build_mesh(Lx=6.0, Ly=4.0, h=0.05, chord=1.0, height=0.24, cx=None, cy=None,
     return mesh, path
 
 if __name__ == "__main__":
-    Lx = 3; Ly = 3.0; h = 0.1
-    chord = 1.0; cx = 1.2; cy = Ly / 2
+    Lx = 4; Ly = 4.0; h = 0.1
+    chord = 1.0; cx = 1.5; cy = Ly / 2
 
     # Alpha est le demi angle du losange, height est la hauteur totale du losange
     alpha = np.radians(10)
     height = chord * np.tan(alpha)
 
-    for h in [0.2, 0.1, 0.05, 0.025, 0.0125]:
+    for h in [0.2, 0.14, 0.1, 0.07, 0.05, 0.035, 0.025, 0.0175, 0.0125]:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, chord=chord, height=height, cx=cx, cy=cy, export_vtk=False)
         mesh.plot_mesh(filename=mesh_dir / f"diamond_h{h}.png")

@@ -2,6 +2,8 @@ import jax.numpy as jnp
 import jax
 import sys
 
+sys.modules.setdefault("jax_fvm.src.solvers.helper", sys.modules[__name__])
+
 def get_dt(W, mesh, CFL=0.5, gamma=1.4, M=1.0):
 	Primitives = getPrimitive(W, gamma=gamma, M=M)
 	rho = Primitives[..., 0]

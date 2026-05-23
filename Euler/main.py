@@ -1,10 +1,10 @@
 import numpy as np
 import jax.numpy as jnp
 
-from utils import build_config_from_cli, export_snapshot, load_mesh, print_config, setup_dirs
+from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, load_mesh, print_config, setup_dirs
 
-import jax_fvm.src.solvers.helper as helper
-import jax_fvm.src.solvers.Euler.Euler as Euler
+import jax_fvm.src.helper as helper
+import jax_fvm.src.euler_solver as Euler
 from graph import export_graph
 import time
 
@@ -16,25 +16,27 @@ CFG = {
     # Physique
     "rho_inf": 1.0,  # Densité amont
     "p_inf": 1.0,  # Pression amont
-    "Mach": 2.0,  # Nombre de Mach du flux entrant
+    "Mach": 1.2,  # Nombre de Mach du flux entrant
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
     "time_scheme": "SSP_RK2",  # EE | RK2 | RK4 | SSP_RK2
     "flux": "HLLC",  # Rusanov | Roe | HLLC
-    "reconstruction": "constant",  # constant | muscl
+    "reconstruction": "MUSCL",  # constant | muscl
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
     "tf": 2.0,  # Temps final de la simulation
 
     # Fichier de maillage
-    "mesh_path": "meshes/diamond/diamond_mesh0.05.npy",
+    "mesh_path": "meshes/diamond/diamond_h0.05.npy",
 
     # Export
     "export": {
         "results": True,  # Exporter les data de solutions (npy)
         "figures": True,  # Exporter les figures (png)
         "graph": False,  # Exporter la simulation sous forme de graph (npz)
-        "n_snaps": 1,  # Nombre de snapshots
+        "summary": False,  # Exporter le résumé machine-readable (json)
+           "n_snaps": 1,  # Nombre de snapshots
+           "cmap_crop": {"hot": [0.0, 0.8]},
     },
 }
 
@@ -91,20 +93,26 @@ def run(W, mesh, inlet, cfg, out_dirs):
             print(f"    step {n}/{N}  ({100 * n / N:.1f}%)")
 
     end_time = time.time()
+    wall_time_s = end_time - start_time
     print("\n" + "-" * 78)
-    print(f"Simulation terminée en {end_time - start_time:.2f}s ({ct} snapshots)")
+    print(f"Simulation terminée en {wall_time_s:.2f}s ({ct} snapshots)")
 
     if exp["graph"]:
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
 
+    summary = None
     if cfg["case"] == "diamond":
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         print(f"Coefficient de trainée C_D = {C_D:.4f}")
+        summary = build_run_summary(cfg, mesh, C_D, wall_time_s)
+
+    if exp.get("summary", True) and summary is not None:
+        export_run_summary(out_dirs, summary)
     return W
 
 if __name__ == "__main__":
-    
+
     CFG = build_config_from_cli(CFG)
     mesh = load_mesh(CFG)
     out_dirs = setup_dirs(CFG, mesh)

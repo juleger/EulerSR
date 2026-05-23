@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.animation as animation
 import jax
 import jax.numpy as jnp
+import sys
 
 size = 14
 params = {
@@ -23,6 +24,8 @@ params = {
 plt.rcParams.update(params)
 
 color = cm.rainbow(np.linspace(0, 1, 10))
+
+sys.modules.setdefault("jax_fvm.src.mesh.plot", sys.modules[__name__])
 
 
 def draw_diamond_outline(ax, mesh):

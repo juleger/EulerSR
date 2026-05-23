@@ -4,12 +4,19 @@ import json
 import sys
 
 import numpy as np
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+# Compact: pre-create a cropped 'hot' colormap (first 80%) to avoid overly bright tails
+try:
+    _base_hot = mpl.cm.get_cmap("hot")
+    _hot_colors = _base_hot(np.linspace(0.0, 0.8, 256))
+    HOT_CMAP_CROPPED = mpl.colors.LinearSegmentedColormap.from_list("hot_cropped", _hot_colors)
+except Exception:
+    HOT_CMAP_CROPPED = mpl.cm.get_cmap("hot")
 
 repo_root = Path(__file__).resolve().parents[1]
-if str(repo_root) not in sys.path:
-    sys.path.insert(0, str(repo_root))
 
-from jax_fvm.src.mesh.mesh import Mesh
+from jax_fvm.src.mesh import Mesh
 
 
 def build_config_from_cli(default_cfg):
@@ -100,7 +107,7 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
     if exp["figures"]:
         prims = helper.getPrimitive(W, gamma=gamma, M=1.0)
         Mach_field = helper.get_mach_number(prims, gamma=gamma)
-        cmaps = ["inferno", "viridis", "plasma", "cividis", "hot"]
+        cmaps = ["inferno", "viridis", "plasma", "cividis", HOT_CMAP_CROPPED]
         title_map = {
             "rho": "Masse volumique $\\rho$",
             "u": "Vitesse $u$",
@@ -115,5 +122,29 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
             title = title_map.get(s, tex)
             subtitle = f"t={t:.2f}s, M={cfg['Mach']}, flux={cfg['flux']}, h={mesh.metadata.get('h', 'n/a')}"
             field = Mach_field if s == "M" else prims[:, i]
+            cmap_obj = cmaps[i]
+
             mesh.plot_solution(field, labels=tex, filename=out_dirs["fig"] / f"{snapshot_name}_{s}.png",
-                dpi=300, title=title, subtitle=subtitle, cmap=cmaps[i])
+                dpi=300, title=title, subtitle=subtitle, cmap=cmap_obj)
+
+
+def build_run_summary(cfg, mesh, cd, wall_time_s):
+    return {
+        "case": cfg["case"],
+        "h": mesh.metadata.get("h"),
+        "cd": float(cd) if cd is not None else None,
+        "wall_time_s": float(wall_time_s),
+        "time_scheme": cfg["time_scheme"],
+        "flux": cfg["flux"],
+        "reconstruction": cfg["reconstruction"],
+        "mach": cfg["Mach"],
+        "mesh_path": cfg["mesh_path"],
+    }
+
+
+def export_run_summary(out_dirs, summary):
+    """Write a machine-readable summary for batch scripts and post-processing."""
+    path = out_dirs["res"] / "summary.json"
+    with open(path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Summary written : {path}")
