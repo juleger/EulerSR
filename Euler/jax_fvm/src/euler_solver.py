@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 sys.modules.setdefault("jax_fvm.src.solvers.Euler.Euler", sys.modules[__name__])
 size = 14
 params = {
-    'text.usetex': True,
+	'text.usetex': False,
     'font.family': 'serif',
     'font.serif': 'cm',  # Computer Modern font
 	'legend.fontsize':size,
@@ -125,11 +125,17 @@ def build_flux(flux_type, W_L, W_R, normals, **kwargs):
 		return LaxFriedrichs(W_L, W_R, normals, **kwargs)
 	if flux_type == 'rusanov':
 		return Rusanov(W_L, W_R, normals, **kwargs)
+	if flux_type == 'tadmor':
+		kwargs = dict(kwargs)
+		kwargs['entropy'] = True
+		return Rusanov(W_L, W_R, normals, **kwargs)
+	if flux_type == 'ausm':
+		return AUSM(W_L, W_R, normals, **kwargs)
 	if flux_type in ('hll', 'hllc'):
 		return HLLC(W_L, W_R, normals, **kwargs)
 	if flux_type == 'roe':
 		return Roe(W_L, W_R, normals, **kwargs)
-	raise ValueError(f"Unknown flux type '{flux_type}'. Expected one of: 'lf', 'rusanov', 'roe'.")
+	raise ValueError(f"Unknown flux type '{flux_type}'. Expected one of: 'lf', 'rusanov', 'tadmor', 'ausm', 'hll', 'hllc', 'roe'.")
 
 def apply_face_surfaces(Flux, surfaces):
 	Flux = surfaces[...,None] * Flux
@@ -195,6 +201,7 @@ def Rusanov(W_L, W_R, normals, **kwargs):
 	# Flux de Rusanov (Lax-Friedrichs local) pour Euler compressible 2D
 	gamma = kwargs.get('gamma', 1.4)
 	M = kwargs.get('M', 1.)
+	use_entropy = kwargs.get('entropy', False)
 
 	# Get the cell state for each edge
 	Prim_L = helper.getPrimitive(W_L, gamma = gamma, M = M)
@@ -219,19 +226,21 @@ def Rusanov(W_L, W_R, normals, **kwargs):
 	C_R = jnp.sqrt(jnp.abs(gamma*P_R/rho_R)) / M + jnp.abs(u_R * nx + v_R * ny)
 	C_max = jnp.maximum(C_R, C_L)
 
-	return 0.5 * C_max[...,None] * (W_R - W_L)
-	# use_entropy = kwargs.get('entropy', kwargs.get('entropy_dissipation', True))
+	def entropy_branch():
+		Eta_L = helper.getEntropyVariables(W_L, gamma=gamma)
+		Eta_R = helper.getEntropyVariables(W_R, gamma=gamma)
+		Eta_bar = 0.5 * (Eta_L + Eta_R)
+		_, dissipation = jax.jvp(
+			lambda x: helper.getConserved_from_Entropy(x, gamma=gamma),
+			(Eta_bar,),
+			(Eta_R - Eta_L,),
+		)
+		return 0.5 * C_max[..., None] * dissipation
 
-	# def entropy_branch(_):
-	# 	Eta_L = helper.getEntropyVariables(W_L, gamma=gamma)
-	# 	Eta_R = helper.getEntropyVariables(W_R, gamma=gamma)
-	# 	Eta_bar = 0.5 * (Eta_L + Eta_R)
-	# 	_, dissipation = jax.jvp(lambda x: helper.getConserved_from_Entropy(x, gamma=gamma),
-	# 		(Eta_bar,), (Eta_R - Eta_L,))
-	# 	return 0.5 * C_max[..., None] * dissipation
+	def plain_branch():
+		return 0.5 * C_max[..., None] * (W_R - W_L)
 
-	# def plain_branch(_):
-	# 	return 0.5 * C_max[..., None] * (W_R - W_L)
+	return jax.lax.cond(use_entropy, lambda _: entropy_branch(), lambda _: plain_branch(), operand=None)
 	
 def LaxFriedrichs(W_L, W_R, normals, **kwargs):
 	# Lax Friedrichs global, très diffusif
@@ -419,6 +428,106 @@ def log_mean(aL, aR):
 				)
     return (aL + aR) / (2.0 * F)
 
+def ausm_split_mach(Mn):
+	absm = jnp.abs(Mn)
+	subsonic = absm < 1.0
+	beta = 1.0 / 8.0
+
+	M_plus_sub = 0.25 * (Mn + 1.0)**2 + beta * (Mn**2 - 1.0)**2
+	M_minus_sub = -0.25 * (Mn - 1.0)**2 - beta * (Mn**2 - 1.0)**2
+
+	M_plus_sup = 0.5 * (Mn + absm)
+	M_minus_sup = 0.5 * (Mn - absm)
+
+	M_plus = jnp.where(subsonic, M_plus_sub, M_plus_sup)
+	M_minus = jnp.where(subsonic, M_minus_sub, M_minus_sup)
+	return M_plus, M_minus
+
+def ausm_split_pressure(Mn):
+	absm = jnp.abs(Mn)
+	subsonic = absm < 1.0
+	alpha = 3.0 / 16.0
+
+	P_plus_sub = 0.25 * (Mn + 1.0)**2 * (2.0 - Mn) + alpha * Mn * (Mn**2 - 1.0)**2
+	P_minus_sub = 0.25 * (Mn - 1.0)**2 * (2.0 + Mn) - alpha * Mn * (Mn**2 - 1.0)**2
+
+	P_plus_sup = 0.5 * (1.0 + jnp.sign(Mn))
+	P_minus_sup = 0.5 * (1.0 - jnp.sign(Mn))
+
+	P_plus = jnp.where(subsonic, P_plus_sub, P_plus_sup)
+	P_minus = jnp.where(subsonic, P_minus_sub, P_minus_sup)
+	return P_plus, P_minus
+
+def AUSM(W_L, W_R, normals, **kwargs):
+	# AUSM+ pour Euler compressible 2D
+	gamma = kwargs.get('gamma', 1.4)
+	M = kwargs.get('M', 1.)
+
+	Prim_L = helper.getPrimitive(W_L, gamma=gamma, M=M)
+	Prim_R = helper.getPrimitive(W_R, gamma=gamma, M=M)
+
+	rho_L = Prim_L[..., 0]
+	u_L = Prim_L[..., 1]
+	v_L = Prim_L[..., 2]
+	P_L = Prim_L[..., 3]
+
+	rho_R = Prim_R[..., 0]
+	u_R = Prim_R[..., 1]
+	v_R = Prim_R[..., 2]
+	P_R = Prim_R[..., 3]
+
+	nx = normals[..., 0]
+	ny = normals[..., 1]
+	un_L = u_L * nx + v_L * ny
+	un_R = u_R * nx + v_R * ny
+
+	a_L = jnp.sqrt(jnp.abs(gamma * P_L / rho_L)) / M
+	a_R = jnp.sqrt(jnp.abs(gamma * P_R / rho_R)) / M
+	a_face = 0.5 * (a_L + a_R)
+
+	Mn_L = un_L / (a_L + 1e-12)
+	Mn_R = un_R / (a_R + 1e-12)
+
+	M_plus_L, _ = ausm_split_mach(Mn_L)
+	_, M_minus_R = ausm_split_mach(Mn_R)
+	P_plus_L, _ = ausm_split_pressure(Mn_L)
+	_, P_minus_R = ausm_split_pressure(Mn_R)
+
+	m_dot_L = a_face * M_plus_L * rho_L
+	m_dot_R = a_face * M_minus_R * rho_R
+	pressure_face = P_plus_L * P_L + P_minus_R * P_R
+
+	E_L = W_L[..., 3]
+	E_R = W_R[..., 3]
+	H_L = (E_L + P_L / (M**2)) / rho_L
+	H_R = (E_R + P_R / (M**2)) / rho_R
+
+	F_AUSM = jnp.stack([
+		m_dot_L + m_dot_R,
+		m_dot_L * u_L + m_dot_R * u_R + pressure_face * nx / (M**2),
+		m_dot_L * v_L + m_dot_R * v_R + pressure_face * ny / (M**2),
+		m_dot_L * H_L + m_dot_R * H_R,
+	], axis=-1)
+
+	flux_rho_L = rho_L * un_L
+	flux_ru_L = rho_L * u_L * un_L + P_L * nx / (M**2)
+	flux_rv_L = rho_L * v_L * un_L + P_L * ny / (M**2)
+	flux_E_L = (E_L + P_L / (M**2)) * un_L
+
+	flux_rho_R = rho_R * un_R
+	flux_ru_R = rho_R * u_R * un_R + P_R * nx / (M**2)
+	flux_rv_R = rho_R * v_R * un_R + P_R * ny / (M**2)
+	flux_E_R = (E_R + P_R / (M**2)) * un_R
+
+	Flux_central = jnp.stack([
+		0.5 * (flux_rho_L + flux_rho_R),
+		0.5 * (flux_ru_L + flux_ru_R),
+		0.5 * (flux_rv_L + flux_rv_R),
+		0.5 * (flux_E_L + flux_E_R),
+	], axis=-1)
+
+	return Flux_central - F_AUSM
+
 def getFlux_Tadmor(W_L, W_R, normals, surfaces, **kwargs):
 	gamma = kwargs.get('gamma', 1.4)
 	flux_type = get_flux_type(kwargs)
@@ -489,27 +598,31 @@ def getFlux_Tadmor(W_L, W_R, normals, surfaces, **kwargs):
 # All explicit schemes below use: W_new = W - dt * residual(...) where residual is the divergence term
 ###########################################################################################################
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
+@partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def residual(W, mesh, **kwargs):
 	# Calcul du résidu pour les équations d'Euler compressible 2D
 	W_L, W_R = build_reconstruction(W, mesh, **kwargs)
 
-	# FLux de Tadmor pour entropy stable, sinon flux classique
-	use_entropy = kwargs.get('entropy', False)
-	Flux = jax.lax.cond(
-		use_entropy,
-		lambda _: getFlux_Tadmor(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs),
-		lambda _: getFlux(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs),
-		operand=None,
-	)
+	flux_type = get_flux_type(kwargs)
+	if flux_type == 'tadmor':
+		Flux = getFlux_Tadmor(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs)
+	else:
+		# FLux de Tadmor pour entropy stable, sinon flux classique
+		use_entropy = kwargs.get('entropy', False)
+		Flux = jax.lax.cond(
+			use_entropy,
+			lambda _: getFlux_Tadmor(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs),
+			lambda _: getFlux(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs),
+			operand=None,
+		)
 	return Flux / mesh.area[...,None] 
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
+@partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def time_step_Euler(W, mesh, dt, **kwargs):
 	# Euler explicite (ordre 1)
 	return W - dt * residual(W, mesh, **kwargs)
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
+@partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def time_step_RK2_SSP(W, mesh, dt, **kwargs):
 	# Strong Stability Preserving (SSP) RK2
 	# Meilleur que RK2 classique pour Euler en conservatif
@@ -519,7 +632,7 @@ def time_step_RK2_SSP(W, mesh, dt, **kwargs):
 	W = 0.5 * (W + W1 - dt * k2)
 	return W
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
+@partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def time_step_RK2(W, mesh, dt, **kwargs):
 	# Runge kutta 2 (ordre 2). Equivalent a Heun
 	F1 = residual(W, mesh, **kwargs)
@@ -529,7 +642,7 @@ def time_step_RK2(W, mesh, dt, **kwargs):
 	W = 0.5 * (W + W1)
 	return W
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
+@partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def time_step_RK4(W, mesh, dt, **kwargs):
 	# Runge Kutta 4 (ordre 4)
 	F1 = residual(W, mesh, **kwargs)
@@ -543,7 +656,7 @@ def time_step_RK4(W, mesh, dt, **kwargs):
 	W = W - dt/6 * (F1 + 2*F2 + 2*F3 + F4)
 	return W
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
+@partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def time_step_Newton(W, mesh, dt, **kwargs):
 	W_old = W
 	for _ in range(3):
@@ -558,7 +671,7 @@ def time_step_Newton(W, mesh, dt, **kwargs):
 	return W
 
 
-@partial(jax.jit, static_argnums=(1,), static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
+@partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def SDIRK2(W, mesh, dt, **kwargs):
 	x = 1 - 1/jnp.sqrt(2) # singly diagonally implicit RK
 	n_newton = 4

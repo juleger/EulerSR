@@ -22,18 +22,18 @@ def build_config_from_cli(default_cfg):
     parser.add_argument("--case", choices=("bump", "diamond"), default=default_cfg["case"], help="Cas test : bump ou diamond")
     parser.add_argument("--mach", type=float, default=default_cfg["Mach"], help="Nombre de Mach du flux entrant")
     parser.add_argument("--mesh-path", type=str, default=default_cfg["mesh_path"], help="Chemin vers le fichier de maillage (.npy)")
-    parser.add_argument("--time-scheme", choices=("EE", "RK2", "RK4", "SRK2", "SSP_RK2"), default=default_cfg["time_scheme"], help="Schéma temporel")
-    parser.add_argument("--flux", choices=("Rusanov", "Tadmor", "AUSM", "Roe", "HLLC"), default=default_cfg["flux"], help="Solveur de flux numérique")
-    parser.add_argument("--reconstruction", choices=("constant", "MUSCL", "muscl"), default=default_cfg["reconstruction"], help="Type de reconstruction")
+    parser.add_argument("--time-scheme", choices=("EE", "RK2", "RK4", "SSP_RK2"), default=default_cfg["time_scheme"], help="Schéma temporel")
+    parser.add_argument("--flux", choices=("Rusanov", "Roe", "HLLC"), default=default_cfg["flux"], help="Solveur de flux numérique")
+    parser.add_argument("--reconstruction", choices=("constant", "muscl"), default=default_cfg["reconstruction"], help="Type de reconstruction")
     args = parser.parse_args()
 
     cfg = json.loads(json.dumps(default_cfg))
     cfg["case"] = args.case
     cfg["Mach"] = args.mach
     cfg["mesh_path"] = args.mesh_path
-    cfg["time_scheme"] = "SRK2" if args.time_scheme == "SSP_RK2" else args.time_scheme
+    cfg["time_scheme"] = args.time_scheme
     cfg["flux"] = args.flux
-    cfg["reconstruction"] = "MUSCL" if str(args.reconstruction).lower() == "muscl" else args.reconstruction
+    cfg["reconstruction"] = args.reconstruction
     return cfg
 
 
@@ -59,10 +59,8 @@ def format_snapshot_name(cfg, t):
     mach = f"M{cfg['Mach']:.1f}"
     flux = str(cfg["flux"]).upper()
     reconstruction = str(cfg["reconstruction"]).upper()
-    time_scheme = str(cfg["time_scheme"]).upper()
-    if time_scheme == "SSP_RK2":
-        time_scheme = "SRK2"
-    return f"{mach}_{flux}_{reconstruction}_{time_scheme}_t{t:.2f}"
+    time_scheme = str(cfg["time_scheme"])
+    return f"{mach}_{flux}_{reconstruction}_{time_scheme}"
 
 def setup_dirs(cfg, mesh):
     # Préparation des dossiers de sortie
@@ -91,9 +89,7 @@ def print_config(cfg, mesh, out_dirs):
     print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     print("-" * 78)
     print("Solveur")
-    reconstruction = "MUSCL" if str(cfg["reconstruction"]).lower() == "muscl" else str(cfg["reconstruction"])
-    time_scheme = "SRK2" if str(cfg["time_scheme"]).upper() == "SSP_RK2" else str(cfg["time_scheme"])
-    print(f"  scheme FVM : {cfg['flux']}, {reconstruction}, {time_scheme}")
+    print(f"  scheme FVM : {cfg['flux']}, {cfg['reconstruction']}, {cfg['time_scheme']}")
     print(f"  CFL : {cfg['CFL']}, tf={cfg['tf']}")
     print("-" * 78)
 
@@ -123,21 +119,17 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
         for i, s in enumerate(fields):
             tex = texs[i]
             title = title_map.get(s, tex)
-            time_scheme = "SRK2" if str(cfg["time_scheme"]).upper() == "SSP_RK2" else str(cfg["time_scheme"])
-            reconstruction = "MUSCL" if str(cfg["reconstruction"]).lower() == "muscl" else str(cfg["reconstruction"])
-            subtitle = f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
+            subtitle = f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {cfg['reconstruction']}, {cfg['time_scheme']}"
             field = Mach_field if s == "M" else prims[:, i]
             mesh.plot_solution(field, labels=tex, filename=out_dirs["fig"] / f"{s}_{snapshot_name}.png",
                 dpi=400, title=title, subtitle=subtitle, cmap=cmaps[i % len(cmaps)])
 
 
-def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s):
+def build_run_summary(cfg, mesh, cd, wall_time_s):
     return {
         "case": cfg["case"],
         "h": mesh.metadata.get("h"),
         "cd": float(cd) if cd is not None else None,
-        "cl": float(cl) if cl is not None else None,
-        "deltaS": float(delta_s) if delta_s is not None else None,
         "wall_time_s": float(wall_time_s),
         "time_scheme": cfg["time_scheme"],
         "flux": cfg["flux"],
@@ -147,9 +139,9 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s):
     }
 
 
-def export_run_summary(out_dirs, summary, snapshot_name):
+def export_run_summary(out_dirs, summary):
     # Exporte le résumé de la simulation (temps de calcul, C_D, etc...) dans un fichier JSON
-    path = out_dirs["res"] / f"{snapshot_name}.json"
+    path = out_dirs["res"] / "summary.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary written : {path}")

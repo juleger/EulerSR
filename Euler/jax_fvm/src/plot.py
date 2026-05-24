@@ -12,7 +12,7 @@ import sys
 
 size = 14
 params = {
-    'text.usetex': True,
+    'text.usetex': False,
     'font.family': 'serif',
     'font.serif': 'cm',  # Computer Modern font
 	'legend.fontsize':size,

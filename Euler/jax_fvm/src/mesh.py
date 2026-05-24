@@ -12,7 +12,7 @@ sys.modules.setdefault("jax_fvm.src.mesh.mesh", sys.modules[__name__])
 
 size = 14
 params = {
-    'text.usetex': True,
+    'text.usetex': False,
     'font.family': 'serif',
     'font.serif': 'cm',  # Computer Modern font
 	'legend.fontsize':size,
@@ -24,6 +24,7 @@ params = {
 plt.rcParams.update(params)
 
 
+@jax.tree_util.register_pytree_node_class
 class Mesh:
     """ Class Mesh to handle the mesh generation and storage of mesh data """
     """
@@ -54,6 +55,31 @@ class Mesh:
         self.metadata = {}
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+    def tree_flatten(self):
+        # Pass array attributes as dynamic leaves so JIT does not treat full mesh
+        # geometry as a single static Python object.
+        children = []
+        child_keys = []
+        aux_data = {}
+
+        for key, value in self.__dict__.items():
+            if isinstance(value, (jax.Array, np.ndarray)):
+                children.append(jnp.asarray(value))
+                child_keys.append(key)
+            else:
+                aux_data[key] = value
+
+        return tuple(children), (tuple(child_keys), aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        child_keys, aux = aux_data
+        mesh = cls()
+        mesh.__dict__.update(aux)
+        for key, value in zip(child_keys, children):
+            setattr(mesh, key, value)
+        return mesh
 
     def mesh_generator(self, info = None, maxV = 5e-3, 
                        x_min = 0., x_max = 1., y_min = 0., y_max = 1.,

@@ -6,7 +6,7 @@ from utils import configure_jax_cpu_runtime
 import jax
 import numpy as np
 import jax.numpy as jnp
-from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name, load_mesh, print_config, setup_dirs
+from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, load_mesh, print_config, setup_dirs
 
 import jax_fvm.src.helper as helper
 import jax_fvm.src.euler_solver as Euler
@@ -26,9 +26,9 @@ CFG = {
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
-    "time_scheme": "SRK2",  # EE | RK2 | RK4 | SRK2 (SSP_RK2)
-    "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
-    "reconstruction": "MUSCL",  # constant | MUSCL
+    "time_scheme": "SSP_RK2",  # EE | RK2 | RK4 | SSP_RK2
+    "flux": "HLLC",  # Rusanov | Roe | HLLC
+    "reconstruction": "muscl",  # constant | muscl
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
     "tf": 2.0,  # Temps final de la simulation
 
@@ -40,7 +40,7 @@ CFG = {
         "results": True,  # Exporter les data de solutions (npy)
         "figures": True,  # Exporter les figures (png)
         "graph": False,  # Exporter la simulation sous forme de graph (npz)
-        "summary": True,  # Exporter le résumé machine-readable (json)
+        "summary": False,  # Exporter le résumé machine-readable (json)
            "n_snaps": 1,  # Nombre de snapshots
            "cmap_crop": {"hot": [0.0, 0.8]},
     },
@@ -59,12 +59,10 @@ def initialize(mesh, cfg):
 
 def run(W, mesh, inlet, cfg, out_dirs):
     # Résolution numérique d'Euler compressible
-    W_initial = W
 
     # Schéma en temps
-    scheme = str(cfg["time_scheme"]).upper()
     fn = {"EE": Euler.time_step_Euler, "RK2": Euler.time_step_RK2, "RK4": Euler.time_step_RK4,
-          "SRK2": Euler.time_step_RK2_SSP, "SSP_RK2": Euler.time_step_RK2_SSP}[scheme]
+          "SSP_RK2": Euler.time_step_RK2_SSP}[cfg["time_scheme"]]
 
     # kwargs pour le solver (flux, reconstruction, etc...)
     kw = dict(gamma=cfg["gamma"], M=1.0, reconstruction=cfg["reconstruction"],
@@ -82,46 +80,30 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
     print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
 
-    print("\n" + "-" * 78)
-    print("Parallélisation JAX :")
-    print(f"  Backend : {jax.default_backend()}")
-    print(f"  Device(s) : {jax.devices()}")
-    print("-" * 78)
     # Warm-up pour compilation JIT
     print("\nCompilation JIT (warm-up)...")
     W = fn(W, mesh, dt, **kw)
     jax.block_until_ready(W) 
 
+    t = 0.0
     W_snapshots = {}
+    ct = 0
 
     print("\nRésolution numérique en cours...")
     start_time = time.time()
 
-    def advance(W, n_steps):
-        def scan_body(W, _):
-            return fn(W, mesh, dt, **kw), None
-        W, _ = jax.lax.scan(scan_body, W, None, length=n_steps)
-        return W
-
-    current_step = 0
-    for snap_step in snap_steps:
-        n_steps = int(snap_step - current_step)
-        if n_steps <= 0:
-            continue
-        W = advance(W, n_steps)
-        current_step = int(snap_step)
-
-        if exp["results"] or exp["figures"]:
-            t_snap = float(current_step * float(dt))
-            export_snapshot(W, mesh, t_snap, cfg, out_dirs, helper)
-            W_snapshots[round(t_snap, 6)] = np.array(W)
-            print(f"    Snap exporté à t={t_snap:.2f}s ({current_step}/{N} steps)")
+    def scan_body(W, _):
+        return fn(W, mesh, dt, **kw), None
     
+    W, _ = jax.lax.scan(scan_body, W, None, length = N)
+    export_snapshot(W, mesh, CFG["tf"], cfg, out_dirs, helper)
+    W_snapshots[round(CFG["tf"], 6)] = np.array(W)
+
     end_time = time.time()
     wall_time_s = end_time - start_time
-    snapshot_name = format_snapshot_name(cfg, current_step * float(dt))
     print("\n" + "-" * 78)
-    print(f"Simulation terminée en {wall_time_s:.2f}s ({n_snaps} snapshots)")
+    print(f"Simulation terminée en {wall_time_s:.2f}s ({ct} snapshots)")
+
     if exp["graph"]:
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
 
@@ -129,15 +111,11 @@ def run(W, mesh, inlet, cfg, out_dirs):
     if cfg["case"] == "diamond":
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
-        C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
-        delta_S = helper.get_entropy_creation(W_initial, W, mesh, gamma=cfg["gamma"])
         print(f"Coefficient de trainée C_D = {C_D:.4f}")
-        print(f"Coefficient de portance C_L = {C_L:.4f}")
-        print(f"Création totale d'entropie deltaS = {delta_S:.6e}")
-        summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s)
+        summary = build_run_summary(cfg, mesh, C_D, wall_time_s)
 
     if exp.get("summary", True) and summary is not None:
-        export_run_summary(out_dirs, summary, snapshot_name)
+        export_run_summary(out_dirs, summary)
     return W
 
 if __name__ == "__main__":

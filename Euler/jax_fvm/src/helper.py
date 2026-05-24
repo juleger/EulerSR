@@ -249,8 +249,13 @@ def get_mach_number(Primitives, gamma = 1.4):
 
 def get_total_entropy(W, mesh, gamma = 1.4):
 	eta = get_specific_entropy(W, gamma = gamma)
-	total_entropy = - jnp.sum(W[...,0] * eta * mesh.area / (gamma - 1), axis = -1)
+	total_entropy = jnp.sum(W[...,0] * eta * mesh.area / (gamma - 1), axis = -1)
 	return total_entropy
+
+def get_entropy_creation(W_initial, W_final, mesh, gamma = 1.4):
+	S_initial = get_total_entropy(W_initial, mesh, gamma = gamma)
+	S_final = get_total_entropy(W_final, mesh, gamma = gamma)
+	return S_final - S_initial
 
 def get_kinetic_energy(Primitives):
     u = Primitives[...,1]
@@ -320,3 +325,27 @@ def get_drag_coefficient(W, mesh, rho_inf, U_inf, L_ref):
     Cd = drag / (q_inf * L_ref)
 
     return Cd
+
+def get_lift_coefficient(W, mesh, rho_inf, U_inf, L_ref):
+	# Calcul du coefficient de portance autour d'un obstacle
+	Prim = getPrimitive(W)
+	P = Prim[:, 3]
+	wall_faces = jnp.where(mesh.face_markers == 2)[0]
+
+	def get_face_data(fid):
+		cell_id = jnp.argmax(jnp.any(mesh.face_connectivity == fid, axis=1))
+		local_face = jnp.argmax(mesh.face_connectivity[cell_id] == fid)
+
+		return cell_id, local_face
+
+	cell_ids, local_faces = jax.vmap(get_face_data)(wall_faces)
+	normals = mesh.normals[cell_ids, local_faces]
+
+	ny = normals[:, 1]
+	ds = mesh.surface[wall_faces]
+	lift = jnp.sum(P[cell_ids] * ny * ds)
+	q_inf = 0.5 * rho_inf * U_inf**2
+
+	Cl = lift / (q_inf * L_ref)
+
+	return Cl
