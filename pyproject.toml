@@ -11,8 +11,7 @@ dependencies = [
     "matplotlib>=3.9",
     "meshio>=5.3.5",
     "meshpy>=2023.1.1",
-    "jax>=0.4.38,<0.5",
-    "jaxlib>=0.4.38,<0.5",
+    "jax[cuda12]>=0.4.38,<0.5",
     "flax>=0.8.5",
     "optax>=0.2.4",
     "scikit-learn>=1.6.1",
@@ -26,6 +25,5 @@ dev = [
     "mypy>=1.10",
 ]
 
-[tool.uv]
-required-environments = []
-#required-environments = ["sys_platform == 'darwin' and platform_machine == 'x86_64'"]
+[tool.setuptools]
+packages = ["Euler", "meshes"]
