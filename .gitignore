@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
-results/
-figures/
 uv.lock
 *.egg-info
+results/**/*.npy 
+logs/
