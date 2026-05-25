@@ -22,7 +22,7 @@ CFG = {
     # Physique
     "rho_inf": 1.0,  # Densité amont
     "p_inf": 1.0,  # Pression amont
-    "Mach": 2.0,  # Nombre de Mach du flux entrant
+    "Mach": 0.9,  # Nombre de Mach du flux entrant
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
@@ -30,7 +30,7 @@ CFG = {
     "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
     "reconstruction": "MUSCL",  # constant | MUSCL
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 3.0,  # Temps final de la simulation
+    "tf": 10.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
 
     # Fichier de maillage
     "mesh_path": "meshes/diamond/diamond_h0.1.npy",

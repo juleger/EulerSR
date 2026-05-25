@@ -10,16 +10,17 @@ import matplotlib.pyplot as plt
 
 sys.modules.setdefault("jax_fvm.src.mesh.mesh", sys.modules[__name__])
 
-size = 14
+
+size = 11
 params = {
 	'text.usetex': False,
     'font.family': 'sans-serif',
     'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
 	'legend.fontsize':size,
     'axes.labelsize' : size,
-	'axes.titlesize' : size +5,
-    'xtick.labelsize' : size-1,
-    'ytick.labelsize' : size-1
+	'axes.titlesize' : size +3,
+    'xtick.labelsize' : size-2,
+    'ytick.labelsize' : size-2
 }
 plt.rcParams.update(params)
 

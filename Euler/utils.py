@@ -116,7 +116,7 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
             "u": "Vitesse $u$",
             "v": "Vitesse $v$",
             "p": "Pression $p$",
-            "M": "Nombre de Mach local $M$",
+            "M": "Mach local $M$",
         }
         fields = ["rho", "u", "v", "p", "M"]
         texs = [r"$\rho$", r"$u$", r"$v$", r"$p$", r"$M$"]

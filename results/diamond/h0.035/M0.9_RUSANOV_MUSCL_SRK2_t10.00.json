@@ -1,0 +1,13 @@
+{
+  "case": "diamond",
+  "h": 0.035,
+  "cd": 0.2362998697411437,
+  "cl": 0.033271573844485515,
+  "deltaS": 0.24338614004266138,
+  "wall_time_s": 141.73007202148438,
+  "time_scheme": "SRK2",
+  "flux": "Rusanov",
+  "reconstruction": "MUSCL",
+  "mach": 0.9,
+  "mesh_path": "meshes/diamond/diamond_h0.035.npy"
+}

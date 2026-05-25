@@ -30,6 +30,11 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
+JAX_CACHE_ROOT="${SCRATCH:-$HOME}/.cache/jax"
+mkdir -p "$JAX_CACHE_ROOT"
+export JAX_ENABLE_COMPILATION_CACHE=true
+export JAX_COMPILATION_CACHE_DIR="$JAX_CACHE_ROOT"
+
 echo "#############################"
 echo "User:" $USER
 echo "SLURM_JOBID:" $SLURM_JOBID
@@ -45,3 +50,4 @@ uv run python Euler/main.py \
   --flux HLLC \
   --time-scheme SRK2 \
   --reconstruction MUSCL
+

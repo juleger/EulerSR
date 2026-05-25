@@ -5,9 +5,9 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=48G
 #SBATCH --time=02:00:00
-#SBATCH --array=0-44%8
+#SBATCH --array=0-39%8
 #SBATCH --output=logs/%x/%A_%a.out
 #SBATCH --error=logs/%x/%A_%a.err
 
@@ -31,6 +31,11 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
+JAX_CACHE_ROOT="${SCRATCH:-$HOME}/.cache/jax"
+mkdir -p "$JAX_CACHE_ROOT"
+export JAX_ENABLE_COMPILATION_CACHE=true
+export JAX_COMPILATION_CACHE_DIR="$JAX_CACHE_ROOT"
+
 meshes=(
   "meshes/diamond/diamond_h0.1.npy"
   "meshes/diamond/diamond_h0.07.npy"
@@ -40,7 +45,6 @@ meshes=(
   "meshes/diamond/diamond_h0.0175.npy"
   "meshes/diamond/diamond_h0.0125.npy"
   "meshes/diamond/diamond_h0.00875.npy"
-  "meshes/diamond/diamond_h0.00625.npy"
 )
 
 fluxes=(Rusanov Tadmor AUSM Roe HLLC)
