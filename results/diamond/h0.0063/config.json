@@ -1,0 +1,26 @@
+{
+  "case": "diamond",
+  "rho_inf": 1.0,
+  "p_inf": 1.0,
+  "Mach": 2.0,
+  "gamma": 1.4,
+  "time_scheme": "SRK2",
+  "flux": "HLLC",
+  "reconstruction": "MUSCL",
+  "CFL": 0.25,
+  "tf": 3.0,
+  "mesh_path": "meshes/diamond/diamond_h0.00625.npy",
+  "export": {
+    "results": true,
+    "figures": true,
+    "graph": false,
+    "summary": true,
+    "n_snaps": 1,
+    "cmap_crop": {
+      "hot": [
+        0.0,
+        0.8
+      ]
+    }
+  }
+}

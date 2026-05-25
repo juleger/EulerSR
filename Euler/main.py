@@ -30,10 +30,10 @@ CFG = {
     "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
     "reconstruction": "MUSCL",  # constant | MUSCL
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 2.0,  # Temps final de la simulation
+    "tf": 3.0,  # Temps final de la simulation
 
     # Fichier de maillage
-    "mesh_path": "meshes/diamond/diamond_h0.05.npy",
+    "mesh_path": "meshes/diamond/diamond_h0.1.npy",
 
     # Export
     "export": {
@@ -50,7 +50,7 @@ def initialize(mesh, cfg):
     # Initialisation des conditions initiales
     rho_inf, p_inf = cfg["rho_inf"], cfg["p_inf"]
     gamma, Mach = cfg["gamma"], cfg["Mach"]
-    c_inf = float(jnp.sqrt(gamma * p_inf / rho_inf))
+    c_inf = (gamma * p_inf / rho_inf) ** 0.5
     prim0 = jnp.array([rho_inf, Mach * c_inf, 0.0, p_inf])
     W = helper.getConserved(jnp.repeat(prim0[None], len(mesh.area), axis=0), gamma=gamma, M=1.0)
     inlet = helper.getConserved(prim0[None], gamma=gamma, M=1.0)[0]

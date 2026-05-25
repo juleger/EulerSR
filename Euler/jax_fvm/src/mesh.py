@@ -12,14 +12,14 @@ sys.modules.setdefault("jax_fvm.src.mesh.mesh", sys.modules[__name__])
 
 size = 14
 params = {
-    'text.usetex': False,
-    'font.family': 'serif',
-    'font.serif': 'cm',  # Computer Modern font
+	'text.usetex': False,
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
 	'legend.fontsize':size,
     'axes.labelsize' : size,
-	'axes.titlesize' : size +2,
-    'xtick.labelsize' : size+1,
-    'ytick.labelsize' : size+1
+	'axes.titlesize' : size +5,
+    'xtick.labelsize' : size-1,
+    'ytick.labelsize' : size-1
 }
 plt.rcParams.update(params)
 
@@ -182,15 +182,20 @@ class Mesh:
         return boundaries_clean, markers_clean[:len(boundaries_clean)]
 
     def print_statistics(self):
-        x_min, x_max = self.points[:, 0].min(), self.points[:, 0].max()
-        y_min, y_max = self.points[:, 1].min(), self.points[:, 1].max()
+        points = np.asarray(self.points)
+        faces = np.asarray(self.faces)
+        tris = np.asarray(self.tris)
+        areas = np.asarray(self.area)
+        face_markers_arr = np.asarray(self.face_markers)
+
+        x_min, x_max = points[:, 0].min(), points[:, 0].max()
+        y_min, y_max = points[:, 1].min(), points[:, 1].max()
         Lx, Ly = x_max - x_min, y_max - y_min
         
-        n_nodes = len(self.points)
-        n_edges = len(self.faces)
-        n_triangles = len(self.tris)
-        
-        areas = self.area
+        n_nodes = len(points)
+        n_edges = len(faces)
+        n_triangles = len(tris)
+
         avg_area = float(areas.mean())
         h_avg = (4 * avg_area / np.sqrt(3)) ** 0.5
         
@@ -204,7 +209,6 @@ class Mesh:
         
         # Stats par marqueur (afficher juste les edges pour éviter ambiguïté des noeuds partagés)
         print(f"\nMarqueurs:")
-        face_markers_arr = np.array(self.face_markers)
         unique_markers = np.unique(face_markers_arr)
         
         for marker in sorted(unique_markers):

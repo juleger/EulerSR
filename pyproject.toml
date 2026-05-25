@@ -11,9 +11,7 @@ dependencies = [
     "matplotlib>=3.9",
     "meshio>=5.3.5",
     "meshpy>=2023.1.1",
-    "jax[cuda12]>=0.4.38,<0.5",
-    "flax>=0.8.5",
-    "optax>=0.2.4",
+    "jax[cuda12]==0.4.26",
     "scikit-learn>=1.6.1",
 ]
 

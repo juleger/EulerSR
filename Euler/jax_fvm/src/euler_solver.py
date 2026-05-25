@@ -14,13 +14,13 @@ sys.modules.setdefault("jax_fvm.src.solvers.Euler.Euler", sys.modules[__name__])
 size = 14
 params = {
 	'text.usetex': False,
-    'font.family': 'serif',
-    'font.serif': 'cm',  # Computer Modern font
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
 	'legend.fontsize':size,
     'axes.labelsize' : size,
-	'axes.titlesize' : size +2,
-    'xtick.labelsize' : size+1,
-    'ytick.labelsize' : size+1
+	'axes.titlesize' : size+5,
+    'xtick.labelsize' : size-1,
+    'ytick.labelsize' : size-1
 }
 plt.rcParams.update(params)
 

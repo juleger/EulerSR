@@ -12,14 +12,14 @@ import sys
 
 size = 14
 params = {
-    'text.usetex': False,
-    'font.family': 'serif',
-    'font.serif': 'cm',  # Computer Modern font
+	'text.usetex': False,
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
 	'legend.fontsize':size,
     'axes.labelsize' : size,
-	'axes.titlesize' : size +2,
-    'xtick.labelsize' : size+1,
-    'ytick.labelsize' : size+1
+	'axes.titlesize' : size +5,
+    'xtick.labelsize' : size-1,
+    'ytick.labelsize' : size-1
 }
 plt.rcParams.update(params)
 
@@ -74,9 +74,9 @@ def plot_solution(mesh, field_data, labels = r'$\rho$', cmap=None, dpi = 300, fi
     ax.set_ylim(ymin, ymax)
     if title:
         fig.subplots_adjust(top=0.85)
-        fig.suptitle(title, y=1.0, fontweight='bold', fontsize=plt.rcParams['axes.titlesize']+4)
+        fig.suptitle(title, y=1.0, fontweight='bold', fontsize=plt.rcParams['axes.titlesize'])
     if subtitle:
-        fig.text(0.5, 0.945, subtitle, ha='center', va='top', fontsize=plt.rcParams['axes.titlesize']-4)
+        fig.text(0.5, 0.945, subtitle, ha='center', va='top', fontsize=plt.rcParams['axes.labelsize'])
     clb = fig.colorbar(tpc, cax = cax)
     # place colorbar label on the right side (not on top)
     clb.ax.yaxis.set_label_position('right')
