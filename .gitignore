@@ -4,3 +4,5 @@ uv.lock
 *.egg-info
 results/**/*.npy 
 logs/
+results_bkp/
+.DS_Store

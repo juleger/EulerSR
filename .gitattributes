@@ -382,3 +382,13 @@ figures/diamond/h0.035/rho_M0.9_HLLC_MUSCL_SRK2_t10.00.png filter=lfs diff=lfs m
 figures/diamond/h0.05/M_M0.9_HLLC_MUSCL_SRK2_t10.00.png filter=lfs diff=lfs merge=lfs -text
 figures/diamond/h0.07/M_M0.9_HLLC_MUSCL_SRK2_t10.00.png filter=lfs diff=lfs merge=lfs -text
 figures/diamond/h0.07/M_M0.9_RUSANOV_MUSCL_SRK2_t10.00.png filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.00875.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.0125.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.0175.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.1.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.2.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.00625.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.025.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.035.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.05.npy filter=lfs diff=lfs merge=lfs -text
+meshes/bump/bump_h0.07.npy filter=lfs diff=lfs merge=lfs -text
