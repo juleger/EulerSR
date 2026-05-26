@@ -20,10 +20,6 @@ module purge
 module load cuda
 module load uv
 
-echo "PTXAS utilisé:"
-which ptxas
-ptxas --version
-
 export MPLBACKEND=Agg
 export JAX_ENABLE_X64=true
 export JAX_PLATFORM_NAME=gpu
@@ -64,11 +60,11 @@ echo "GPU Info:"
 nvidia-smi
 echo "#############################"
 
-echo "[$(date +%T)] Starting flux=${flux} on mesh=${mesh}"
+echo "[$(date +%T)] Starting : mesh=${mesh}"
 
 uv run python Euler/main.py \
   --case bump \
   --mesh-path "$mesh" \
-  --flux HLLC \
+  --flux Rusanov \
   --time-scheme SRK2 \
-  --reconstruction MUSCL
+  --reconstruction constant

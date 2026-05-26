@@ -20,10 +20,6 @@ module purge
 module load cuda
 module load uv
 
-echo "PTXAS utilisé:"
-which ptxas
-ptxas --version
-
 export MPLBACKEND=Agg
 export JAX_ENABLE_X64=true
 export JAX_PLATFORM_NAME=gpu

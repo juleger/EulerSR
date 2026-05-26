@@ -1,0 +1,13 @@
+{
+  "case": "bump",
+  "h": 0.025,
+  "cd": 0.06518745089055368,
+  "cl": -0.6938602848492433,
+  "deltaS": 0.06131787627055689,
+  "wall_time_s": 30.4195659160614,
+  "time_scheme": "SRK2",
+  "flux": "HLLC",
+  "reconstruction": "MUSCL",
+  "mach": 1.5,
+  "mesh_path": "meshes/bump/bump_h0.025.npy"
+}

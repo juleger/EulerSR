@@ -1,0 +1,13 @@
+{
+  "case": "bump",
+  "h": 0.00875,
+  "cd": 0.06512593643367295,
+  "cl": -0.6965010265008605,
+  "deltaS": 0.07104008809297935,
+  "wall_time_s": 52.53679156303406,
+  "time_scheme": "EE",
+  "flux": "Rusanov",
+  "reconstruction": "constant",
+  "mach": 1.5,
+  "mesh_path": "meshes/bump/bump_h0.00875.npy"
+}
