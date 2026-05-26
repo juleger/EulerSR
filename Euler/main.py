@@ -17,12 +17,12 @@ import time
 CFG = {
     # Configuration globale, modifiable via CLI
 
-    "case": "diamond",  # "bump" | "diamond"
+    "case": "bump",  # "bump" | "diamond"
 
     # Physique
     "rho_inf": 1.0,  # Densité amont
     "p_inf": 1.0,  # Pression amont
-    "Mach": 0.9,  # Nombre de Mach du flux entrant
+    "Mach": 1.5,  # Nombre de Mach du flux entrant
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
@@ -30,10 +30,10 @@ CFG = {
     "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
     "reconstruction": "MUSCL",  # constant | MUSCL
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 10.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
+    "tf": 2.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
 
     # Fichier de maillage
-    "mesh_path": "meshes/diamond/diamond_h0.1.npy",
+    "mesh_path": "meshes/bump/bump_h0.05.npy",
 
     # Export
     "export": {
@@ -126,7 +126,7 @@ def run(W, mesh, inlet, cfg, out_dirs):
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
 
     summary = None
-    if cfg["case"] == "diamond":
+    if cfg["case"] in ("diamond", "bump"):
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])

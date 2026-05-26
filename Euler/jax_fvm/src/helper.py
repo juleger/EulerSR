@@ -218,11 +218,25 @@ def BC_noslip_wall(W_R, W_L, mesh, bc_type = 2):
 	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_b, W_R)
 	return W_R	
 
+
+def _mesh_metadata(mesh):
+	metadata = getattr(mesh, "metadata", None)
+	return metadata if isinstance(metadata, dict) else {}
+
 def BC_state(W_R, W_L, mesh, **kwargs):
-	W_R = jax.lax.cond(kwargs.get('flag_NS', False),
-						lambda x, y: BC_noslip_wall(x, y, mesh, bc_type=2),
-						lambda x, y: BC_slipwall(x, y, mesh, bc_type=2),
-						W_R, W_L)
+	metadata = _mesh_metadata(mesh)
+	wall_markers = kwargs.get('wall_markers', metadata.get('wall_markers', [2]))
+	try:
+		wall_markers = tuple(int(marker) for marker in wall_markers)
+	except TypeError:
+		wall_markers = (int(wall_markers),)
+
+	if kwargs.get('flag_NS', False):
+		for marker in wall_markers:
+			W_R = BC_noslip_wall(W_R, W_L, mesh, bc_type=marker)
+	else:
+		for marker in wall_markers:
+			W_R = BC_slipwall(W_R, W_L, mesh, bc_type=marker)
 	W_R = BC_inflow(W_R, mesh, bc_type=3, value = kwargs.get('value', jnp.array([1.0, 1.0, 1.0, 1.0])))  # (supersonic inlet)
 	W_R = BC_outflow(W_R, W_L, mesh, bc_type=4)  # (free outflow)
 	W_R = BC_subsonic_inlet(W_R, W_L, mesh, bc_type=5)  # (subsonic inlet)
@@ -303,34 +317,36 @@ def get_palinstrophy(grad, mesh):
 
 def get_drag_coefficient(W, mesh, rho_inf, U_inf, L_ref):
 	# Calcul du coefficient de trainée autour d'un obstacle 
-    Prim = getPrimitive(W)
-    P = Prim[:, 3]
-    wall_faces = jnp.where(mesh.face_markers == 2)[0]
+	Prim = getPrimitive(W)
+	P = Prim[:, 3]
+	wall_marker = int(_mesh_metadata(mesh).get('force_marker', 2))
+	wall_faces = jnp.where(mesh.face_markers == wall_marker)[0]
 
-    def get_face_data(fid):
-        cell_id = jnp.argmax(jnp.any(mesh.face_connectivity == fid, axis=1))
-        local_face = jnp.argmax(mesh.face_connectivity[cell_id] == fid)
+	def get_face_data(fid):
+		cell_id = jnp.argmax(jnp.any(mesh.face_connectivity == fid, axis=1))
+		local_face = jnp.argmax(mesh.face_connectivity[cell_id] == fid)
 
-        return cell_id, local_face
+		return cell_id, local_face
 
-    cell_ids, local_faces = jax.vmap(get_face_data)(wall_faces)
-    normals = mesh.normals[cell_ids, local_faces]
+	cell_ids, local_faces = jax.vmap(get_face_data)(wall_faces)
+	normals = mesh.normals[cell_ids, local_faces]
 
-    nx = normals[:, 0]
-    ny = normals[:, 1]
-    ds = mesh.surface[wall_faces]
-    drag = jnp.sum(P[cell_ids] * nx * ds)
-    q_inf = 0.5 * rho_inf * U_inf**2
+	nx = normals[:, 0]
+	ny = normals[:, 1]
+	ds = mesh.surface[wall_faces]
+	drag = jnp.sum(P[cell_ids] * nx * ds)
+	q_inf = 0.5 * rho_inf * U_inf**2
 
-    Cd = drag / (q_inf * L_ref)
+	Cd = drag / (q_inf * L_ref)
 
-    return Cd
+	return Cd
 
 def get_lift_coefficient(W, mesh, rho_inf, U_inf, L_ref):
 	# Calcul du coefficient de portance autour d'un obstacle
 	Prim = getPrimitive(W)
 	P = Prim[:, 3]
-	wall_faces = jnp.where(mesh.face_markers == 2)[0]
+	wall_marker = int(_mesh_metadata(mesh).get('force_marker', 2))
+	wall_faces = jnp.where(mesh.face_markers == wall_marker)[0]
 
 	def get_face_data(fid):
 		cell_id = jnp.argmax(jnp.any(mesh.face_connectivity == fid, axis=1))

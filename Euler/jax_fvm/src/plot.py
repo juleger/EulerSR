@@ -16,10 +16,10 @@ params = {
     'font.family': 'sans-serif',
     'font.sans-serif': ['Helvetica', 'Arial', 'DejaVu Sans'],
 	'legend.fontsize':size,
-    'axes.labelsize' : size,
+    'axes.labelsize' : size-1,
 	'axes.titlesize' : size +3,
-    'xtick.labelsize' : size-2,
-    'ytick.labelsize' : size-2
+    'xtick.labelsize' : size-4,
+    'ytick.labelsize' : size-4
 }
 plt.rcParams.update(params)
 
@@ -29,10 +29,11 @@ sys.modules.setdefault("jax_fvm.src.mesh.plot", sys.modules[__name__])
 
 
 def draw_diamond_outline(ax, mesh):
-    if getattr(mesh, "metadata", {}).get("case") != "diamond":
+    if getattr(mesh, "metadata", {}).get("case") not in {"diamond", "bump"}:
         return
 
-    wall_faces = np.asarray(mesh.faces)[np.asarray(mesh.face_markers) == 2]
+    wall_marker = int(getattr(mesh, "metadata", {}).get("force_marker", 2))
+    wall_faces = np.asarray(mesh.faces)[np.asarray(mesh.face_markers) == wall_marker]
     for face in wall_faces:
         pts = np.asarray(mesh.points)[face]
         ax.plot(pts[:, 0], pts[:, 1], color='black', lw=1.0, zorder=5)
@@ -54,35 +55,78 @@ def plot_mesh(mesh, dpi = 300, filename = 'mesh.png'):
     plt.savefig(filename, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
 
-def plot_solution(mesh, field_data, labels = r'$\rho$', cmap=None, dpi = 300, filename = 'solution.png', title=None, subtitle=None):
-    xmin = mesh.points[:,0].min()
-    xmax = mesh.points[:,0].max()
-    ymin = mesh.points[:,1].min()
-    ymax = mesh.points[:,1].max()
+def plot_solution(mesh, field_data, labels=r'$\rho$', cmap=None, dpi=300,
+                  filename='solution.png', title=None, subtitle=None):
+    xmin = mesh.points[:, 0].min()
+    xmax = mesh.points[:, 0].max()
+    ymin = mesh.points[:, 1].min()
+    ymax = mesh.points[:, 1].max()
 
     triang = mtri.Triangulation(mesh.points[:, 0], mesh.points[:, 1], mesh.tris)
 
-    fig, ax = plt.subplots(dpi = dpi)
+    fig, ax = plt.subplots(dpi=dpi)
     ax.set_aspect('equal')
+
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.05)
-    tpc = ax.tripcolor(triang, facecolors = field_data, cmap=cmap)
+
+    tpc = ax.tripcolor(triang, facecolors=field_data, cmap=cmap)
     draw_diamond_outline(ax, mesh)
     ax.set_xlabel(r'$x$')
     ax.set_ylabel(r'$y$')
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-    if title:
-        fig.subplots_adjust(top=0.9)
-        fig.suptitle(title, y=1.0, fontweight='bold', fontsize=plt.rcParams['axes.titlesize'])
-    if subtitle:
-        fig.text(0.5, 0.95, subtitle, ha='center', va='top', fontsize=plt.rcParams['axes.labelsize']-2)
-    clb = fig.colorbar(tpc, cax = cax)
-    # place colorbar label on the right side (not on top)
+
+    clb = fig.colorbar(tpc, cax=cax)
     clb.ax.yaxis.set_label_position('right')
     clb.ax.yaxis.set_ticks_position('right')
     clb.ax.set_ylabel(labels)
-    
+
+    finite_data = np.asarray(field_data, dtype=float)
+    finite_data = finite_data[np.isfinite(finite_data)]
+    if finite_data.size > 0:
+        vmin = float(np.min(finite_data))
+        vmax = float(np.max(finite_data))
+        if np.isclose(vmin, vmax):
+            clb.set_ticks([vmin])
+        else:
+            clb.set_ticks(np.linspace(vmin, vmax, num=7))
+    clb.ax.tick_params(labelsize=7)
+
+    if title or subtitle:
+        # Force le rendu de la géométrie pour pouvoir lire les positions réelles
+        fig.canvas.draw()
+
+        # Coordonnée y du bord supérieur des axes, en coordonnées figure (0-1)
+        axes_top_fig = ax.get_position().y1
+
+        title_size   = plt.rcParams['axes.titlesize']
+        sub_size     = plt.rcParams['axes.labelsize'] - 2
+        # Conversion points -> fraction de figure
+        pt_to_fig    = 1.0 / (fig.get_size_inches()[1] * dpi)
+        gap          = 30 * pt_to_fig   # 4 pt entre axes et subtitle (ou title seul)
+        interline    = 60 * pt_to_fig   # 4 pt entre title et subtitle
+
+        if title and subtitle:
+            sub_y   = axes_top_fig + gap + sub_size  * pt_to_fig
+            title_y = sub_y        + interline + title_size * pt_to_fig
+            fig.text(0.5, title_y, title,
+                     ha='center', va='bottom', fontweight='bold',
+                     fontsize=title_size)
+            fig.text(0.5, sub_y, subtitle,
+                     ha='center', va='bottom',
+                     fontsize=sub_size)
+        elif title:
+            title_y = axes_top_fig + gap + title_size * pt_to_fig
+            fig.text(0.5, title_y, title,
+                     ha='center', va='bottom', fontweight='bold',
+                     fontsize=title_size)
+        else:  # subtitle seul
+            sub_y = axes_top_fig + gap + sub_size * pt_to_fig
+            fig.text(0.5, sub_y, subtitle,
+                     ha='center', va='bottom',
+                     fontsize=sub_size)
+
     plt.savefig(filename, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
 
