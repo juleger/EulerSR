@@ -6,7 +6,7 @@ from utils import configure_jax_cpu_runtime
 import jax
 import numpy as np
 import jax.numpy as jnp
-from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name, load_mesh, plot_residual_history, print_config, setup_dirs
+from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name, load_mesh, print_config, setup_dirs
 
 import jax_fvm.src.helper as helper
 import jax_fvm.src.euler_solver as Euler
@@ -125,6 +125,10 @@ def run(W, mesh, inlet, cfg, out_dirs):
     if exp["graph"]:
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
 
+    final_residual = Euler.residual(W, mesh, **kw)
+    stationarity_rel = float(jnp.linalg.norm(dt * final_residual) / (jnp.linalg.norm(W) + 1e-16))
+    print(f"Résidu final relatif ||dt·R(W)||/||W|| = {stationarity_rel:.3e}")
+
     summary = None
     if cfg["case"] in ("diamond", "bump"):
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
@@ -145,7 +149,8 @@ def run(W, mesh, inlet, cfg, out_dirs):
         if max_grad_p is not None:
             print(f"Gradient max de pression |grad p|_max = {max_grad_p:.6e}")
         summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s, delta_m=delta_m,
-            mass_in=mass_in, mass_out=mass_out, max_pressure_gradient=max_grad_p, delta_m_rel=delta_m_rel)
+            mass_in=mass_in, mass_out=mass_out, max_pressure_gradient=max_grad_p, delta_m_rel=delta_m_rel,
+            stationarity_rel=stationarity_rel)
 
     if exp.get("summary", True) and summary is not None:
         export_run_summary(out_dirs, summary, snapshot_name)

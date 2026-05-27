@@ -138,7 +138,6 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
             wall_profile["x"],
             wall_profile["y"],
             wall_profile["mach"],
-            wall_profile["pressure"],
         ])
 
         if exp["results"]:
@@ -148,13 +147,11 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
             subtitle = f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
             mesh.plot_profile(wall_profile["s"], wall_profile["mach"], labels=r'$M_{wall}$', filename=out_dirs["fig"] / f"Mwall_{snapshot_name}.png",
                 dpi=400, title="Profil de Mach de paroi", subtitle=subtitle, xlabel=r"Abscisse curviligne $s$")
-            mesh.plot_profile(wall_profile["s"], wall_profile["pressure"], labels=r'$p_{wall}$', filename=out_dirs["fig"] / f"pwall_{snapshot_name}.png",
-                dpi=400, title="Profil de pression de paroi", subtitle=subtitle, xlabel=r"Abscisse curviligne $s$")
 
     return diagnostics
 
 
-def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, delta_m=None, mass_in=None, mass_out=None, max_pressure_gradient=None, delta_m_rel=None):
+def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, delta_m=None, mass_in=None, mass_out=None, max_pressure_gradient=None, delta_m_rel=None, stationarity_rel=None):
     return {
         "case": cfg["case"],
         "h": mesh.metadata.get("h"),
@@ -166,6 +163,7 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, delta_m=None, mas
         "mass_in": float(mass_in) if mass_in is not None else None,
         "mass_out": float(mass_out) if mass_out is not None else None,
         "max_grad_p": float(max_pressure_gradient) if max_pressure_gradient is not None else None,
+        "stationarity_rel": float(stationarity_rel) if stationarity_rel is not None else None,
         "wall_time_s": float(wall_time_s),
         "time_scheme": cfg["time_scheme"],
         "flux": cfg["flux"],
