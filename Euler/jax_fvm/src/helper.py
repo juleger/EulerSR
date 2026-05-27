@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import jax
+import numpy as np
 import sys
 
 sys.modules.setdefault("jax_fvm.src.solvers.helper", sys.modules[__name__])
@@ -365,3 +366,161 @@ def get_lift_coefficient(W, mesh, rho_inf, U_inf, L_ref):
 	Cl = lift / (q_inf * L_ref)
 
 	return Cl
+
+
+def _mesh_arrays(mesh):
+	points = np.asarray(mesh.points)
+	faces = np.asarray(mesh.faces)
+	face_markers = np.asarray(mesh.face_markers)
+	face_connectivity = np.asarray(mesh.face_connectivity)
+	return points, faces, face_markers, face_connectivity
+
+
+def _face_owner_data(face_connectivity, face_ids):
+	cell_ids = []
+	local_faces = []
+	for face_id in np.asarray(face_ids, dtype=np.int32):
+		matches = np.argwhere(face_connectivity == int(face_id))
+		if matches.size == 0:
+			continue
+		cell_id, local_face = matches[0]
+		cell_ids.append(int(cell_id))
+		local_faces.append(int(local_face))
+	return np.asarray(cell_ids, dtype=np.int32), np.asarray(local_faces, dtype=np.int32)
+
+
+def _lower_wall_face_ids(mesh):
+	metadata = _mesh_metadata(mesh)
+	points, faces, face_markers, _ = _mesh_arrays(mesh)
+	wall_markers = metadata.get('wall_markers', [2])
+	try:
+		wall_markers = tuple(int(marker) for marker in wall_markers)
+	except TypeError:
+		wall_markers = (int(wall_markers),)
+
+	wall_mask = np.isin(face_markers, wall_markers)
+	if not np.any(wall_mask):
+		return np.empty(0, dtype=np.int32)
+
+	face_midpoints = np.mean(points[faces], axis=1)
+	y_threshold = 0.5 * float(points[:, 1].min() + points[:, 1].max())
+	lower_mask = wall_mask & (face_midpoints[:, 1] <= y_threshold)
+	face_ids = np.where(lower_mask)[0].astype(np.int32)
+	if face_ids.size == 0:
+		face_ids = np.where(wall_mask)[0].astype(np.int32)
+
+	selected_midpoints = face_midpoints[face_ids]
+	order = np.lexsort((selected_midpoints[:, 1], selected_midpoints[:, 0]))
+	return face_ids[order]
+
+
+def get_wall_profile(W, mesh, gamma=1.4, M=1.0):
+	points, faces, _, face_connectivity = _mesh_arrays(mesh)
+	face_ids = _lower_wall_face_ids(mesh)
+	if face_ids.size == 0:
+		return {
+			's': np.empty(0, dtype=float),
+			'x': np.empty(0, dtype=float),
+			'y': np.empty(0, dtype=float),
+			'mach': np.empty(0, dtype=float),
+			'pressure': np.empty(0, dtype=float),
+			'face_ids': face_ids,
+		}
+
+	cell_ids, _ = _face_owner_data(face_connectivity, face_ids)
+	face_midpoints = np.mean(points[faces[face_ids]], axis=1)
+	order = np.lexsort((face_midpoints[:, 1], face_midpoints[:, 0]))
+	face_ids = face_ids[order]
+	cell_ids = cell_ids[order]
+	face_midpoints = face_midpoints[order]
+
+	prim = np.asarray(getPrimitive(W, gamma=gamma, M=M))
+	wall_prim = prim[cell_ids]
+	rho = wall_prim[:, 0]
+	u = wall_prim[:, 1]
+	v = wall_prim[:, 2]
+	pressure = wall_prim[:, 3]
+	sound_speed = np.sqrt(np.maximum(gamma * pressure / rho, 1e-14))
+	mach = np.sqrt(u ** 2 + v ** 2) / sound_speed
+
+	if face_midpoints.shape[0] == 0:
+		s = np.empty(0, dtype=float)
+	else:
+		segment_lengths = np.linalg.norm(np.diff(face_midpoints, axis=0), axis=1) if face_midpoints.shape[0] > 1 else np.empty(0, dtype=float)
+		s = np.concatenate(([0.0], np.cumsum(segment_lengths)))
+
+	return {
+		's': s,
+		'x': face_midpoints[:, 0],
+		'y': face_midpoints[:, 1],
+		'mach': np.asarray(mach, dtype=float),
+		'pressure': np.asarray(pressure, dtype=float),
+		'face_ids': face_ids,
+	}
+
+
+def get_pressure_gradient_magnitude(W, mesh, inlet_state, gamma=1.4, M=1.0):
+	Prim = getPrimitive(W, gamma=gamma, M=M)
+	W_L = jnp.repeat(W[..., None, :], 3, axis=-2)
+	W_R = W[mesh.neighbors]
+	W_R = BC_state(W_R, W_L, mesh, value=inlet_state)
+	Prim_R = getPrimitive(W_R, gamma=gamma, M=M)
+
+	P_L = Prim[..., 3][..., None]
+	P_L = jnp.repeat(P_L, 3, axis=1)[..., None]
+	P_R = Prim_R[..., 3][..., None]
+	grad_p = getgradientLSQ(P_L, P_R, mesh)
+	grad_p_mag = jnp.linalg.norm(grad_p[..., 0], axis=-1)
+	return grad_p_mag
+
+
+def get_mass_balance(W, mesh, gamma=1.4, M=1.0):
+	metadata = _mesh_metadata(mesh)
+	_, _, face_markers, face_connectivity = _mesh_arrays(mesh)
+	Prim = np.asarray(getPrimitive(W, gamma=gamma, M=M))
+	normals = np.asarray(mesh.normals)
+	surface = np.asarray(mesh.surface)
+
+	inlet_marker = int(metadata.get('inlet_marker', 3))
+	outlet_marker = int(metadata.get('outlet_marker', 4))
+
+	def boundary_mass_flux(marker):
+		face_ids = np.where(face_markers == marker)[0].astype(np.int32)
+		if face_ids.size == 0:
+			return 0.0
+		cell_ids, local_faces = _face_owner_data(face_connectivity, face_ids)
+		face_normals = normals[cell_ids, local_faces]
+		face_lengths = surface[face_ids]
+		rho = Prim[cell_ids, 0]
+		u = Prim[cell_ids, 1]
+		v = Prim[cell_ids, 2]
+		flux = rho * (u * face_normals[:, 0] + v * face_normals[:, 1]) * face_lengths
+		return float(np.sum(flux))
+
+	inlet_flux_outward = boundary_mass_flux(inlet_marker)
+	outlet_flux_outward = boundary_mass_flux(outlet_marker)
+	mass_in = -inlet_flux_outward
+	mass_out = outlet_flux_outward
+	delta_m = mass_out - mass_in
+	rel_delta_m = delta_m / max(abs(mass_in), 1e-12)
+
+	return {
+		'mass_in': float(mass_in),
+		'mass_out': float(mass_out),
+		'deltaM': float(delta_m),
+		'deltaM_rel': float(rel_delta_m),
+	}
+
+
+def get_bump_diagnostics(W, mesh, inlet_state, gamma=1.4, M=1.0):
+	wall_profile = get_wall_profile(W, mesh, gamma=gamma, M=M)
+	grad_p_mag = get_pressure_gradient_magnitude(W, mesh, inlet_state, gamma=gamma, M=M)
+	mass_balance = get_mass_balance(W, mesh, gamma=gamma, M=M)
+	grad_p_mag = np.asarray(grad_p_mag)
+
+	return {
+		'wall_profile': wall_profile,
+		'grad_p_mag': grad_p_mag,
+		'max_grad_p': float(np.max(grad_p_mag)) if grad_p_mag.size else 0.0,
+		**mass_balance,
+	}

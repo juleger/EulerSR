@@ -130,6 +130,45 @@ def plot_solution(mesh, field_data, labels=r'$\rho$', cmap=None, dpi=300,
     plt.savefig(filename, dpi=dpi, bbox_inches='tight')
     plt.close(fig)
 
+
+def plot_profile(x_data, y_data, labels=r'$M_{wall}$', dpi=300, filename='profile.png',
+                 title=None, subtitle=None, xlabel=r'$s$'):
+    x_data = np.asarray(x_data, dtype=float)
+    y_data = np.asarray(y_data, dtype=float)
+
+    fig, ax = plt.subplots(dpi=dpi, figsize=(6.5, 4.5))
+    ax.plot(x_data, y_data, color='tab:blue', lw=2.0)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(labels)
+    ax.grid(True, linestyle='--', alpha=0.4)
+
+    if x_data.size > 0:
+        ax.set_xlim(float(np.min(x_data)), float(np.max(x_data)))
+
+    if title or subtitle:
+        fig.canvas.draw()
+        axes_top_fig = ax.get_position().y1
+        title_size = plt.rcParams['axes.titlesize']
+        sub_size = plt.rcParams['axes.labelsize'] - 2
+        pt_to_fig = 1.0 / (fig.get_size_inches()[1] * dpi)
+        gap = 24 * pt_to_fig
+        interline = 42 * pt_to_fig
+
+        if title and subtitle:
+            sub_y = axes_top_fig + gap + sub_size * pt_to_fig
+            title_y = sub_y + interline + title_size * pt_to_fig
+            fig.text(0.5, title_y, title, ha='center', va='bottom', fontweight='bold', fontsize=title_size)
+            fig.text(0.5, sub_y, subtitle, ha='center', va='bottom', fontsize=sub_size)
+        elif title:
+            title_y = axes_top_fig + gap + title_size * pt_to_fig
+            fig.text(0.5, title_y, title, ha='center', va='bottom', fontweight='bold', fontsize=title_size)
+        else:
+            sub_y = axes_top_fig + gap + sub_size * pt_to_fig
+            fig.text(0.5, sub_y, subtitle, ha='center', va='bottom', fontsize=sub_size)
+
+    plt.savefig(filename, dpi=dpi, bbox_inches='tight')
+    plt.close(fig)
+
 def plot_contour_solution(mesh, field_data, **kwargs):
     xmin = mesh.points[:,0].min()
     xmax = mesh.points[:,0].max()

@@ -430,6 +430,9 @@ class Mesh:
     def plot_solution(self, field_data, *args, **kwargs):
         plot.plot_solution(self, field_data, *args, **kwargs)
     
+    def plot_profile(self, x_data, y_data, *args, **kwargs):
+        plot.plot_profile(x_data, y_data, *args, **kwargs)
+
     def plot_contour_solution(self, field_data, *args, **kwargs):
         plot.plot_contour_solution(self, field_data, *args, **kwargs)
 
