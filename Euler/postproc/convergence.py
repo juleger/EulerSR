@@ -1,119 +1,166 @@
-from pathlib import Path
+from __future__ import annotations
+
+import argparse
+import csv
 import json
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from pathlib import Path
 
 
 repo_root = Path(__file__).resolve().parents[2]
 
 
-def load_records(results_root: Path, case: str, mach_target: float):
-    records_by_flux = {}
+SUMMARY_COLUMNS = [
+    "h",
+    "cd",
+    "cl",
+    "deltaS",
+    "deltaM",
+    "deltaM_rel",
+    "mass_in",
+    "mass_out",
+    "max_grad_p",
+    "wall_time_s",
+]
+
+
+def _to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_value(value):
+    if value is None:
+        return "all"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _format_csv_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return value
+
+
+def load_summary_rows(
+    results_root: Path,
+    case: str = "bump",
+    mach: float | None = None,
+    flux: str | None = None,
+    reconstruction: str | None = None,
+    time_scheme: str | None = None,
+):
     results_root = Path(results_root)
+    case_names = [case]
+    rows = []
 
-    for json_path in sorted((results_root / case).rglob('*.json')):
-        if json_path.name == 'config.json':
-            continue
-        try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-        except Exception:
+    for case_name in case_names:
+        case_root = results_root / case_name
+        if not case_root.exists():
             continue
 
-        mach = data.get('mach')
-        h = data.get('h')
-        flux = data.get('flux')
-        cd = data.get('cd')
-        cl = data.get('cl')
-        delta_s = data.get('deltaS')
+        for json_path in sorted(case_root.rglob("*.json")):
+            if json_path.name == "config.json":
+                continue
 
-        if mach is None or h is None or flux is None:
-            continue
-        try:
-            mach = float(mach)
-            h = float(h)
-        except Exception:
-            continue
+            try:
+                data = json.loads(json_path.read_text())
+            except Exception:
+                continue
 
-        if abs(mach - float(mach_target)) > 1e-8:
-            continue
-        if cd is None or cl is None or delta_s is None:
-            continue
+            h = _to_float(data.get("h"))
+            row_mach = _to_float(data.get("mach"))
+            if h is None or row_mach is None:
+                continue
 
-        flux_key = str(flux).upper()
-        records_by_flux.setdefault(flux_key, []).append({'h': h, 'cd': float(cd), 'cl': float(cl), 'deltaS': float(delta_s), 'path': json_path})
+            if mach is not None and abs(row_mach - float(mach)) > 1e-8:
+                continue
+            if flux is not None and str(data.get("flux", "")).upper() != str(flux).upper():
+                continue
+            if reconstruction is not None and str(data.get("reconstruction", "")).upper() != str(reconstruction).upper():
+                continue
+            if time_scheme is not None and str(data.get("time_scheme", "")).upper() != str(time_scheme).upper():
+                continue
 
-    for k, v in records_by_flux.items():
-        records_by_flux[k] = sorted(v, key=lambda x: x['h'])
+            row = {column: data.get(column) for column in SUMMARY_COLUMNS}
+            row["h"] = h
+            row["cd"] = _to_float(data.get("cd"))
+            row["cl"] = _to_float(data.get("cl"))
+            row["deltaS"] = _to_float(data.get("deltaS"))
+            row["deltaM"] = _to_float(data.get("deltaM"))
+            row["deltaM_rel"] = _to_float(data.get("deltaM_rel"))
+            row["mass_in"] = _to_float(data.get("mass_in"))
+            row["mass_out"] = _to_float(data.get("mass_out"))
+            row["max_grad_p"] = _to_float(data.get("max_grad_p"))
+            row["wall_time_s"] = _to_float(data.get("wall_time_s"))
+            rows.append(row)
 
-    return records_by_flux
+    rows.sort(
+        key=lambda row: (
+            float(row.get("h") or 0.0),
+        )
+    )
+    return rows
 
 
-def plot_convergence(records_by_flux, case: str, mach: float, figures_root: Path):
-    figures_root = Path(figures_root)
-    out_dir = figures_root / case / f'convergence_mach{mach:.2f}'
-    out_dir.mkdir(parents=True, exist_ok=True)
+def write_summary_csv(rows, output_path: Path):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    saved = []
-    for flux, records in sorted(records_by_flux.items()):
-        hs = np.array([r['h'] for r in records], dtype=float)
-        cds = np.array([r['cd'] for r in records], dtype=float)
-        cls = np.array([r['cl'] for r in records], dtype=float)
-        dS = np.array([r['deltaS'] for r in records], dtype=float)
+    with output_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SUMMARY_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows({key: _format_csv_value(value) for key, value in row.items()} for row in rows)
 
-        fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
-        fig.suptitle(f'Convergence en maillage — case={case} Mach={mach} flux={flux}', fontweight='bold')
+    print(f"Saved {output_path}")
 
-        ax = axes[0]
-        ax.semilogx(hs, cds, marker='o', label=r'$C_D$')
-        ax.semilogx(hs, cls, marker='s', label=r'$C_L$')
-        ax.set_xlabel(r'Taille de maille $h$')
-        ax.set_ylabel('Coefficient')
-        ax.grid(True, which='both', linestyle='--', alpha=0.4)
-        for x, y in zip(hs, cds):
-            ax.annotate(f'{x:.5g}', xy=(x, y), xytext=(0, 6), textcoords='offset points', fontsize=7, ha='center')
-        for x, y in zip(hs, cls):
-            ax.annotate(f'{x:.5g}', xy=(x, y), xytext=(0, -10), textcoords='offset points', fontsize=7, ha='center')
-        ax.legend(frameon=True)
-        ax = axes[1]
-        ax.semilogx(hs, dS, marker='o', color='tab:green', label=r'$\Delta S$')
-        ax.set_xlabel(r'Taille de maille $h$')
-        ax.set_ylabel(r'Entropie $\Delta S$')
-        dS_max = float(np.max(dS)) if dS.size > 0 else 0.0
-  
-        if dS_max > 0.0:
-            ymax = dS_max * (1.0 + 0.2)
-        else:
-            ymax = 1e-12
-        ax.set_ylim(0, ymax)
-        ax.grid(True, which='both', linestyle='--', alpha=0.4)
-        ax.legend(frameon=True)
-    
-        for x, y in zip(hs, dS):
-            ax.annotate(f'{x:.5g}', xy=(x, y), xytext=(0, 6), textcoords='offset points', fontsize=7, ha='center')
 
-        save_name = out_dir / f'convergence_mach{mach:.2f}_{flux.lower()}.png'
-        fig.savefig(save_name, dpi=300, bbox_inches='tight')
-        plt.close(fig)
-        saved.append(save_name)
-        print('Saved', save_name)
-
-    return saved
+def build_output_path(results_root: Path, case: str, mach, flux, reconstruction, time_scheme):
+    suffix = "_".join(
+        [
+            f"M{_format_value(mach)}",
+            _format_value(flux).upper(),
+            _format_value(reconstruction).upper(),
+            _format_value(time_scheme).upper(),
+        ]
+    )
+    return Path(results_root) / case / f"summary_{suffix}.csv"
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Convergence plots for Euler cases')
-    parser.add_argument('--case', default='diamond')
-    parser.add_argument('--mach', type=float, default=0.9)
-    parser.add_argument('--results-root', default=str(repo_root / 'results'))
-    parser.add_argument('--figures-root', default=str(repo_root / 'figures'))
+    parser = argparse.ArgumentParser(description="Export Euler summaries to CSV")
+    parser.add_argument("--case", default="bump", help="Case to export (bump, diamond)")
+    parser.add_argument("--mach", type=float, default=None, help="Mach number to keep")
+    parser.add_argument("--flux", default=None, help="Numerical flux to keep")
+    parser.add_argument("--reconstruction", default=None, help="Reconstruction to keep")
+    parser.add_argument("--time-scheme", dest="time_scheme", default=None, help="Time scheme to keep")
+    parser.add_argument("--results-root", default=str(repo_root / "results"))
+    parser.add_argument("--output", default=None, help="CSV output path. Default: <results-root>/<case>_summaries.csv")
     args = parser.parse_args()
 
-    records = load_records(Path(args.results_root), args.case, args.mach)
-    plot_convergence(records, args.case, args.mach, Path(args.figures_root))
+    results_root = Path(args.results_root)
+    rows = load_summary_rows(
+        results_root,
+        case=args.case,
+        mach=args.mach,
+        flux=args.flux,
+        reconstruction=args.reconstruction,
+        time_scheme=args.time_scheme,
+    )
+    output_path = Path(args.output) if args.output else build_output_path(
+        results_root,
+        args.case,
+        args.mach,
+        args.flux,
+        args.reconstruction,
+        args.time_scheme,
+    )
+    write_summary_csv(rows, output_path)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

@@ -60,8 +60,6 @@ def format_snapshot_name(cfg, t):
     flux = str(cfg["flux"]).upper()
     reconstruction = str(cfg["reconstruction"]).upper()
     time_scheme = str(cfg["time_scheme"]).upper()
-    if time_scheme == "SSP_RK2":
-        time_scheme = "SRK2"
     return f"{mach}_{flux}_{reconstruction}_{time_scheme}_t{t:.2f}"
 
 def setup_dirs(cfg, mesh):
@@ -91,22 +89,23 @@ def print_config(cfg, mesh, out_dirs):
     print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     print("-" * 78)
     print("Solveur")
-    reconstruction = "MUSCL" if str(cfg["reconstruction"]).lower() == "muscl" else str(cfg["reconstruction"])
-    time_scheme = "SRK2" if str(cfg["time_scheme"]).upper() == "SSP_RK2" else str(cfg["time_scheme"])
+    reconstruction = str(cfg["reconstruction"]).upper()
+    time_scheme = str(cfg["time_scheme"]).upper()
     print(f"  scheme FVM : {cfg['flux']}, {reconstruction}, {time_scheme}")
     print(f"  CFL : {cfg['CFL']}, tf={cfg['tf']}")
     print("-" * 78)
 
 
-def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
+def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
     # Exporte les résultats sous forme de figures ou array numpy selon la config
 
     exp, gamma = cfg["export"], cfg["gamma"]
-    tag = f"t{t:.2f}"
     snapshot_name = format_snapshot_name(cfg, t)
+    diagnostics = None
 
     if exp["results"]:
         np.save(str(out_dirs["res"] / f"{snapshot_name}.npy"), np.array(W))
+
     if exp["figures"]:
         prims = helper.getPrimitive(W, gamma=gamma, M=1.0)
         Mach_field = helper.get_mach_number(prims, gamma=gamma)
@@ -120,24 +119,53 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper):
         }
         fields = ["rho", "u", "v", "p", "M"]
         texs = [r"$\rho$", r"$u$", r"$v$", r"$p$", r"$M$"]
+        reconstruction = str(cfg["reconstruction"]).upper()
+        time_scheme = str(cfg["time_scheme"]).upper()
         for i, s in enumerate(fields):
             tex = texs[i]
             title = title_map.get(s, tex)
-            time_scheme = "SRK2" if str(cfg["time_scheme"]).upper() == "SSP_RK2" else str(cfg["time_scheme"])
-            reconstruction = "MUSCL" if str(cfg["reconstruction"]).lower() == "muscl" else str(cfg["reconstruction"])
             subtitle = f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
             field = Mach_field if s == "M" else prims[:, i]
             mesh.plot_solution(field, labels=tex, filename=out_dirs["fig"] / f"{s}_{snapshot_name}.png",
                 dpi=400, title=title, subtitle=subtitle, cmap=cmaps[i % len(cmaps)])
 
+    diagnostics = None
+    if cfg["case"] == "bump" and inlet is not None:
+        diagnostics = helper.get_bump_diagnostics(W, mesh, inlet, gamma=gamma, M=1.0)
+        wall_profile = diagnostics["wall_profile"]
+        wall_profile_data = np.column_stack([
+            wall_profile["s"],
+            wall_profile["x"],
+            wall_profile["y"],
+            wall_profile["mach"],
+            wall_profile["pressure"],
+        ])
 
-def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s):
+        if exp["results"]:
+            np.save(str(out_dirs["res"] / f"wall_profile_{snapshot_name}.npy"), wall_profile_data)
+
+        if exp["figures"] and wall_profile["s"].size > 0:
+            subtitle = f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
+            mesh.plot_profile(wall_profile["s"], wall_profile["mach"], labels=r'$M_{wall}$', filename=out_dirs["fig"] / f"Mwall_{snapshot_name}.png",
+                dpi=400, title="Profil de Mach de paroi", subtitle=subtitle, xlabel=r"Abscisse curviligne $s$")
+            mesh.plot_profile(wall_profile["s"], wall_profile["pressure"], labels=r'$p_{wall}$', filename=out_dirs["fig"] / f"pwall_{snapshot_name}.png",
+                dpi=400, title="Profil de pression de paroi", subtitle=subtitle, xlabel=r"Abscisse curviligne $s$")
+
+    return diagnostics
+
+
+def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, delta_m=None, mass_in=None, mass_out=None, max_pressure_gradient=None, delta_m_rel=None):
     return {
         "case": cfg["case"],
         "h": mesh.metadata.get("h"),
         "cd": float(cd) if cd is not None else None,
         "cl": float(cl) if cl is not None else None,
         "deltaS": float(delta_s) if delta_s is not None else None,
+        "deltaM": float(delta_m) if delta_m is not None else None,
+        "deltaM_rel": float(delta_m_rel) if delta_m_rel is not None else None,
+        "mass_in": float(mass_in) if mass_in is not None else None,
+        "mass_out": float(mass_out) if mass_out is not None else None,
+        "max_grad_p": float(max_pressure_gradient) if max_pressure_gradient is not None else None,
         "wall_time_s": float(wall_time_s),
         "time_scheme": cfg["time_scheme"],
         "flux": cfg["flux"],

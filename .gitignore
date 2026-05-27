@@ -6,3 +6,5 @@ results/**/*.npy
 logs/
 results_bkp/
 .DS_Store
+results/
+figures/

@@ -6,7 +6,7 @@ from utils import configure_jax_cpu_runtime
 import jax
 import numpy as np
 import jax.numpy as jnp
-from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name, load_mesh, print_config, setup_dirs
+from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name, load_mesh, plot_residual_history, print_config, setup_dirs
 
 import jax_fvm.src.helper as helper
 import jax_fvm.src.euler_solver as Euler
@@ -22,7 +22,7 @@ CFG = {
     # Physique
     "rho_inf": 1.0,  # Densité amont
     "p_inf": 1.0,  # Pression amont
-    "Mach": 1.5,  # Nombre de Mach du flux entrant
+    "Mach": 1.4,  # Nombre de Mach du flux entrant
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
@@ -30,7 +30,7 @@ CFG = {
     "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
     "reconstruction": "MUSCL",  # constant | MUSCL
     "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 2.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
+    "tf": 5.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
 
     # Fichier de maillage
     "mesh_path": "meshes/bump/bump_h0.05.npy",
@@ -99,7 +99,7 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
     def advance(W, n_steps):
         def scan_body(W, _):
-            return fn(W, mesh, dt, **kw), None
+            return fn(W, mesh, dt, **kw), 0.0
         W, _ = jax.lax.scan(scan_body, W, None, length=n_steps)
         return W
 
@@ -113,7 +113,7 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
         if exp["results"] or exp["figures"]:
             t_snap = float(current_step * float(dt))
-            export_snapshot(W, mesh, t_snap, cfg, out_dirs, helper)
+            export_snapshot(W, mesh, t_snap, cfg, out_dirs, helper, inlet=inlet)
             W_snapshots[round(t_snap, 6)] = np.array(W)
             print(f"    Snap exporté à t={t_snap:.2f}s ({current_step}/{N} steps)")
     
@@ -131,10 +131,21 @@ def run(W, mesh, inlet, cfg, out_dirs):
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         delta_S = helper.get_entropy_creation(W_initial, W, mesh, gamma=cfg["gamma"])
+        bump_diag = helper.get_bump_diagnostics(W, mesh, inlet, gamma=cfg["gamma"], M=1.0)
+        delta_m = bump_diag.get("deltaM")
+        delta_m_rel = bump_diag.get("deltaM_rel")
+        mass_in = bump_diag.get("mass_in")
+        mass_out = bump_diag.get("mass_out")
+        max_grad_p = bump_diag.get("max_grad_p")
         print(f"Coefficient de trainée C_D = {C_D:.4f}")
         print(f"Coefficient de portance C_L = {C_L:.4f}")
         print(f"Création totale d'entropie deltaS = {delta_S:.6e}")
-        summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s)
+        if delta_m is not None:
+            print(f"Bilan de masse deltaM = {delta_m:.6e} (rel={delta_m_rel:.6e})")
+        if max_grad_p is not None:
+            print(f"Gradient max de pression |grad p|_max = {max_grad_p:.6e}")
+        summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s, delta_m=delta_m,
+            mass_in=mass_in, mass_out=mass_out, max_pressure_gradient=max_grad_p, delta_m_rel=delta_m_rel)
 
     if exp.get("summary", True) and summary is not None:
         export_run_summary(out_dirs, summary, snapshot_name)
