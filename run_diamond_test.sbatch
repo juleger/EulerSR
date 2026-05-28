@@ -46,8 +46,9 @@ nvidia-smi
 echo "#############################"
 
 uv run python Euler/main.py \
+  --mach 0.8 \
   --case diamond \
-  --mesh-path "meshes/diamond/diamond_h0.05.npy" \
+  --mesh-path "meshes/diamond/diamond_h0.035.npy" \
   --flux HLLC \
   --time-scheme SRK2 \
   --reconstruction MUSCL

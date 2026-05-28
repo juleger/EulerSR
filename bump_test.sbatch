@@ -46,8 +46,9 @@ nvidia-smi
 echo "#############################"
 
 uv run python Euler/main.py \
+  --mach 1.4 \
   --case bump \
-  --mesh-path "meshes/bump/bump_h0.05.npy" \
+  --mesh-path "meshes/bump/bump_h0.025.npy" \
   --flux HLLC \
   --time-scheme SRK2 \
   --reconstruction MUSCL

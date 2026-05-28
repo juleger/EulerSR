@@ -109,23 +109,25 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
     if exp["figures"]:
         prims = helper.getPrimitive(W, gamma=gamma, M=1.0)
         Mach_field = helper.get_mach_number(prims, gamma=gamma)
-        cmaps = ["inferno", "viridis", "plasma", "viridis", HOT_CMAP_CROPPED]
+        Schlieren_field = helper.get_schlieren_field(prims, mesh, gamma=gamma)
+        cmaps = ["inferno", "viridis", "plasma", "viridis", HOT_CMAP_CROPPED, "Greys"]
         title_map = {
             "rho": "Masse volumique $\\rho$",
             "u": "Vitesse $u$",
             "v": "Vitesse $v$",
             "p": "Pression $p$",
             "M": "Mach local $M$",
+            "S": "Schlieren (log(1+|grad p|))",
         }
-        fields = ["rho", "u", "v", "p", "M"]
-        texs = [r"$\rho$", r"$u$", r"$v$", r"$p$", r"$M$"]
+        fields = ["rho", "u", "v", "p", "M", "S"]
+        texs = [r"$\rho$", r"$u$", r"$v$", r"$p$", r"$M$", r"$S$"]
         reconstruction = str(cfg["reconstruction"]).upper()
         time_scheme = str(cfg["time_scheme"]).upper()
         for i, s in enumerate(fields):
             tex = texs[i]
             title = title_map.get(s, tex)
             subtitle = f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
-            field = Mach_field if s == "M" else prims[:, i]
+            field = Mach_field if s == "M" else Schlieren_field if s == "S" else prims[..., i]
             mesh.plot_solution(field, labels=tex, filename=out_dirs["fig"] / f"{s}_{snapshot_name}.png",
                 dpi=400, title=title, subtitle=subtitle, cmap=cmaps[i % len(cmaps)])
 
@@ -155,6 +157,7 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, delta_m=None, mas
     return {
         "case": cfg["case"],
         "h": mesh.metadata.get("h"),
+        "n_cells": int(np.asarray(mesh.tris).shape[0]) if mesh.tris is not None else None,
         "cd": float(cd) if cd is not None else None,
         "cl": float(cl) if cl is not None else None,
         "deltaS": float(delta_s) if delta_s is not None else None,
@@ -175,6 +178,7 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, delta_m=None, mas
 
 def export_run_summary(out_dirs, summary, snapshot_name):
     # Exporte le résumé de la simulation (temps de calcul, C_D, etc...) dans un fichier JSON
+    out_dirs["res"].mkdir(parents=True, exist_ok=True)
     path = out_dirs["res"] / f"{snapshot_name}.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)

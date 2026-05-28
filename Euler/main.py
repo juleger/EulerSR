@@ -22,18 +22,18 @@ CFG = {
     # Physique
     "rho_inf": 1.0,  # Densité amont
     "p_inf": 1.0,  # Pression amont
-    "Mach": 1.4,  # Nombre de Mach du flux entrant
+    "Mach": 0.9,  # Nombre de Mach du flux entrant
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
     "time_scheme": "SRK2",  # EE | RK2 | RK4 | SRK2 (SSP_RK2)
     "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
     "reconstruction": "MUSCL",  # constant | MUSCL
-    "CFL": 0.25,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
+    "CFL": 0.6,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
     "tf": 5.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
 
     # Fichier de maillage
-    "mesh_path": "meshes/bump/bump_h0.05.npy",
+    "mesh_path": "meshes/bump/bump_h0.025.npy",
 
     # Export
     "export": {
@@ -72,6 +72,10 @@ def run(W, mesh, inlet, cfg, out_dirs):
     exp = cfg["export"]
 
     # Calcul dt selon CFL (fixe dans ce cas)
+    if 0.6 < cfg["Mach"] < 1.0 and cfg["CFL"] >= 0.5:
+        print(f"Attention : pour un écoulement transsonique (Mach={cfg['Mach']}), la CFL ne devrait pas dépasser 0.5 (instabilité due aux fortes accélérations).")
+        print(f"CFL fixée à 0.3 au lieu de {cfg['CFL']} pour la simulation.")
+        cfg["CFL"] = 0.3
     dt = helper.get_dt(W, mesh, CFL=cfg["CFL"], gamma=cfg["gamma"], M=1.0)
     N = int(cfg["tf"] / dt) + 1
     n_snaps = max(1, int(exp["n_snaps"]))

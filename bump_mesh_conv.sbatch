@@ -64,6 +64,7 @@ echo "#############################"
 echo "[$(date +%T)] Starting : mesh=${mesh}"
 
 uv run python Euler/main.py \
+  --mach 1.4 \
   --case bump \
   --mesh-path "$mesh" \
   --flux Rusanov \

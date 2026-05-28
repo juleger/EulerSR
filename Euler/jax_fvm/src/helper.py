@@ -524,3 +524,19 @@ def get_bump_diagnostics(W, mesh, inlet_state, gamma=1.4, M=1.0):
 		'max_grad_p': float(np.max(grad_p_mag)) if grad_p_mag.size else 0.0,
 		**mass_balance,
 	}
+
+def get_schlieren_field(W, mesh, gamma=1.4, M=1.0):
+	Prim = getPrimitive(W, gamma=gamma, M=M)
+	W_L = jnp.repeat(W[..., None, :], 3, axis=-2)
+	W_R = W[mesh.neighbors]
+	W_R = BC_state(W_R, W_L, mesh)
+	Prim_R = getPrimitive(W_R, gamma=gamma, M=M)
+
+	# log (1 + grad p)
+	P_L = Prim[..., 3][..., None]
+	P_L = jnp.repeat(P_L, 3, axis=1)[..., None]
+	P_R = Prim_R[..., 3][..., None]
+	grad_p = getgradientLSQ(P_L, P_R, mesh)
+	grad_p_mag = jnp.linalg.norm(grad_p[..., 0], axis=-1)
+	schlieren = jnp.log(1 + grad_p_mag)
+	return schlieren
