@@ -356,10 +356,7 @@ class Mesh:
         if "obstacle_length" not in self.metadata and hasattr(self, "chord"):
             self.metadata["obstacle_length"] = self.chord
         
-        print(f"Maillage chargé depuis {filename}")
-        print(f"  Points: {self.points.shape}")
-        print(f"  Triangles: {self.tris.shape}")
-        print(f"  Faces: {self.faces.shape}")
+        print(f"Maillage chargé depuis {filename} ({len(self.tris)} triangles)")
 
     def export_vtk(self, filename="mesh.vtk"):
         # Exporte le maillage au format VTK pour visualisation avec Paraview

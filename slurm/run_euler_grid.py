@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""
+Usage:
+  uv run python slurm/run_euler_grid.py --case diamond --mesh-path meshes/diamond/diamond_h0.05.npy \
+    --mach 0.7:1.5:0.1 --aoa 0:10:2 --fidelity lf,hf
+"""
+from __future__ import annotations
+
+import argparse
+import copy
+import itertools
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+EULER_DIR = REPO_ROOT / "Euler"
+for path in (REPO_ROOT, EULER_DIR):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+from Euler import main as euler_main
+from Euler.utils import FIDELITY_PRESETS
+
+
+def parse_range(spec: str):
+    if ":" in spec:
+        start, stop, step = (float(x) for x in spec.split(":"))
+        n_steps = int(round((stop - start) / step))
+        return [round(start + i * step, 10) for i in range(n_steps + 1)]
+    if "," in spec:
+        return [round(float(x), 10) for x in spec.split(",") if x.strip()]
+    return [round(float(spec), 10)]
+
+
+def build_case_cfg(base_cfg, case, mach, aoa, fidelity):
+    cfg = copy.deepcopy(base_cfg)
+    cfg["case"] = case
+    cfg["Mach"] = round(float(mach), 10)
+    cfg["aoa"] = 0.0 if case == "bump" else round(float(aoa), 10)
+    cfg["fidelity"] = fidelity
+    if fidelity in FIDELITY_PRESETS:
+        cfg["dataset_mode"] = "fidelity"
+        cfg.update(FIDELITY_PRESETS[fidelity])
+    else:
+        cfg["dataset_mode"] = None
+    return cfg
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--case", choices=("bump", "diamond"), required=True)
+    parser.add_argument("--mesh-path", required=True)
+    parser.add_argument("--mach", default="0.7:1.5:0.1")
+    parser.add_argument("--aoa", default="0:0:1")
+    parser.add_argument("--fidelity", default="lf")
+    parser.add_argument("--tf", type=float, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
+
+    base_cfg = copy.deepcopy(euler_main.CFG)
+    base_cfg["case"] = args.case
+    base_cfg["mesh_path"] = args.mesh_path
+    if args.tf is not None:
+        base_cfg["tf"] = float(args.tf)
+
+    mach_list = parse_range(args.mach)
+    aoa_list = [0.0] if args.case == "bump" else parse_range(args.aoa)
+    fidelities = [item.strip() for item in args.fidelity.split(",") if item.strip()]
+    grid = list(itertools.product(mach_list, aoa_list, fidelities))
+
+    mesh = euler_main.load_mesh(base_cfg)
+    print(f"Loaded mesh once: {mesh.metadata.get('name', 'unknown')}")
+    print(f"Cases to run: {len(grid)}")
+
+    if args.dry_run:
+        for mach, aoa, fidelity in grid:
+            print(f"case={args.case} Mach={mach} AoA={aoa} fidelity={fidelity}")
+        return 0
+
+    for idx, (mach, aoa, fidelity) in enumerate(grid, start=1):
+        cfg = build_case_cfg(base_cfg, args.case, mach, aoa, fidelity)
+        print("\n" + "=" * 78)
+        print(f"Case {idx}/{len(grid)}: case={cfg['case']} Mach={cfg['Mach']} AoA={cfg.get('aoa', 0.0)} fidelity={cfg['fidelity']}")
+
+        out_dirs = euler_main.setup_dirs(cfg, mesh)
+        euler_main.print_config(cfg, mesh, out_dirs)
+
+        W, inlet = euler_main.initialize(mesh, cfg)
+        euler_main.run(W, mesh, inlet, cfg, out_dirs)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

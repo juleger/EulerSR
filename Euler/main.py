@@ -1,13 +1,8 @@
 import os
-from utils import configure_jax_cpu_runtime
-
-#configure_jax_cpu_runtime() #facultatif car JAX par défaut est bien configuré
-
 import jax
 import numpy as np
 import jax.numpy as jnp
 from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name, load_mesh, print_config, setup_dirs
-
 import jax_fvm.src.helper as helper
 import jax_fvm.src.euler_solver as Euler
 from graph import export_graph
@@ -30,21 +25,21 @@ CFG = {
     "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
     "reconstruction": "MUSCL",  # constant | MUSCL
     "aoa": 0.0,  # Angle d'attaque en degrés (utilisé pour diamond)
-    "CFL": 0.5,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
+    "CFL": 0.6,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
     "tf": 10.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
     "fidelity": "off",
     "stationarity_threshold": 1e-6,
     "stationarity_check_every": 100,
 
     # Fichier de maillage
-    "mesh_path": "meshes/bump/bump_h0.05.npy",
+    "mesh_path": "meshes/bump/bump_h0.025.npy",
 
     # Export
     "export": {
         "results": True,  # Exporter les data de solutions (npy)
         "figures": True,  # Exporter les figures (png)
         "graph": False,  # Exporter la simulation sous forme de graph (npz)
-        "summary": True,  # Exporter le résumé machine-readable (json)
+        "summary": False,  # Exporter le résumé machine-readable (json)
         "bundle": True,  # Exporter un bundle data riche pour le ML
         "n_snaps": 1,  # Nombre de snapshots
     },
@@ -56,11 +51,11 @@ def initialize(mesh, cfg):
     gamma, Mach = cfg["gamma"], cfg["Mach"]
     c_inf = (gamma * p_inf / rho_inf) ** 0.5
     aoa_deg = float(cfg.get("aoa", 0.0)) if cfg.get("case") == "diamond" else 0.0
-    aoa_rad = np.deg2rad(aoa_deg)
-    u_inf = Mach * c_inf * np.cos(aoa_rad)
-    v_inf = Mach * c_inf * np.sin(aoa_rad)
-    prim0 = jnp.array([rho_inf, u_inf, v_inf, p_inf])
-    W = helper.getConserved(jnp.repeat(prim0[None], len(mesh.area), axis=0), gamma=gamma, M=1.0)
+    aoa_rad = jnp.deg2rad(jnp.asarray(aoa_deg))
+    u_inf = Mach * c_inf * jnp.cos(aoa_rad)
+    v_inf = Mach * c_inf * jnp.sin(aoa_rad)
+    prim0 = jnp.asarray([rho_inf, u_inf, v_inf, p_inf])
+    W = helper.getConserved(jnp.tile(prim0[None, :], (mesh.area.shape[0], 1)), gamma=gamma, M=1.0)
     inlet = helper.getConserved(prim0[None], gamma=gamma, M=1.0)[0]
     return W, inlet
 
@@ -82,10 +77,9 @@ def run(W, mesh, inlet, cfg, out_dirs):
     stationarity_check_every = int(cfg.get("stationarity_check_every"))
 
     # Calcul dt selon CFL (fixe dans ce cas)
-    if 0.6 < cfg["Mach"] < 1.0 and cfg["CFL"] >= 0.5:
-        print(f"Attention : pour un écoulement transsonique (Mach={cfg['Mach']}), la CFL ne devrait pas dépasser 0.5 (instabilité due aux fortes accélérations).")
-        print(f"CFL fixée à 0.3 au lieu de {cfg['CFL']} pour la simulation.")
-        cfg["CFL"] = 0.3
+    if 0.6 < cfg["Mach"] < 1.1 and cfg["CFL"] > 0.4:
+        print(f"Attention : régime transsonique avec CFL={cfg['CFL']} potentiellement instable. CFL réduite à 0.4")
+        cfg["CFL"] = 0.4
     dt = helper.get_dt(W, mesh, CFL=cfg["CFL"], gamma=cfg["gamma"], M=1.0)
     N = int(cfg["tf"] / dt) + 1
     n_snaps = max(1, int(exp["n_snaps"]))
@@ -96,11 +90,6 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
     print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
 
-    print("\n" + "-" * 78)
-    print("Parallélisation JAX :")
-    print(f"  Backend : {jax.default_backend()}")
-    print(f"  Device(s) : {jax.devices()}")
-    print("-" * 78)
     # Warm-up pour compilation JIT
     print("\nCompilation JIT (warm-up)...")
     W_warmup = fn(W, mesh, dt, **kw)
@@ -146,6 +135,10 @@ def run(W, mesh, inlet, cfg, out_dirs):
     converged = bool(converged)
     stopping_step = int(stopping_step)
     last_stationarity_rel = float(last_stationarity_rel)
+
+    W_probe = fn(W, mesh, dt, **kw)
+    jax.block_until_ready(W_probe)
+    final_residual = float(jnp.linalg.norm(W_probe - W) / (jnp.linalg.norm(W) + 1e-16))
     
     end_time = time.time()
     wall_time_s = end_time - start_time
@@ -153,25 +146,21 @@ def run(W, mesh, inlet, cfg, out_dirs):
     snapshot_name = format_snapshot_name(cfg, final_time)
     print("\n" + "-" * 78)
     print(f"Simulation terminée en {wall_time_s:.2f}s (converged={converged}, t={final_time:.4f}s)")
+    print(f"Résidu final : {final_residual:.6e}")
     if exp["results"] or exp["figures"] or exp.get("bundle", True):
         export_snapshot(W, mesh, final_time, cfg, out_dirs, helper, inlet=inlet)
     if exp["graph"]:
         W_snapshots = {round(final_time, 6): np.array(W)}
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
-
-    print(f"Résidu final relatif ||dt·R(W)||/||W|| = {last_stationarity_rel:.3e}")
-
     summary = None
     if cfg["case"] in ("diamond", "bump") and (exp.get("summary", True)):
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         delta_S = helper.get_entropy_creation(W_initial, W, mesh, gamma=cfg["gamma"])
-        print(f"Coefficient de trainée C_D = {C_D:.4f}")
-        print(f"Coefficient de portance C_L = {C_L:.4f}")
-        print(f"Création totale d'entropie deltaS = {delta_S:.6e}")
+        print(f"C_D = {C_D:.6f}, C_L = {C_L:.6f}, ΔS = {delta_S:.6e}")
         summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s,
-            stationarity_rel=last_stationarity_rel, converged=converged, stopping_step=stopping_step)
+            stationarity_rel=final_residual, converged=converged, stopping_step=stopping_step)
 
     if exp.get("summary", True) and summary is not None:
         export_run_summary(out_dirs, summary, snapshot_name)

@@ -63,7 +63,7 @@ def load_mesh(cfg):
 
     mesh = Mesh()
     mesh.load_mesh(cfg["mesh_path"])
-    mesh.print_statistics()
+    #mesh.print_statistics()
     return mesh
 
 
@@ -104,7 +104,7 @@ def format_subtitle(cfg, mesh, t):
     time_scheme = str(cfg["time_scheme"]).upper()
     if str(cfg.get("case", "")).lower() == "diamond":
         return (
-            f"t={t:.2f}s, M={cfg['Mach']}, AoA={float(cfg.get('aoa', 0.0)):.2f}deg, "
+            f"t={t:.2f}s, M={cfg['Mach']}, AoA={float(cfg.get('aoa', 0.0)):.1f}°, "
             f"h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
         )
     return (
@@ -133,12 +133,12 @@ def print_config(cfg, mesh, out_dirs):
     print("-" * 78)
     print(f"Cas : {cfg['case']}")
     print(f"Mesh path : {cfg['mesh_path']} (h={mesh.metadata.get('h', 'n/a')})")
-    print(f"Output res : {out_dirs['res']}")
     print("-" * 78)
     print("Physique")
-    print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     if str(cfg.get("case", "")).lower() == "diamond":
-        print(f"  AoA : {cfg.get('aoa', 0.0)} deg")
+        print(f"  Mach : {cfg['Mach']}, AoA : {float(cfg.get('aoa', 0.0)):.1f}°, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
+    else:
+        print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     print("-" * 78)
     print("Solveur")
     reconstruction = str(cfg["reconstruction"]).upper()
@@ -146,6 +146,11 @@ def print_config(cfg, mesh, out_dirs):
     print(f"  scheme FVM : {cfg['flux']}, {reconstruction}, {time_scheme}")
     print(f"  CFL : {cfg['CFL']}, tf={cfg['tf']}")
     print(f"  fidelity : {cfg.get('fidelity', 'off')} | stationarity_threshold={cfg.get('stationarity_threshold', 'n/a')} | check_every={cfg.get('stationarity_check_every', 'n/a')}")
+    try:
+        import jax
+        print(f"  Parallélisation JAX : {jax.default_backend()} (device count: {jax.device_count()})")
+    except Exception:
+        pass
     print("-" * 78)
 
 
@@ -170,15 +175,25 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         prims_R = helper.getPrimitive(W_R, gamma=gamma, M=1.0)
         prims_grad = helper.getgradientLSQ(prims_L, prims_R, mesh)
         mach_field = helper.get_mach_number(prims, gamma=gamma)
-        schlieren_field = helper.get_schlieren_field(W, mesh, gamma=gamma, M=1.0)
         if is_dataset:
             dataset_root = repo_root / 'dataset' / cfg['case']
             sample_id = format_sample_id(cfg)
             sample_dir = dataset_root / sample_id
             sample_dir.mkdir(parents=True, exist_ok=True)
             bundle_path = sample_dir / f"{snapshot_name}.npz"
+            print(f"Bundle export : {bundle_path}")
         else:
             bundle_path = out_dirs["res"] / f"bundle_{snapshot_name}.npz"
+            print(f"Bundle export : {bundle_path}")
+
+        mesh_path_val = str(cfg.get('mesh_path', ''))
+        n_cells_val = int(np.asarray(mesh.tris).shape[0]) if getattr(mesh, 'tris', None) is not None else -1
+        h_val = mesh.metadata.get('h', float('nan'))
+        flux_val = str(cfg.get('flux', ''))
+        recon_val = str(cfg.get('reconstruction', ''))
+        time_scheme_val = str(cfg.get('time_scheme', ''))
+        dataset_mode_val = str(cfg.get('dataset_mode', ''))
+
         np.savez_compressed(
             str(bundle_path),
             node_pos=np.asarray(mesh.barycenter, dtype=np.float32),
@@ -187,11 +202,19 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
             primitives=np.asarray(prims, dtype=np.float32),
             primitives_grad=np.asarray(prims_grad, dtype=np.float32),
             mach=np.asarray(mach_field, dtype=np.float32),
-            schlieren=np.asarray(schlieren_field, dtype=np.float32),
             time=np.asarray([float(t)], dtype=np.float32),
             mach_in=np.asarray([float(cfg["Mach"])], dtype=np.float32),
             aoa_in=np.asarray([float(cfg.get("aoa", 0.0))], dtype=np.float32),
             fidelity=np.asarray([str(cfg.get("fidelity", "off"))]),
+            case=np.asarray([str(cfg.get("case", ""))]),
+            sample_id=np.asarray([sample_id]),
+            mesh_path=np.asarray([mesh_path_val]),
+            n_cells=np.asarray([int(n_cells_val)]),
+            h=np.asarray([float(h_val)]),
+            flux=np.asarray([flux_val]),
+            reconstruction=np.asarray([recon_val]),
+            time_scheme=np.asarray([time_scheme_val]),
+            dataset_mode=np.asarray([dataset_mode_val]),
         )
         if cfg.get("dataset_mode") == "fidelity":
             side = str(cfg.get("fidelity", "off")).lower()
@@ -214,10 +237,10 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
             entry[f"{side}_mesh"] = str(cfg.get('mesh_path', ''))
             entry['mesh'] = str(cfg.get('mesh_path', ''))
             entry['mach'] = float(cfg.get('Mach'))
+            entry['case'] = str(cfg.get('case', ''))
+            entry['sample_id'] = sample_id
             if str(cfg.get("case", "")).lower() == "diamond":
                 entry['aoa'] = float(cfg.get('aoa', 0.0))
-            entry['lf_scheme'] = "Rusanov/constant/EE"
-            entry['hf_scheme'] = "HLLC/MUSCL/SRK2"
             manifest[sample_id] = entry
             # Ecriture atomique
             try:
@@ -239,7 +262,9 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
 
         if exp.get("bundle", True):
             # Bundle mode keeps only the Mach figure to reduce dataset creation overhead.
-            mesh.plot_solution(Mach_field, labels=r"$M$", filename=out_dirs["fig"] / f"M_{snapshot_name}.png",
+            fig_path = out_dirs["fig"] / f"M_{snapshot_name}.png"
+            print(f"Figure export : {fig_path}")
+            mesh.plot_solution(Mach_field, labels=r"$M$", filename=fig_path,
                 dpi=400, title="Mach local", subtitle=subtitle, cmap="viridis")
         else:
             cmaps = ["inferno", "viridis", "plasma", "viridis", HOT_CMAP_CROPPED, "Greys"]
@@ -258,7 +283,9 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
                 tex = texs[i]
                 title = title_map.get(s, tex)
                 field = Mach_field if s == "M" else schlieren_field if s == "S" else prims[..., i]
-                mesh.plot_solution(field, labels=tex, filename=out_dirs["fig"] / f"{s}_{snapshot_name}.png",
+                fig_path = out_dirs["fig"] / f"{s}_{snapshot_name}.png"
+                print(f"Figure export : {fig_path}")
+                mesh.plot_solution(field, labels=tex, filename=fig_path,
                     dpi=400, title=title, subtitle=subtitle, cmap=cmaps[i % len(cmaps)])
 
     diagnostics = None
@@ -277,7 +304,9 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
 
         if exp["figures"] and wall_profile["s"].size > 0:
             subtitle = format_subtitle(cfg, mesh, t)
-            mesh.plot_profile(wall_profile["s"], wall_profile["mach"], labels=r'$M_{wall}$', filename=out_dirs["fig"] / f"Mwall_{snapshot_name}.png",
+            fig_path = out_dirs["fig"] / f"Mwall_{snapshot_name}.png"
+            print(f"Figure export : {fig_path}")
+            mesh.plot_profile(wall_profile["s"], wall_profile["mach"], labels=r'$M_{wall}$', filename=fig_path,
                 dpi=400, title="Profil de Mach de paroi", subtitle=subtitle, xlabel=r"Abscisse curviligne $s$")
 
     return diagnostics
@@ -315,16 +344,3 @@ def export_run_summary(out_dirs, summary, snapshot_name):
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary written : {path}")
-
-def configure_jax_cpu_runtime():
-    # Configuration JAX pour parallélisation CPU efficace
-    # Evite l'hyperthreading
-    cpu_count = os.cpu_count() // 2 or 1 
-    os.environ["XLA_FLAGS"] = f"--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads={cpu_count}"
-    os.environ["JAX_ENABLE_X64"] = "true"
-    os.environ["OMP_NUM_THREADS"] = str(cpu_count)
-    os.environ["MKL_NUM_THREADS"] = str(cpu_count)
-    os.environ["OPENBLAS_NUM_THREADS"] = str(cpu_count)
-    os.environ["VECLIB_MAXIMUM_THREADS"] = str(cpu_count)
-    os.environ["JAX_NUM_THREADS"] = str(cpu_count)
-    print(f"JAX configuré pour CPU avec {cpu_count} threads (hyperthreading désactivé)")
