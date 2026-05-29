@@ -16,10 +16,10 @@ mesh_dir.mkdir(parents=True, exist_ok=True)
 @dataclass(frozen=True)
 class DiamondMeshSize:
     growth_rate: float = 0.05
-    left_growth_rate: float = 0.10
-    obstacle_factor: float = 1.0
+    left_growth_rate: float = 0.15
+    obstacle_factor: float = 2.0
     max_size_factor: float = 2.0
-    left_margin_factor: float = 1.5
+    left_margin_factor: float = 5.0
 
 
 DEFAULT_SIZE_PARAMS = DiamondMeshSize()
@@ -69,6 +69,11 @@ def triangle_area_from_h(h):
     return np.sqrt(3.0) * h**2 / 4.0
 
 
+def smoothstep(x):
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
 def distance_diamond(point, cx, cy, chord, height):
     # Renvoie la distance d'un point au losange
     px = (point[0] - cx) / (chord / 2.0)
@@ -94,14 +99,14 @@ def local_size(point, cx, cy, chord, height, h, size_params=DEFAULT_SIZE_PARAMS)
 
     growth_length = max(height, h)
 
-    # Croissance moins rapide à droite du diamant pour garder une bonne résolution
-    # Le maillage devient plus grossier plus rapidement quand on se rapproche de l'inlet
-    if px < x_le - size_params.left_margin_factor * height:
-        growth_rate = size_params.left_growth_rate
-        max_size_factor = size_params.max_size_factor
-    else:
-        growth_rate = size_params.growth_rate
-        max_size_factor = size_params.max_size_factor * 4
+    # Croissance moins rapide à gauche du diamant, avec transition progressive vers la droite.
+    left_gap = x_le - px
+    left_transition = max(size_params.left_margin_factor * height, 4.0 * h)
+    left_blend = smoothstep(left_gap / left_transition)
+    growth_rate = size_params.growth_rate + left_blend * (
+        size_params.left_growth_rate - size_params.growth_rate
+    )
+    max_size_factor = size_params.max_size_factor * (1.0 + 3.0 * left_blend)
 
     target = h * (1.0 + growth_rate * dist / growth_length)
     return float(np.clip(target, h, max_size_factor * h))
@@ -203,13 +208,13 @@ def build_mesh(Lx=6.0, Ly=4.0, h=0.05, chord=1.0, height=0.24, cx=None, cy=None,
     return mesh, path
 
 if __name__ == "__main__":
-    Lx = 4; Ly = 4.0; h = 0.1
+    Lx = 3; Ly = 3.0; h = 0.1
     chord = 1.0; cx = 1.5; cy = Ly / 2
 
     # Alpha est le demi angle du losange, height est la hauteur totale du losange
-    alpha = np.radians(10)
+    alpha = np.radians(5)
     height = chord * np.tan(alpha)
 
-    for h in [0.00875, 0.00625]:
+    for h in [0.035]:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, chord=chord, height=height, cx=cx, cy=cy, export_vtk=False)
         mesh.plot_mesh(filename=mesh_dir / f"diamond_h{h}.png", dpi=500)

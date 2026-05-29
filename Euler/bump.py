@@ -221,6 +221,6 @@ if __name__ == "__main__":
     Lx = 3.0; Ly = 1.0
     thickness = 0.04; chord = 1.0; center = 1.5
 
-    for h in [0.2, 0.1, 0.07, 0.05, 0.035, 0.025, 0.0175, 0.0125, 0.00875, 0.00625]:
+    for h in [0.02]:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, thickness=thickness, chord=chord, center=center, export_vtk=False)
         mesh.plot_mesh(filename=mesh_dir / f"bump_h{h}.png", dpi=500)
