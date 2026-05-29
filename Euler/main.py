@@ -12,12 +12,12 @@ import time
 CFG = {
     # Configuration globale, modifiable via CLI
 
-    "case": "bump",  # "bump" | "diamond"
+    "case": "diamond",  # "bump" | "diamond"
 
     # Physique
     "rho_inf": 1.0,  # Densité amont
     "p_inf": 1.0,  # Pression amont
-    "Mach": 3.0,  # Nombre de Mach du flux entrant
+    "Mach": 1.2,  # Nombre de Mach du flux entrant
     "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
 
     # Solveur
@@ -26,17 +26,17 @@ CFG = {
     "reconstruction": "MUSCL",  # constant | MUSCL
     "aoa": 0.0,  # Angle d'attaque en degrés (utilisé pour diamond)
     "CFL": 0.6,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 10.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
+    "tf": 5.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
     "fidelity": "off",
-    "stationarity_threshold": 1e-6,
+    "stationarity_threshold": 1e-5,
     "stationarity_check_every": 100,
 
     # Fichier de maillage
-    "mesh_path": "meshes/bump/bump_h0.025.npy",
+    "mesh_path": "meshes/diamond/diamond_h0.035.npy",
 
     # Export
     "export": {
-        "results": True,  # Exporter les data de solutions (npy)
+        "results": False,  # Exporter les data de solutions (npy)
         "figures": True,  # Exporter les figures (png)
         "graph": False,  # Exporter la simulation sous forme de graph (npz)
         "summary": False,  # Exporter le résumé machine-readable (json)

@@ -193,7 +193,7 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         recon_val = str(cfg.get('reconstruction', ''))
         time_scheme_val = str(cfg.get('time_scheme', ''))
         dataset_mode_val = str(cfg.get('dataset_mode', ''))
-
+        sample_id = format_sample_id(cfg)
         np.savez_compressed(
             str(bundle_path),
             node_pos=np.asarray(mesh.barycenter, dtype=np.float32),
