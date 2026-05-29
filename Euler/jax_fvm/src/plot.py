@@ -36,7 +36,7 @@ def draw_diamond_outline(ax, mesh):
     wall_faces = np.asarray(mesh.faces)[np.asarray(mesh.face_markers) == wall_marker]
     for face in wall_faces:
         pts = np.asarray(mesh.points)[face]
-        ax.plot(pts[:, 0], pts[:, 1], color='black', lw=1.0, zorder=5)
+        ax.plot(pts[:, 0], pts[:, 1], color='black', lw=0.5, zorder=5)
 
 
 def plot_mesh(mesh, dpi = 300, filename = 'mesh.png'):

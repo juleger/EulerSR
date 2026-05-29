@@ -227,6 +227,9 @@ def _mesh_metadata(mesh):
 def BC_state(W_R, W_L, mesh, **kwargs):
 	metadata = _mesh_metadata(mesh)
 	wall_markers = kwargs.get('wall_markers', metadata.get('wall_markers', [2]))
+	inlet_value = kwargs.get('value', jnp.array([1.0, 1.0, 0.0, 1.0]))
+	gamma = kwargs.get('gamma', 1.4)
+	M = kwargs.get('M', 1.0)
 	try:
 		wall_markers = tuple(int(marker) for marker in wall_markers)
 	except TypeError:
@@ -238,8 +241,55 @@ def BC_state(W_R, W_L, mesh, **kwargs):
 	else:
 		for marker in wall_markers:
 			W_R = BC_slipwall(W_R, W_L, mesh, bc_type=marker)
-	W_R = BC_inflow(W_R, mesh, bc_type=3, value = kwargs.get('value', jnp.array([1.0, 1.0, 1.0, 1.0])))  # (supersonic inlet)
+	W_R = BC_inflow(W_R, mesh, bc_type=3, value=inlet_value)  # (supersonic inlet)
 	W_R = BC_outflow(W_R, W_L, mesh, bc_type=4)  # (free outflow)
+
+	# Invariants de Riemann pour les faces de sortie du domaine
+	# Obligatoire pour le cas du diamant avec AoA, surtout si sortie subsonique (reflexions)
+	# Selon l'angle, l'outlet peut devenir un inlet localement, donc il faut gérer les flux entrants et sortants avec les invariants de Riemann
+	if str(metadata.get('case', '')).lower() == 'diamond':
+		face_markers = mesh.face_markers[mesh.face_connectivity]
+		outlet_mask = (face_markers == 4)
+		nx = mesh.normals[..., 0]
+		ny = mesh.normals[..., 1]
+
+		Prim_L = getPrimitive(W_L, gamma=gamma, M=M)
+		rho_L = jnp.maximum(Prim_L[..., 0], 1e-12)
+		u_L = Prim_L[..., 1]
+		v_L = Prim_L[..., 2]
+		p_L = jnp.maximum(Prim_L[..., 3], 1e-12)
+		un_L = u_L * nx + v_L * ny
+		ut_L = -u_L * ny + v_L * nx
+		a_L = jnp.sqrt(gamma * p_L / rho_L) / M
+
+		Prim_inf = getPrimitive(inlet_value[None, :], gamma=gamma, M=M)[0]
+		rho_inf = jnp.maximum(Prim_inf[0], 1e-12)
+		u_inf = Prim_inf[1]
+		v_inf = Prim_inf[2]
+		p_inf = jnp.maximum(Prim_inf[3], 1e-12)
+		a_inf = jnp.sqrt(gamma * p_inf / rho_inf) / M
+		un_inf = u_inf * nx + v_inf * ny
+
+		J_plus = un_L + 2.0 * a_L / (gamma - 1.0)
+		J_minus_inf = un_inf - 2.0 * a_inf / (gamma - 1.0)
+		un_sub = 0.5 * (J_plus + J_minus_inf)
+		a_sub = jnp.maximum(0.25 * (gamma - 1.0) * (J_plus - J_minus_inf), 1e-8)
+
+		s_L = p_L / (rho_L**gamma + 1e-12)
+		rho_sub = jnp.maximum((a_sub**2 / (gamma * s_L + 1e-12)) ** (1.0 / (gamma - 1.0)), 1e-12)
+		p_sub = jnp.maximum(s_L * rho_sub**gamma, 1e-12)
+
+		u_sub = un_sub * nx - ut_L * ny
+		v_sub = un_sub * ny + ut_L * nx
+		Prim_sub = jnp.stack([rho_sub, u_sub, v_sub, p_sub], axis=-1)
+		W_sub = getConserved(Prim_sub, gamma=gamma, M=M)
+
+		outlet_inflow = jnp.logical_and(outlet_mask, un_L < 0.0)
+		outlet_subsonic_out = jnp.logical_and(outlet_mask, jnp.logical_and(un_L >= 0.0, jnp.abs(un_L) < a_L))
+
+		W_R = jnp.where(jnp.repeat(outlet_subsonic_out[..., None], 4, axis=-1), W_sub, W_R)
+		W_R = jnp.where(jnp.repeat(outlet_inflow[..., None], 4, axis=-1), inlet_value, W_R)
+
 	W_R = BC_subsonic_inlet(W_R, W_L, mesh, bc_type=5)  # (subsonic inlet)
 	return W_R
 

@@ -616,7 +616,7 @@ def residual(W, mesh, **kwargs):
 			lambda _: getFlux(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs),
 			operand=None,
 		)
-	return Flux / mesh.area[...,None] 
+	return Flux / mesh.area[...,None]
 
 @partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def time_step_Euler(W, mesh, dt, **kwargs):
