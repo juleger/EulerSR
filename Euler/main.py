@@ -26,9 +26,9 @@ CFG = {
     "reconstruction": "MUSCL",  # constant | MUSCL
     "aoa": 0.0,  # Angle d'attaque en degrés (utilisé pour diamond)
     "CFL": 0.6,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 5.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
+    "tf": 10.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
     "fidelity": "off",
-    "stationarity_threshold": 1e-5,
+    "stationarity_threshold": 2e-6, # Seuil de convergence pour la stationnarité (résidu relatif)
     "stationarity_check_every": 100,
 
     # Fichier de maillage

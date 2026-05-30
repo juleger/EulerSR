@@ -616,7 +616,16 @@ def residual(W, mesh, **kwargs):
 			lambda _: getFlux(W_L, W_R, mesh.normals, mesh.surface[mesh.face_connectivity], **kwargs),
 			operand=None,
 		)
-	return Flux / mesh.area[...,None]
+	sponge = helper.get_sponge_source(
+		W,
+		mesh,
+		kwargs.get('value', jnp.array([1.0, 1.0, 0.0, 1.0])),
+		gamma=kwargs.get('gamma', 1.4),
+		M=kwargs.get('M', 1.0),
+		width=kwargs.get('sponge_width', None),
+		strength=kwargs.get('sponge_strength', None),
+	)
+	return Flux / mesh.area[...,None] - sponge
 
 @partial(jax.jit, static_argnames=("reconstruction", "flux", "numerical_flux", "flag_NS"))
 def time_step_Euler(W, mesh, dt, **kwargs):

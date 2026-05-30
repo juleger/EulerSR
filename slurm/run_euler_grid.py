@@ -39,6 +39,7 @@ def build_case_cfg(base_cfg, case, mach, aoa, fidelity):
     cfg["Mach"] = round(float(mach), 10)
     cfg["aoa"] = 0.0 if case == "bump" else round(float(aoa), 10)
     cfg["fidelity"] = fidelity
+    cfg["stationarity_threshold"] = float(cfg.get("stationarity_threshold", 1e-5))
     if fidelity in FIDELITY_PRESETS:
         cfg["dataset_mode"] = "fidelity"
         cfg.update(FIDELITY_PRESETS[fidelity])
@@ -55,6 +56,7 @@ def main():
     parser.add_argument("--aoa", default="0:0:1")
     parser.add_argument("--fidelity", default="lf")
     parser.add_argument("--tf", type=float, default=None)
+    parser.add_argument("--stationarity-threshold", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
@@ -63,6 +65,8 @@ def main():
     base_cfg["mesh_path"] = args.mesh_path
     if args.tf is not None:
         base_cfg["tf"] = float(args.tf)
+    if args.stationarity_threshold is not None:
+        base_cfg["stationarity_threshold"] = float(args.stationarity_threshold)
 
     mach_list = parse_range(args.mach)
     aoa_list = [0.0] if args.case == "bump" else parse_range(args.aoa)
