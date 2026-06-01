@@ -15,10 +15,10 @@ mesh_dir.mkdir(parents=True, exist_ok=True)
 # Dataclass pour les paramètres "adaptatifs" du maillage diamant
 @dataclass(frozen=True)
 class DiamondMeshSize:
-    growth_rate: float = 0.05
-    left_growth_rate: float = 0.15
-    obstacle_factor: float = 2.0
-    max_size_factor: float = 2.0
+    growth_rate: float = 0.07
+    left_growth_rate: float = 0.18
+    obstacle_factor: float = 0.0
+    max_size_factor: float = 6.0
     left_margin_factor: float = 5.0
 
 
@@ -208,13 +208,13 @@ def build_mesh(Lx=6.0, Ly=4.0, h=0.05, chord=1.0, height=0.24, cx=None, cy=None,
     return mesh, path
 
 if __name__ == "__main__":
-    Lx = 3; Ly = 3.0; h = 0.1
+    Lx = 4.0; Ly = 4.0; h = 0.1
     chord = 1.0; cx = 1.5; cy = Ly / 2
 
     # Alpha est le demi angle du losange, height est la hauteur totale du losange
     alpha = np.radians(5)
     height = chord * np.tan(alpha)
 
-    for h in [0.035]:
+    for h in [0.025, 0.035, 0.05]:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, chord=chord, height=height, cx=cx, cy=cy, export_vtk=False)
         mesh.plot_mesh(filename=mesh_dir / f"diamond_h{h}.png", dpi=500)

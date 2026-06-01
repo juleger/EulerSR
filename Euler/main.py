@@ -2,48 +2,20 @@ import os
 import jax
 import numpy as np
 import jax.numpy as jnp
-from utils import build_config_from_cli, build_run_summary, export_snapshot, export_run_summary, format_snapshot_name, load_mesh, print_config, setup_dirs
 import jax_fvm.src.helper as helper
 import jax_fvm.src.euler_solver as Euler
 from graph import export_graph
 import time
 
+try:
+    from config import build_config_from_cli, load_default_config, load_mesh, print_config, setup_dirs
+    from utils import build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
+except ModuleNotFoundError:
+    from Euler.config import build_config_from_cli, load_default_config, load_mesh, print_config, setup_dirs
+    from Euler.utils import build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
 
-CFG = {
-    # Configuration globale, modifiable via CLI
 
-    "case": "diamond",  # "bump" | "diamond"
-
-    # Physique
-    "rho_inf": 1.0,  # Densité amont
-    "p_inf": 1.0,  # Pression amont
-    "Mach": 1.2,  # Nombre de Mach du flux entrant
-    "gamma": 1.4,  # Ratio de chaleur spécifique (diatomique ici)
-
-    # Solveur
-    "time_scheme": "SRK2",  # EE | RK2 | RK4 | SRK2 (SSP_RK2)
-    "flux": "HLLC",  # Rusanov | Tadmor | AUSM+ | Roe | HLLC
-    "reconstruction": "MUSCL",  # constant | MUSCL
-    "aoa": 0.0,  # Angle d'attaque en degrés (utilisé pour diamond)
-    "CFL": 0.6,  # Nombre de Courant (<1 en explicite). Ici dt est fixe pour simplifier, donc il faut une marge sur la CFL (si l'écoulement accélère par ex)
-    "tf": 10.0,  # Temps final de la simulation (dépend du régime pour atteindre l'état stationnaire : plus rapide en supersonique que subsonique)
-    "fidelity": "off",
-    "stationarity_threshold": 2e-6, # Seuil de convergence pour la stationnarité (résidu relatif)
-    "stationarity_check_every": 100,
-
-    # Fichier de maillage
-    "mesh_path": "meshes/diamond/diamond_h0.035.npy",
-
-    # Export
-    "export": {
-        "results": False,  # Exporter les data de solutions (npy)
-        "figures": True,  # Exporter les figures (png)
-        "graph": False,  # Exporter la simulation sous forme de graph (npz)
-        "summary": False,  # Exporter le résumé machine-readable (json)
-        "bundle": True,  # Exporter un bundle data riche pour le ML
-        "n_snaps": 1,  # Nombre de snapshots
-    },
-}
+CFG = load_default_config()
 
 def initialize(mesh, cfg):
     # Initialisation des conditions initiales

@@ -165,13 +165,16 @@ def _mesh_metadata(mesh):
 ##############################                  BC                   ######################################
 ###########################################################################################################
 
-def BC_outflow(W_R, W_L, mesh, bc_type = 4):
-	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_L, W_R)
-	return W_R	
+def BC_outflow(W_R, W_L, mesh, bc_type=4):
+    mask = (mesh.face_markers[mesh.face_connectivity] == bc_type)
+    mask = jnp.repeat(mask[..., None], 4, axis=-1)
+    return jnp.where(mask, W_L, W_R)
 
-def BC_inflow(W, mesh, bc_type = 3, value = jnp.array([1.0, 1.0, 1.0, 1.0])):
-	W = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), value, W)
-	return W	
+def BC_inflow(W, mesh, bc_type=3, value=jnp.array([1.0, 1.0, 0.0, 1.0])):
+
+    mask = (mesh.face_markers[mesh.face_connectivity] == bc_type)
+    mask = jnp.repeat(mask[..., None], 4, axis=-1)
+    return jnp.where(mask, value, W)
 
 def BC_subsonic_inlet(W_R, W_L, mesh, bc_type = 5):
 	Prim_L = getPrimitive(W_L)
@@ -184,7 +187,7 @@ def BC_subsonic_inlet(W_R, W_L, mesh, bc_type = 5):
 	Mass  = rho
 	Mom_x = rho * u 
 	Mom_y = rho * v 
-	Energy = P/(1.4-1) + rho*(u**2 + v**2)
+	Energy = P/(1.4-1) + 0.5 * rho*(u**2 + v**2)
 	W_b = jnp.stack([Mass, Mom_x, Mom_y, Energy], axis = -1)
 
 	W_R = jnp.where(jnp.repeat((mesh.face_markers[mesh.face_connectivity] == bc_type)[...,None], 4, axis=-1), W_b, W_R)
@@ -228,109 +231,67 @@ def _mesh_metadata(mesh):
 	return metadata if isinstance(metadata, dict) else {}
 
 def BC_state(W_R, W_L, mesh, **kwargs):
-	metadata = _mesh_metadata(mesh)
-	wall_markers = kwargs.get('wall_markers', metadata.get('wall_markers', [2]))
-	inlet_value = kwargs.get('value', jnp.array([1.0, 1.0, 0.0, 1.0]))
-	gamma = kwargs.get('gamma', 1.4)
-	M = kwargs.get('M', 1.0)
-	try:
-		wall_markers = tuple(int(marker) for marker in wall_markers)
-	except TypeError:
-		wall_markers = (int(wall_markers),)
 
-	if kwargs.get('flag_NS', False):
-		for marker in wall_markers:
-			W_R = BC_noslip_wall(W_R, W_L, mesh, bc_type=marker)
-	else:
-		for marker in wall_markers:
-			W_R = BC_slipwall(W_R, W_L, mesh, bc_type=marker)
-	W_R = BC_inflow(W_R, mesh, bc_type=3, value=inlet_value)  # (supersonic inlet)
-	W_R = BC_outflow(W_R, W_L, mesh, bc_type=4)  # (free outflow)
+    metadata = _mesh_metadata(mesh)
 
-	# Invariants de Riemann pour les faces de sortie du domaine
-	# Obligatoire pour le cas du diamant avec AoA, surtout si sortie subsonique (reflexions)
-	# Selon l'angle, l'outlet peut devenir un inlet localement, donc il faut gérer les flux entrants et sortants avec les invariants de Riemann
-	if str(metadata.get('case', '')).lower() == 'diamond':
-		face_markers = mesh.face_markers[mesh.face_connectivity]
-		outlet_mask = (face_markers == 4)
-		nx = mesh.normals[..., 0]
-		ny = mesh.normals[..., 1]
+    wall_markers = kwargs.get('wall_markers', metadata.get('wall_markers', [2]))
+    inlet_value = kwargs.get('value', jnp.array([1.0, 1.0, 0.0, 1.0]))
 
-		Prim_L = getPrimitive(W_L, gamma=gamma, M=M)
-		rho_L = jnp.maximum(Prim_L[..., 0], 1e-12)
-		u_L = Prim_L[..., 1]
-		v_L = Prim_L[..., 2]
-		p_L = jnp.maximum(Prim_L[..., 3], 1e-12)
-		un_L = u_L * nx + v_L * ny
-		ut_L = -u_L * ny + v_L * nx
-		a_L = jnp.sqrt(gamma * p_L / rho_L) / M
+    try:
+        wall_markers = tuple(int(m) for m in wall_markers)
+    except TypeError:
+        wall_markers = (int(wall_markers),)
 
-		Prim_inf = getPrimitive(inlet_value[None, :], gamma=gamma, M=M)[0]
-		rho_inf = jnp.maximum(Prim_inf[0], 1e-12)
-		u_inf = Prim_inf[1]
-		v_inf = Prim_inf[2]
-		p_inf = jnp.maximum(Prim_inf[3], 1e-12)
-		a_inf = jnp.sqrt(gamma * p_inf / rho_inf) / M
-		un_inf = u_inf * nx + v_inf * ny
+    # walls
+    for marker in wall_markers:
+        W_R = BC_slipwall(W_R, W_L, mesh, bc_type=marker)
 
-		J_plus = un_L + 2.0 * a_L / (gamma - 1.0)
-		J_minus_inf = un_inf - 2.0 * a_inf / (gamma - 1.0)
-		un_sub = 0.5 * (J_plus + J_minus_inf)
-		a_sub = jnp.maximum(0.25 * (gamma - 1.0) * (J_plus - J_minus_inf), 1e-8)
+    # inflow/outflow simple
+    W_R = BC_inflow(W_R, mesh, bc_type=3, value=inlet_value)
+    W_R = BC_outflow(W_R, W_L, mesh, bc_type=4)
 
-		s_L = p_L / (rho_L**gamma + 1e-12)
-		rho_sub = jnp.maximum((a_sub**2 / (gamma * s_L + 1e-12)) ** (1.0 / (gamma - 1.0)), 1e-12)
-		p_sub = jnp.maximum(s_L * rho_sub**gamma, 1e-12)
+    # subsonic inlet
+    W_R = BC_subsonic_inlet(W_R, W_L, mesh, bc_type=5)
 
-		u_sub = un_sub * nx - ut_L * ny
-		v_sub = un_sub * ny + ut_L * nx
-		Prim_sub = jnp.stack([rho_sub, u_sub, v_sub, p_sub], axis=-1)
-		W_sub = getConserved(Prim_sub, gamma=gamma, M=M)
-
-		outlet_inflow = jnp.logical_and(outlet_mask, un_L < 0.0)
-		outlet_subsonic_out = jnp.logical_and(outlet_mask, jnp.logical_and(un_L >= 0.0, jnp.abs(un_L) < a_L))
-
-		W_R = jnp.where(jnp.repeat(outlet_subsonic_out[..., None], 4, axis=-1), W_sub, W_R)
-		W_R = jnp.where(jnp.repeat(outlet_inflow[..., None], 4, axis=-1), inlet_value, W_R)
-
-	W_R = BC_subsonic_inlet(W_R, W_L, mesh, bc_type=5)  # (subsonic inlet)
-	return W_R
+    return W_R
 
 
 ###########################################################################################################
 ##########################               other functions                   ################################
 ###########################################################################################################
 def get_sponge_source(W, mesh, value, gamma=1.4, M=1.0, width=None, strength=None):
-	metadata = _mesh_metadata(mesh)
-	domain = metadata.get('domain', None)
-	if metadata.get('case', None) != 'diamond' or domain is None or not hasattr(mesh, 'barycenter'):
-		return jnp.zeros_like(W)
 
-	x_min = jnp.min(mesh.points[:, 0])
-	x_max = jnp.max(mesh.points[:, 0])
-	y_min = jnp.min(mesh.points[:, 1])
-	y_max = jnp.max(mesh.points[:, 1])
-	Lx = jnp.asarray(domain.get('Lx', x_max - x_min), dtype=W.dtype) if isinstance(domain, dict) else (x_max - x_min)
-	Ly = jnp.asarray(domain.get('Ly', y_max - y_min), dtype=W.dtype) if isinstance(domain, dict) else (y_max - y_min)
-	if width is None:
-		width = 0.1 * Ly
-	else:
-		width = jnp.asarray(width, dtype=W.dtype)
+    metadata = _mesh_metadata(mesh)
+    if metadata.get('case') != 'diamond':
+        return jnp.zeros_like(W)
 
-	Prim_inf = getPrimitive(value, gamma=gamma, M=M)
-	a_inf = jnp.sqrt(jnp.abs(gamma * Prim_inf[..., 3] / Prim_inf[..., 0])) / M
-	U_inf = jnp.sqrt(Prim_inf[..., 1] ** 2 + Prim_inf[..., 2] ** 2)
-	if strength is None:
-		strength = 0.5 * (a_inf + U_inf) / jnp.maximum(width, 1e-12)
-	else:
-		strength = jnp.asarray(strength, dtype=W.dtype)
+    bary = mesh.barycenter
 
-	bary = mesh.barycenter
-	dist_to_boundary = jnp.minimum(bary[..., 1] - y_min, y_max - bary[..., 1])
-	blend = jnp.clip((width - dist_to_boundary) / jnp.maximum(width, 1e-12), 0.0, 1.0)
-	sigma = strength * blend ** 2
-	W_inf = jnp.broadcast_to(jnp.asarray(value), W.shape)
-	return sigma[..., None] * (W_inf - W)
+    y_min = jnp.min(mesh.points[:, 1])
+    y_max = jnp.max(mesh.points[:, 1])
+
+    Ly = y_max - y_min
+
+    if width is None:
+        width = 0.15 * Ly
+
+    Prim_inf = getPrimitive(value, gamma=gamma, M=M)
+
+    U_inf = jnp.sqrt(Prim_inf[1]**2 + Prim_inf[2]**2)
+    a_inf = jnp.sqrt(gamma * Prim_inf[3] / Prim_inf[0]) / M
+
+    if strength is None:
+        strength = 0.5 * (U_inf + a_inf) / width
+
+    dist = jnp.minimum(bary[..., 1] - y_min, y_max - bary[..., 1])
+
+    blend = jnp.clip((width - dist) / width, 0.0, 1.0)
+
+    sigma = strength * blend**3
+
+    W_inf = jnp.broadcast_to(value, W.shape)
+
+    return sigma[..., None] * (W_inf - W)
 
 def get_temperature(Primitives, R = 287):
 	rho = Primitives[...,0]

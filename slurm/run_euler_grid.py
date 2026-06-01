@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""
-Usage:
+"""Usage:
   uv run python slurm/run_euler_grid.py --case diamond --mesh-path meshes/diamond/diamond_h0.05.npy \
-    --mach 0.7:1.5:0.1 --aoa 0:10:2 --fidelity lf,hf
+    --mach 0.7:1.5:0.1 --aoa 0:10:2
 """
 from __future__ import annotations
 
@@ -20,7 +19,7 @@ for path in (REPO_ROOT, EULER_DIR):
         sys.path.insert(0, path_str)
 
 from Euler import main as euler_main
-from Euler.utils import FIDELITY_PRESETS
+from Euler.config import load_mesh, setup_dirs, print_config
 
 
 def parse_range(spec: str):
@@ -33,18 +32,12 @@ def parse_range(spec: str):
     return [round(float(spec), 10)]
 
 
-def build_case_cfg(base_cfg, case, mach, aoa, fidelity):
+def build_case_cfg(base_cfg, case, mach, aoa):
     cfg = copy.deepcopy(base_cfg)
     cfg["case"] = case
     cfg["Mach"] = round(float(mach), 10)
     cfg["aoa"] = 0.0 if case == "bump" else round(float(aoa), 10)
-    cfg["fidelity"] = fidelity
     cfg["stationarity_threshold"] = float(cfg.get("stationarity_threshold", 1e-5))
-    if fidelity in FIDELITY_PRESETS:
-        cfg["dataset_mode"] = "fidelity"
-        cfg.update(FIDELITY_PRESETS[fidelity])
-    else:
-        cfg["dataset_mode"] = None
     return cfg
 
 
@@ -54,7 +47,6 @@ def main():
     parser.add_argument("--mesh-path", required=True)
     parser.add_argument("--mach", default="0.7:1.5:0.1")
     parser.add_argument("--aoa", default="0:0:1")
-    parser.add_argument("--fidelity", default="lf")
     parser.add_argument("--tf", type=float, default=None)
     parser.add_argument("--stationarity-threshold", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true")
@@ -70,25 +62,24 @@ def main():
 
     mach_list = parse_range(args.mach)
     aoa_list = [0.0] if args.case == "bump" else parse_range(args.aoa)
-    fidelities = [item.strip() for item in args.fidelity.split(",") if item.strip()]
-    grid = list(itertools.product(mach_list, aoa_list, fidelities))
+    grid = list(itertools.product(mach_list, aoa_list))
 
-    mesh = euler_main.load_mesh(base_cfg)
+    mesh = load_mesh(base_cfg)
     print(f"Loaded mesh once: {mesh.metadata.get('name', 'unknown')}")
     print(f"Cases to run: {len(grid)}")
 
     if args.dry_run:
-        for mach, aoa, fidelity in grid:
-            print(f"case={args.case} Mach={mach} AoA={aoa} fidelity={fidelity}")
+        for mach, aoa in grid:
+            print(f"case={args.case} Mach={mach} AoA={aoa}")
         return 0
 
-    for idx, (mach, aoa, fidelity) in enumerate(grid, start=1):
-        cfg = build_case_cfg(base_cfg, args.case, mach, aoa, fidelity)
+    for idx, (mach, aoa) in enumerate(grid, start=1):
+        cfg = build_case_cfg(base_cfg, args.case, mach, aoa)
         print("\n" + "=" * 78)
-        print(f"Case {idx}/{len(grid)}: case={cfg['case']} Mach={cfg['Mach']} AoA={cfg.get('aoa', 0.0)} fidelity={cfg['fidelity']}")
+        print(f"Case {idx}/{len(grid)}: case={cfg['case']} Mach={cfg['Mach']} AoA={cfg.get('aoa', 0.0)}")
 
-        out_dirs = euler_main.setup_dirs(cfg, mesh)
-        euler_main.print_config(cfg, mesh, out_dirs)
+        out_dirs = setup_dirs(cfg, mesh)
+        print_config(cfg, mesh, out_dirs)
 
         W, inlet = euler_main.initialize(mesh, cfg)
         euler_main.run(W, mesh, inlet, cfg, out_dirs)

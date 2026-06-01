@@ -1,157 +1,21 @@
-from argparse import ArgumentParser
 from pathlib import Path
 import json
 import sys
-import os
 
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 
+try:
+    from config import format_snapshot_name, format_subtitle
+except ModuleNotFoundError:
+    from Euler.config import format_snapshot_name, format_subtitle
+
 base_hot = mpl.cm.get_cmap("hot")
 hot_colors = base_hot(np.linspace(0.0, 0.8, 256))
 HOT_CMAP_CROPPED = mpl.colors.LinearSegmentedColormap.from_list("hot_cropped", hot_colors)
+
 repo_root = Path(__file__).resolve().parents[1]
-
-FIDELITY_PRESETS = {
-    "lf": {"flux": "Rusanov", "reconstruction": "constant", "time_scheme": "EE"},
-    "hf": {"flux": "HLLC", "reconstruction": "MUSCL", "time_scheme": "SRK2"},
-}
-
-from jax_fvm.src.mesh import Mesh
-
-
-def build_config_from_cli(default_cfg):
-    # Parse les arguments de la ligne de commande et retourne une config dict
-    parser = ArgumentParser(description="Simulation supersonique avec Euler 2D")
-    parser.add_argument("--case", choices=("bump", "diamond"), default=default_cfg["case"], help="Cas test : bump ou diamond")
-    parser.add_argument("--mach", type=float, default=default_cfg["Mach"], help="Nombre de Mach du flux entrant")
-    parser.add_argument("--mesh-path", type=str, default=default_cfg["mesh_path"], help="Chemin vers le fichier de maillage (.npy)")
-    parser.add_argument("--time-scheme", choices=("EE", "RK2", "RK4", "SRK2", "SSP_RK2"), default=default_cfg["time_scheme"], help="Schéma temporel")
-    parser.add_argument("--flux", choices=("Rusanov", "Tadmor", "AUSM", "Roe", "HLLC"), default=default_cfg["flux"], help="Solveur de flux numérique")
-    parser.add_argument("--reconstruction", choices=("constant", "MUSCL", "muscl"), default=default_cfg["reconstruction"], help="Type de reconstruction")
-    parser.add_argument("--aoa", type=float, default=default_cfg.get("aoa", 0.0), help="Angle d'attaque en degrés (utilisé pour le cas diamond)")
-    parser.add_argument("--fidelity", choices=("off", "lf", "hf"), default=default_cfg.get("fidelity", "off"), help="Preset fidelity mode (off/lf/hf)")
-    parser.add_argument("--stationarity-threshold", type=float, default=default_cfg.get("stationarity_threshold", 1e-6), help="Seuil d'arrêt sur le résidu relatif")
-    parser.add_argument("--stationarity-check-every", type=int, default=default_cfg.get("stationarity_check_every", 25), help="Nombre de pas entre deux tests de stationnarité")
-    args = parser.parse_args()
-
-    cfg = json.loads(json.dumps(default_cfg))
-    cfg["case"] = args.case
-    cfg["Mach"] = args.mach
-    cfg["mesh_path"] = args.mesh_path
-    cfg["time_scheme"] = "SRK2" if args.time_scheme == "SSP_RK2" else args.time_scheme
-    cfg["flux"] = args.flux
-    cfg["reconstruction"] = "MUSCL" if str(args.reconstruction).lower() == "muscl" else args.reconstruction
-    cfg["aoa"] = float(args.aoa)
-    cfg["fidelity"] = str(args.fidelity).lower()
-    cfg["stationarity_threshold"] = float(args.stationarity_threshold)
-    cfg["stationarity_check_every"] = max(1, int(args.stationarity_check_every))
-    if cfg["fidelity"] in ("lf", "hf"):
-        cfg["dataset_mode"] = "fidelity"
-
-        cfg.update(FIDELITY_PRESETS[cfg["fidelity"]])
-    else:
-        cfg["dataset_mode"] = None
-    return cfg
-
-
-def load_mesh(cfg):
-    # Création de l'objet Mesh à partir du fichier de maillage spécifié dans la config
-    if cfg["mesh_path"] is None:
-        raise ValueError("Le chemin du maillage doit être spécifié via --mesh-path ou dans la config par défaut.")
-
-    mesh = Mesh()
-    mesh.load_mesh(cfg["mesh_path"])
-    #mesh.print_statistics()
-    return mesh
-
-
-def format_h(mesh):
-    h = mesh.metadata.get("h", None)
-    if h is None:
-        return "h"
-    return f"h{float(h):.4f}".rstrip("0").rstrip(".")
-
-
-def format_snapshot_name(cfg, t):
-    condition_tag = format_condition_tag(cfg)
-
-    if cfg.get("dataset_mode") == "fidelity":
-        side = str(cfg.get("fidelity", "off")).upper()
-        return f"{side}_{condition_tag}"
-    flux = str(cfg["flux"]).upper()
-    reconstruction = str(cfg["reconstruction"]).upper()
-    time_scheme = str(cfg["time_scheme"]).upper()
-    prefix = ""
-    return f"{prefix}{condition_tag}_{flux}_{reconstruction}_{time_scheme}_t{t:.2f}"
-
-
-def format_condition_tag(cfg):
-    mach = f"M{float(cfg.get('Mach')):.2f}"
-    if str(cfg.get("case", "")).lower() == "diamond":
-        aoa = float(cfg.get("aoa", 0.0))
-        return f"AOA{aoa:.2f}_{mach}"
-    return mach
-
-
-def format_sample_id(cfg):
-    return format_condition_tag(cfg)
-
-
-def format_subtitle(cfg, mesh, t):
-    reconstruction = str(cfg["reconstruction"]).upper()
-    time_scheme = str(cfg["time_scheme"]).upper()
-    if str(cfg.get("case", "")).lower() == "diamond":
-        return (
-            f"t={t:.2f}s, M={cfg['Mach']}, AoA={float(cfg.get('aoa', 0.0)):.1f}°, "
-            f"h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
-        )
-    return (
-        f"t={t:.2f}s, M={cfg['Mach']}, h={mesh.metadata.get('h', 'n/a')} "
-        f"| Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
-    )
-
-def setup_dirs(cfg, mesh):
-    # Préparation des dossiers de sortie
-    h_dir = format_h(mesh)
-    dirs = {
-        "fig": repo_root / "figures" / cfg["case"] / h_dir,
-        "res": repo_root / "results" / cfg["case"] / h_dir,
-    }
-    for directory in dirs.values():
-        directory.mkdir(parents=True, exist_ok=True)
-    # with open(dirs["res"] / "config.json", "w") as f:
-    #     json.dump(cfg, f, indent=2)
-    print(f"Output : {dirs['res']}")
-    return dirs
-
-
-def print_config(cfg, mesh, out_dirs):
-    print("\n" + "-" * 78)
-    print("CONFIGURATION SIMULATION")
-    print("-" * 78)
-    print(f"Cas : {cfg['case']}")
-    print(f"Mesh path : {cfg['mesh_path']} (h={mesh.metadata.get('h', 'n/a')})")
-    print("-" * 78)
-    print("Physique")
-    if str(cfg.get("case", "")).lower() == "diamond":
-        print(f"  Mach : {cfg['Mach']}, AoA : {float(cfg.get('aoa', 0.0)):.1f}°, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
-    else:
-        print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
-    print("-" * 78)
-    print("Solveur")
-    reconstruction = str(cfg["reconstruction"]).upper()
-    time_scheme = str(cfg["time_scheme"]).upper()
-    print(f"  scheme FVM : {cfg['flux']}, {reconstruction}, {time_scheme}")
-    print(f"  CFL : {cfg['CFL']}, tf={cfg['tf']}")
-    print(f"  fidelity : {cfg.get('fidelity', 'off')} | stationarity_threshold={cfg.get('stationarity_threshold', 'n/a')} | check_every={cfg.get('stationarity_check_every', 'n/a')}")
-    try:
-        import jax
-        print(f"  Parallélisation JAX : {jax.default_backend()} (device count: {jax.device_count()})")
-    except Exception:
-        pass
-    print("-" * 78)
 
 
 def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
@@ -160,11 +24,10 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
     exp, gamma = cfg["export"], cfg["gamma"]
     snapshot_name = format_snapshot_name(cfg, t)
     diagnostics = None
-    is_dataset = cfg.get("dataset_mode") == "fidelity"
+    figure_fields = normalize_figure_fields(exp.get("figures", False))
 
     if exp["results"]:
-        if not is_dataset:
-            np.save(str(out_dirs["res"] / f"{snapshot_name}.npy"), np.array(W))
+        np.save(str(out_dirs["res"] / f"{snapshot_name}.npy"), np.array(W))
 
     if exp.get("bundle", True):
         prims = helper.getPrimitive(W, gamma=gamma, M=1.0)
@@ -175,16 +38,8 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         prims_R = helper.getPrimitive(W_R, gamma=gamma, M=1.0)
         prims_grad = helper.getgradientLSQ(prims_L, prims_R, mesh)
         mach_field = helper.get_mach_number(prims, gamma=gamma)
-        if is_dataset:
-            dataset_root = repo_root / 'dataset' / cfg['case']
-            sample_id = format_sample_id(cfg)
-            sample_dir = dataset_root / sample_id
-            sample_dir.mkdir(parents=True, exist_ok=True)
-            bundle_path = sample_dir / f"{snapshot_name}.npz"
-            print(f"Bundle export : {bundle_path}")
-        else:
-            bundle_path = out_dirs["res"] / f"bundle_{snapshot_name}.npz"
-            print(f"Bundle export : {bundle_path}")
+        bundle_path = out_dirs["res"] / f"{snapshot_name}.npz"
+        print(f"Bundle export : {bundle_path}")
 
         mesh_path_val = str(cfg.get('mesh_path', ''))
         n_cells_val = int(np.asarray(mesh.tris).shape[0]) if getattr(mesh, 'tris', None) is not None else -1
@@ -192,8 +47,6 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         flux_val = str(cfg.get('flux', ''))
         recon_val = str(cfg.get('reconstruction', ''))
         time_scheme_val = str(cfg.get('time_scheme', ''))
-        dataset_mode_val = str(cfg.get('dataset_mode', ''))
-        sample_id = format_sample_id(cfg)
         np.savez_compressed(
             str(bundle_path),
             node_pos=np.asarray(mesh.barycenter, dtype=np.float32),
@@ -205,88 +58,64 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
             time=np.asarray([float(t)], dtype=np.float32),
             mach_in=np.asarray([float(cfg["Mach"])], dtype=np.float32),
             aoa_in=np.asarray([float(cfg.get("aoa", 0.0))], dtype=np.float32),
-            fidelity=np.asarray([str(cfg.get("fidelity", "off"))]),
             case=np.asarray([str(cfg.get("case", ""))]),
-            sample_id=np.asarray([sample_id]),
             mesh_path=np.asarray([mesh_path_val]),
             n_cells=np.asarray([int(n_cells_val)]),
             h=np.asarray([float(h_val)]),
             flux=np.asarray([flux_val]),
             reconstruction=np.asarray([recon_val]),
             time_scheme=np.asarray([time_scheme_val]),
-            dataset_mode=np.asarray([dataset_mode_val]),
         )
-        if cfg.get("dataset_mode") == "fidelity":
-            side = str(cfg.get("fidelity", "off")).lower()
-            sample_id = format_sample_id(cfg)
-            dataset_root = repo_root / 'dataset' / cfg['case']
-            dataset_root.mkdir(parents=True, exist_ok=True)
-            manifest_path = dataset_root / "dataset_labels.json"
-            manifest = {}
-            try:
-                if manifest_path.exists():
-                    manifest = json.loads(manifest_path.read_text())
-            except Exception:
-                manifest = {}
-            entry = manifest.get(sample_id, {})
-            try:
-                rel_bundle = str(bundle_path.relative_to(repo_root)) if bundle_path.exists() else str(bundle_path)
-            except Exception:
-                rel_bundle = str(bundle_path)
-            entry[side] = rel_bundle
-            entry[f"{side}_mesh"] = str(cfg.get('mesh_path', ''))
-            entry['mesh'] = str(cfg.get('mesh_path', ''))
-            entry['mach'] = float(cfg.get('Mach'))
-            entry['case'] = str(cfg.get('case', ''))
-            entry['sample_id'] = sample_id
-            if str(cfg.get("case", "")).lower() == "diamond":
-                entry['aoa'] = float(cfg.get('aoa', 0.0))
-            manifest[sample_id] = entry
-            # Ecriture atomique
-            try:
-                tmp_path = manifest_path.with_suffix('.tmp')
-                with open(tmp_path, 'w') as mf:
-                    json.dump(manifest, mf, indent=2)
-                tmp_path.replace(manifest_path)
-            except Exception:
-                try:
-                    with open(manifest_path, 'w') as mf:
-                        json.dump(manifest, mf, indent=2)
-                except Exception:
-                    pass
 
-    if exp["figures"]:
+    if figure_fields:
         prims = helper.getPrimitive(W, gamma=gamma, M=1.0)
-        Mach_field = helper.get_mach_number(prims, gamma=gamma)
         subtitle = format_subtitle(cfg, mesh, t)
-
-        if exp.get("bundle", True):
-            # Bundle mode keeps only the Mach figure to reduce dataset creation overhead.
-            fig_path = out_dirs["fig"] / f"M_{snapshot_name}.png"
+        cmaps = {
+            "rho": "inferno",
+            "u": "viridis",
+            "v": "plasma",
+            "p": "viridis",
+            "M": "viridis",
+            "S": HOT_CMAP_CROPPED,
+        }
+        title_map = {
+            "rho": "Masse volumique $\\rho$",
+            "u": "Vitesse $u$",
+            "v": "Vitesse $v$",
+            "p": "Pression $p$",
+            "M": "Mach local $M$",
+            "S": "Schlieren (log(1+|\\nabla M|))",
+        }
+        labels = {
+            "rho": r"$\rho$",
+            "u": r"$u$",
+            "v": r"$v$",
+            "p": r"$p$",
+            "M": r"$M$",
+            "S": r"$S$",
+        }
+        field_lookup = {
+            "rho": prims[..., 0],
+            "u": prims[..., 1],
+            "v": prims[..., 2],
+            "p": prims[..., 3],
+            "M": helper.get_mach_number(prims, gamma=gamma),
+            "S": helper.get_schlieren_field(W, mesh, gamma=gamma, M=1.0),
+        }
+        for field_name in figure_fields:
+            if field_name not in field_lookup:
+                raise ValueError(f"Unknown figure field '{field_name}'. Expected one of: rho, u, v, p, M, S")
+            fig_path = out_dirs["fig"] / f"{field_name}_{snapshot_name}.png"
             print(f"Figure export : {fig_path}")
-            mesh.plot_solution(Mach_field, labels=r"$M$", filename=fig_path,
-                dpi=400, title="Mach local", subtitle=subtitle, cmap="viridis")
-        else:
-            cmaps = ["inferno", "viridis", "plasma", "viridis", HOT_CMAP_CROPPED, "Greys"]
-            title_map = {
-                "rho": "Masse volumique $\\rho$",
-                "u": "Vitesse $u$",
-                "v": "Vitesse $v$",
-                "p": "Pression $p$",
-                "M": "Mach local $M$",
-                "S": "Schlieren (log(1+|\\nabla M|))",
-            }
-            fields = ["rho", "u", "v", "p", "M", "S"]
-            texs = [r"$\rho$", r"$u$", r"$v$", r"$p$", r"$M$", r"$S$"]
-            schlieren_field = helper.get_schlieren_field(W, mesh, gamma=gamma, M=1.0)
-            for i, s in enumerate(fields):
-                tex = texs[i]
-                title = title_map.get(s, tex)
-                field = Mach_field if s == "M" else schlieren_field if s == "S" else prims[..., i]
-                fig_path = out_dirs["fig"] / f"{s}_{snapshot_name}.png"
-                print(f"Figure export : {fig_path}")
-                mesh.plot_solution(field, labels=tex, filename=fig_path,
-                    dpi=400, title=title, subtitle=subtitle, cmap=cmaps[i % len(cmaps)])
+            mesh.plot_solution(
+                field_lookup[field_name],
+                labels=labels[field_name],
+                filename=fig_path,
+                dpi=400,
+                title=title_map[field_name],
+                subtitle=subtitle,
+                cmap=cmaps[field_name],
+            )
 
     diagnostics = None
     if cfg["case"] == "bump" and inlet is not None:
@@ -331,8 +160,6 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=
         "reconstruction": cfg["reconstruction"],
         "mach": cfg["Mach"],
         "mesh_path": cfg["mesh_path"],
-        "fidelity": cfg.get("fidelity", "off"),
-        "dataset_mode": cfg.get("dataset_mode"),
         "aoa": float(cfg.get("aoa", 0.0)),
     }
 
@@ -340,7 +167,24 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=
 def export_run_summary(out_dirs, summary, snapshot_name):
     # Exporte le résumé de la simulation (temps de calcul, C_D, etc...) dans un fichier JSON
     out_dirs["res"].mkdir(parents=True, exist_ok=True)
-    path = out_dirs["res"] / f"{snapshot_name}.json"
+    path = out_dirs["res"] / f"summary_{snapshot_name}.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary written : {path}")
+
+
+def normalize_figure_fields(figures_value):
+    if figures_value in (False, None):
+        return []
+    if figures_value is True:
+        return ["M"]
+    if isinstance(figures_value, str):
+        value = figures_value.strip()
+        if not value:
+            return []
+        if value.lower() in ("false", "none", "off"):
+            return []
+        return [value]
+    if isinstance(figures_value, (list, tuple)):
+        return [str(item).strip() for item in figures_value if str(item).strip()]
+    return [str(figures_value).strip()] if str(figures_value).strip() else []

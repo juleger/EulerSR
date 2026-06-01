@@ -16,7 +16,6 @@ CASE="diamond"
 MESH_PATH="meshes/diamond/diamond_h0.035.npy"
 MACH="0.7:4.0:0.01"
 AOA="0:5:1"
-FIDELITY="lf"
 TF="10.0"
 STATIONARITY_THRESHOLD="1e-6"
 mkdir -p logs/"${SLURM_JOB_NAME}"
@@ -52,6 +51,5 @@ python slurm/run_euler_grid.py \
 	--mesh-path "${MESH_PATH}" \
 	--mach "${MACH}" \
 	--aoa "${AOA}" \
-	--fidelity "${FIDELITY}" \
 	--tf "${TF}" \
 	--stationarity-threshold "${STATIONARITY_THRESHOLD}"
