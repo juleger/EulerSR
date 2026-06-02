@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=euler-grid
-#SBATCH --partition=gpu-l40
+#SBATCH --partition=gpu-a40
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=6
+#SBATCH --mem=32G
 #SBATCH --time=20:00:00
 #SBATCH --output=logs/%x/%j.out
 #SBATCH --error=logs/%x/%j.err
@@ -13,28 +13,26 @@
 set -euo pipefail
 
 CASE="diamond"
-MESH_PATH="meshes/diamond/diamond_h0.035.npy"
-MACH="0.7:4.0:0.01"
-AOA="0:5:1"
-TF="10.0"
-STATIONARITY_THRESHOLD="1e-6"
+MESH_PATH="meshes/diamond/diamond_h0.1.npy"
+MACH="0.7:1.0:0.01"
+AOA="-5:5:1"
+TF="5.0"
+STATIONARITY_THRESHOLD="1e-7"
 mkdir -p logs/"${SLURM_JOB_NAME}"
 
+TMPDIR="${SLURM_TMPDIR:-/tmp}"
+mkdir -p "${TMPDIR}"
 
+echo "AOA: ${AOA}"
 source .venv/bin/activate
 
 export MPLBACKEND=Agg
 export JAX_ENABLE_X64=true
-export JAX_PLATFORM_NAME=gpu
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
+export JAX_COMPILATION_CACHE_DIR="${TMPDIR}/jax_cache"
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-JAX_CACHE_ROOT="${SLURM_TMPDIR:-/tmp}/jax-cache"
-rm -rf "${JAX_CACHE_ROOT}"
-mkdir -p "${JAX_CACHE_ROOT}"
-export JAX_ENABLE_COMPILATION_CACHE=true
-export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_ROOT}"
 
 echo "#############################"
 echo "User: ${USER}"

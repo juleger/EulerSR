@@ -11,7 +11,7 @@ dependencies = [
     "matplotlib>=3.9",
     "meshio>=5.3.5",
     "meshpy>=2023.1.1",
-    "jax[cpu]>=0.4.26", #à adapter selon le cluster/GPU utilisé
+    "jax[cuda12]>=0.4.26", #à adapter selon le cluster/GPU utilisé
     "scikit-learn>=1.6.1",
 ]
 

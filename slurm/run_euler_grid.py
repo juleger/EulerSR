@@ -12,14 +12,14 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-EULER_DIR = REPO_ROOT / "Euler"
+EULER_DIR = REPO_ROOT / "euler"
 for path in (REPO_ROOT, EULER_DIR):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
-from Euler import main as euler_main
-from Euler.config import load_mesh, setup_dirs, print_config
+from euler import main as euler_main
+from euler.config import load_mesh, setup_dirs, print_config
 
 
 def parse_range(spec: str):
@@ -30,6 +30,22 @@ def parse_range(spec: str):
     if "," in spec:
         return [round(float(x), 10) for x in spec.split(",") if x.strip()]
     return [round(float(spec), 10)]
+
+
+def normalize_optional_value(argv, option_name: str):
+    normalized = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == option_name and i + 1 < len(argv):
+            value = argv[i + 1]
+            if value.startswith("-") and not value.startswith("--"):
+                normalized.append(f"{option_name}={value}")
+                i += 2
+                continue
+        normalized.append(token)
+        i += 1
+    return normalized
 
 
 def build_case_cfg(base_cfg, case, mach, aoa):
@@ -50,7 +66,7 @@ def main():
     parser.add_argument("--tf", type=float, default=None)
     parser.add_argument("--stationarity-threshold", type=float, default=None)
     parser.add_argument("--dry-run", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(normalize_optional_value(sys.argv[1:], "--aoa"))
 
     base_cfg = copy.deepcopy(euler_main.CFG)
     base_cfg["case"] = args.case
