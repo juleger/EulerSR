@@ -8,4 +8,6 @@ results_bkp/
 .DS_Store
 results/
 figures/
-dataset/
+data/
+data_figures/
+res_bkp/
