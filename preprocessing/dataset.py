@@ -1,142 +1,117 @@
-
 from __future__ import annotations
-from dataclasses import dataclass, field
+import re
 from pathlib import Path
+
 import numpy as np
-from .interpolate import MeshInterpolation
-"""
-Module de gestion du dataset de snapshots CFD pour la super-resolution
-classe Snapshot : représente un snapshot CFD, avec les données de maillage, les champs de variables, etc.
-classe SRSample : représente un échantillon de données pour l'entraînement, avec les champs d'entrée et de sortie.
-classe SRDataset : gère un ensemble de snapshots et fournit des méthodes pour créer des échantillons d'entraînement pour la super-resolution
-"""
 
-@dataclass
-class Snapshot:
-    """ Représente un snapshot CFD, avec les données de maillage, les champs de variables, etc. """ 
+_PROC_RE = re.compile(r'^aoa([+-]?\d+\.\d+)_m(\d+\.\d+)$')
 
-    # Géométrie du maillage
-    coords: np.ndarray
-    areas: np.ndarray
-
-    # Champs physiques
-    conservatives: np.ndarray
-    primitives: np.ndarray
-    primitives_grad: np.ndarray | None = None
-    mach: np.ndarray | None = None
-
-    # Métadonnées
-    time: float = 0.0
-    mach_in: float = 0.0
-    aoa_in: float = 0.0
-    case: str = ""
-    h: float = 0.0
-    flux: str = ""
-    reconstruction: str = ""
-    time_scheme: str = ""
-
-    @classmethod
-    def from_npz(cls, path: Path) -> Snapshot:
-
-        data = np.load(path, allow_pickle=True)
-        return cls(
-            coords=data["node_pos"],
-            areas=data["node_area"],
-            conservatives=data["conservatives"],
-            primitives=data["primitives"],
-            primitives_grad=data.get("primitives_grad", None),
-            mach=data.get("mach", None),
-            time=float(data.get("time", 0.0)),
-            mach_in=float(data.get("mach_in", 0.0)),
-            aoa_in=float(data.get("aoa_in", 0.0)),
-            case=str(data.get("case", "")),
-            h=float(data.get("h", 0.0)),
-            flux=str(data.get("flux", "")),
-            reconstruction=str(data.get("reconstruction", "")),
-            time_scheme=str(data.get("time_scheme", "")),
-        )
-    
-    def to_dict(self) -> dict:
-        return {
-            "coords": self.coords,
-            "areas": self.areas,
-            "conservatives": self.conservatives,
-            "primitives": self.primitives,
-            "primitives_grad": self.primitives_grad,
-            "mach": self.mach,
-            "time": self.time,
-            "mach_in": self.mach_in,
-            "aoa_in": self.aoa_in,
-            "case": self.case,
-            "h": self.h,
-            "flux": self.flux,
-            "reconstruction": self.reconstruction,
-            "time_scheme": self.time_scheme,
-        }
-
-    @property
-    def n_nodes(self) -> int:
-        return int(self.coords.shape[0])
-    
-    @property
-    def n_features(self) -> int:
-        return int(self.primitives.shape[1])
+_MACH_MID   = (0.7 + 4.0) / 2    # Normalise Mach vers -1, 1
+_MACH_SCALE = (4.0 - 0.7) / 2
+_AOA_SCALE  = 5.0 # -5 à 5° : normalise AoA vers [-1, 1]
 
 
-@dataclass
-class SRSample:
-    """ Représente un échantillon de données hr/lr pour l'entraînement de la super-resolution. """
-
-    coords_lr: np.ndarray
-    coords_hr: np.ndarray
-
-    #On travaille principalement sur les primitives et ses gradients
-    primitives_lr: np.ndarray
-    primitives_hr: np.ndarray
-    Mach_lr: np.ndarray | None = None
-    Mach_hr: np.ndarray | None = None
-    grad_p_lr: np.ndarray | None = None
-    grad_p_hr: np.ndarray | None = None
-
-
-    mach_in: float
-    aoa_in: float
-    
-
-    # Options :
-
-    knn_lr: np.ndarray | None = None
-    knn_hr: np.ndarray | None = None
-
-    # graph_lr: Graph | None = None
-    # graph_hr: Graph | None = None
-
-    mapping : MeshInterpolation
-
-    metadata: dict = field(default_factory=dict)
-
-    @property
-    def n_nodes_lr(self) -> int:
-        return self.lr_snapshot.n_nodes
-
-    @property
-    def n_nodes_hr(self) -> int:
-        return self.hr_snapshot.n_nodes
+def _res_tag(r: float) -> str:
+    return 'h' + f'{r}'.replace('0.', '')
 
 
 class SRDataset:
-    """ Gère un ensemble de snapshots et fournit des méthodes pour créer des échantillons d'entraînement pour la super-resolution. """
+    """ Gère l'ensemble des snapshots et représente la base de données pour l'entraînement de la super-resolution. Fournit des méthodes pour créer des échantillons d'entraînement à partir des snapshots. """
 
-    def __init__(self):
-        self.samples: list[SRSample] = []
+    def __init__(self, data_dir: str | Path, stats_path: str | Path,
+                 split: str = 'train',
+                 lr_res: float = 0.1,
+                 use_lr_grad: bool = True,
+                 mach_range: tuple | None = None,
+                 aoa_range: tuple | None = None):
+        base = Path(data_dir) / 'processed'
+        split_dir = base / f'lr{_res_tag(lr_res)}' / split
+        if not split_dir.exists():
+            split_dir = base / split
+        d = np.load(stats_path)
+        self.mu = d['mu'].astype(np.float32)
+        self.sig = d['sig'].astype(np.float32)
+        self.use_lr_grad = use_lr_grad
 
-    def add(self, sample: SRSample):
-        self.samples.append(sample)
+        self.entries: list[tuple] = []
+
+        # Filtrage des snapshots par plage de Mach/AoA
+        for f in sorted(split_dir.glob('aoa*.npz')):
+            m = _PROC_RE.match(f.stem)
+            if not m:
+                continue
+            aoa, mach = float(m.group(1)), float(m.group(2))
+            if mach_range is not None and not (mach_range[0] <= mach <= mach_range[1]):
+                continue
+            if aoa_range  is not None and not (aoa_range[0]  <= aoa  <= aoa_range[1]):
+                continue
+            self.entries.append((f, mach, aoa))
+
+        self._has_lr_grad = False
+        self._pos_center  = np.zeros(2, np.float32)
+        self._pos_scale   = 1.0
+        if self.entries:
+            probe = np.load(self.entries[0][0])
+            if use_lr_grad:
+                self._has_lr_grad = 'lr_primitives_grad' in probe
+            pts = np.concatenate([probe['hr_node_pos'], probe['lr_node_pos']], axis=0).astype(np.float64)
+            self._pos_center = ((pts.max(0) + pts.min(0)) / 2).astype(np.float32)
+            self._pos_scale  = float((pts.max(0) - pts.min(0)).max() / 2)
+
+    @property
+    def lr_feat_dim(self) -> int:
+        return 9 if self._has_lr_grad else 6   # prim(4)+pos(2)[+grad_p(2)+div_u(1)]
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.entries)
 
-    def __getitem__(self, idx) -> SRSample:
-        return self.samples[idx]
+    def __getitem__(self, idx):
+        # Méthode pour charger les données d'un sample d'entraînement 
+        path, mach_in, aoa_in = self.entries[idx]
+        d = np.load(path)
 
-    def get_features_stats(self):
+        hr_pos  = d['hr_node_pos'].astype(np.float32)
+        hr_prim = d['hr_primitives'].astype(np.float32)
+        hr_grad = d['hr_primitives_grad'].astype(np.float32)
+        lr_pos  = d['lr_node_pos'].astype(np.float32)
+        lr_prim = d['lr_primitives'].astype(np.float32)
+
+        N = hr_pos.shape[0]
+
+        hr_pos_n = (hr_pos - self._pos_center) / self._pos_scale
+        lr_pos_n = (lr_pos - self._pos_center) / self._pos_scale
+        mach_n   = (mach_in - _MACH_MID) / _MACH_SCALE
+        aoa_n    = aoa_in / _AOA_SCALE
+
+        hr_feat = np.stack([
+            hr_pos_n[:, 0], hr_pos_n[:, 1],
+            np.full(N, mach_n, np.float32),
+            np.full(N, aoa_n,  np.float32),
+        ], axis=1)
+
+        lr_prim_n = (lr_prim - self.mu) / self.sig
+
+        # SI besoin, ajoute les features de gradient de pression (direction x et y) et divergence de la vitesse
+        lr_grad_feat = None
+        if self._has_lr_grad:
+            lr_grad = d['lr_primitives_grad'].astype(np.float32)
+            grad_p  = lr_grad[:, 3, :] # anisotrope
+            div_u   = lr_grad[:, 1, 0] + lr_grad[:, 2, 1]
+            # Normalisation par arcsinh pour limiter les valeurs extrêmes
+            grad_p_feat = np.arcsinh(grad_p  / (self.sig[3] + 1e-8))
+            div_u_feat  = np.arcsinh(div_u   / (self.sig[1] + 1e-8))[:, None]
+            lr_grad_feat = np.concatenate([grad_p_feat, div_u_feat], axis=1)
+
+        base_lr = [lr_prim_n, lr_pos_n[:, 0:1], lr_pos_n[:, 1:2]]
+        lr_feat = np.concatenate(base_lr + ([lr_grad_feat] if lr_grad_feat is not None else []), axis=1)
+
+        target = (hr_prim - self.mu) / self.sig
+
+        # Calcul des poids pour la loss : conditionnés par le gradient de pression, pour donner plus d'influence près des chocs
+        gp = np.sqrt((hr_grad[:, 3, :] ** 2).sum(-1))
+        weights = np.minimum(1.0 + 2.0 * gp / (gp.mean() + 1e-8), 5.0).astype(np.float32)
+
+        # arcsinh : borne les valeurs choc
+        grad_p_target = np.arcsinh(hr_grad[:, 3, :] * (self._pos_scale / self.sig[3])).astype(np.float32)
+
+        return hr_feat, lr_feat, target, weights, grad_p_target
