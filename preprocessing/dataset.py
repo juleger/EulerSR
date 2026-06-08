@@ -8,7 +8,7 @@ _PROC_RE = re.compile(r'^aoa([+-]?\d+\.\d+)_m(\d+\.\d+)$')
 
 _MACH_MID   = (0.7 + 4.0) / 2    # Normalise Mach vers -1, 1
 _MACH_SCALE = (4.0 - 0.7) / 2
-_AOA_SCALE  = 5.0 # -5 à 5° : normalise AoA vers [-1, 1]
+_AOA_SCALE  = 5.0       # -5 à 5° : normalise AoA vers [-1, 1]
 
 
 def _res_tag(r: float) -> str:
