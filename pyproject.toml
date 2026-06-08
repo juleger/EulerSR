@@ -11,8 +11,12 @@ dependencies = [
     "matplotlib>=3.9",
     "meshio>=5.3.5",
     "meshpy>=2023.1.1",
-    "jax[cuda12]>=0.4.26", #à adapter selon le cluster/GPU utilisé
+    "jax[cuda12]==0.4.38; sys_platform == 'linux'",
+    "jax==0.4.38; sys_platform == 'darwin'",
     "scikit-learn>=1.6.1",
+    "flax==0.10.4",
+    "pyyaml>=6.0",
+    "optax==0.2.2",
 ]
 
 [dependency-groups]
@@ -27,5 +31,7 @@ dev = [
 packages = ["Euler", "meshes"]
 
 [tool.uv]
-# Pour créer le venv sur Mac
-#required-environments = ["sys_platform == 'darwin' and platform_machine == 'x86_64'"]
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
