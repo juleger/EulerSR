@@ -22,7 +22,7 @@ def load_default_config(config_path: str | Path | None = None):
 
 def build_config_from_cli(default_cfg):
     parser = ArgumentParser(description="Simulation supersonique avec Euler 2D")
-    parser.add_argument("--case", choices=("bump", "diamond"), default=default_cfg["case"], help="Cas test : bump ou diamond")
+    parser.add_argument("--case", choices=("bump", "diamond", "naca"), default=default_cfg["case"], help="Cas test : bump, diamond ou naca")
     parser.add_argument("--mach", type=float, default=default_cfg["Mach"], help="Nombre de Mach du flux entrant")
     parser.add_argument("--mesh-path", type=str, default=default_cfg["mesh_path"], help="Chemin vers le fichier de maillage (.npy)")
     parser.add_argument("--time-scheme", choices=("EE", "RK2", "RK4", "SRK2", "SSP_RK2"), default=default_cfg["time_scheme"], help="Schéma temporel")
@@ -74,7 +74,7 @@ def format_h(mesh):
 
 def format_condition_tag(cfg):
     mach = f"M{float(cfg.get('Mach')):.2f}"
-    if str(cfg.get("case", "")).lower() == "diamond":
+    if str(cfg.get("case", "")).lower() in ("diamond", "naca"):
         aoa = float(cfg.get("aoa", 0.0))
         return f"AOA{aoa:.2f}_{mach}"
     return mach
@@ -96,7 +96,7 @@ def format_sample_id(cfg):
 def format_subtitle(cfg, mesh, t):
     reconstruction = str(cfg["reconstruction"]).upper()
     time_scheme = str(cfg["time_scheme"]).upper()
-    if str(cfg.get("case", "")).lower() == "diamond":
+    if str(cfg.get("case", "")).lower() in ("diamond", "naca"):
         return (
             f"t={t:.2f}s, M={cfg['Mach']}, AoA={float(cfg.get('aoa', 0.0)):.1f}°, "
             f"h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
@@ -109,10 +109,19 @@ def format_subtitle(cfg, mesh, t):
 
 def setup_dirs(cfg, mesh):
     h_dir = format_h(mesh)
-    dirs = {
-        "fig": repo_root / "euler/figures" / cfg["case"] / h_dir,
-        "res": repo_root / "euler/results" / cfg["case"] / h_dir,
-    }
+    case = str(cfg.get("case", ""))
+    if case in ("diamond", "naca"):
+        aoa = float(cfg.get("aoa", 0.0))
+        aoa_tag = f"AOA{aoa:.2f}"
+        dirs = {
+            "fig": repo_root / "euler" / "figures" / case / h_dir / aoa_tag,
+            "res": repo_root / "data" / case / "raw" / h_dir / aoa_tag,
+        }
+    else:
+        dirs = {
+            "fig": repo_root / "euler" / "figures" / case / h_dir,
+            "res": repo_root / "euler" / "results" / case / h_dir,
+        }
     for directory in dirs.values():
         directory.mkdir(parents=True, exist_ok=True)
     print(f"Output : {dirs['res']}")
@@ -127,7 +136,7 @@ def print_config(cfg, mesh, out_dirs):
     print(f"Mesh path : {cfg['mesh_path']} (h={mesh.metadata.get('h', 'n/a')})")
     print("-" * 78)
     print("Physique")
-    if str(cfg.get("case", "")).lower() == "diamond":
+    if str(cfg.get("case", "")).lower() in ("diamond", "naca"):
         print(f"  Mach : {cfg['Mach']}, AoA : {float(cfg.get('aoa', 0.0)):.1f}°, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     else:
         print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")

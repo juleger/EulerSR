@@ -1,4 +1,4 @@
-# Cas test: "bump" | "diamond"
+# Cas test: "bump" | "diamond" | "naca"
 case = "diamond"
 
 # Physique
@@ -18,9 +18,9 @@ reconstruction = "MUSCL"
 CFL = 0.6
 tf = 4.0
 stationarity_threshold = 1e-6
-stationarity_check_every = 100000
+stationarity_check_every = 10000 
 
-# Maillage
+# Maillage (doit correspondre au case)
 mesh_path = "meshes/diamond/diamond_h0.05.npy"
 
 [export]

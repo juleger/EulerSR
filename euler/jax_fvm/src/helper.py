@@ -262,7 +262,8 @@ def BC_state(W_R, W_L, mesh, **kwargs):
 def get_sponge_source(W, mesh, value, gamma=1.4, M=1.0, width=None, strength=None):
 
     metadata = _mesh_metadata(mesh)
-    if metadata.get('case') != 'diamond':
+	# Si le cas est bump, pas d'amortissement sur les bords (channel)
+    if metadata.get('case') == 'bump':
         return jnp.zeros_like(W)
 
     bary = mesh.barycenter
