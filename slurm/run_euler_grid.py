@@ -59,7 +59,7 @@ def build_case_cfg(base_cfg, case, mach, aoa):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", choices=("bump", "diamond"), required=True)
+    parser.add_argument("--case", choices=("bump", "diamond", "naca"), required=True)
     parser.add_argument("--mesh-path", required=True)
     parser.add_argument("--mach", default="0.7:1.5:0.1")
     parser.add_argument("--aoa", default="0:0:1")
