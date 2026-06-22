@@ -29,7 +29,7 @@ def initialize(mesh, cfg):
     rho_inf, p_inf = cfg["rho_inf"], cfg["p_inf"]
     gamma, Mach = cfg["gamma"], cfg["Mach"]
     c_inf = (gamma * p_inf / rho_inf) ** 0.5
-    aoa_deg = float(cfg.get("aoa", 0.0)) if cfg.get("case") in ("diamond", "naca") else 0.0
+    aoa_deg = float(cfg.get("aoa", 0.0)) if cfg.get("case") in ("diamond", "naca0012", "rae2822") else 0.0
     aoa_rad = jnp.deg2rad(jnp.asarray(aoa_deg))
     u_inf = Mach * c_inf * jnp.cos(aoa_rad)
     v_inf = Mach * c_inf * jnp.sin(aoa_rad)
@@ -56,9 +56,9 @@ def run(W, mesh, inlet, cfg, out_dirs):
     stationarity_check_every = int(cfg.get("stationarity_check_every"))
 
     # Calcul dt selon CFL (fixe dans ce cas)
-    if 0.6 < cfg["Mach"] < 1.1 and cfg["CFL"] > 0.4:
-        print(f"Attention : régime transsonique avec CFL={cfg['CFL']} potentiellement instable. CFL réduite à 0.4")
-        cfg["CFL"] = 0.4
+    if 0.6 < cfg["Mach"] < 1.1 and cfg["CFL"] > 0.45:
+        print(f"Attention : régime transsonique avec CFL={cfg['CFL']} potentiellement instable. CFL réduite à 0.45")
+        cfg["CFL"] = 0.45
     dt = helper.get_dt(W, mesh, CFL=cfg["CFL"], gamma=cfg["gamma"], M=1.0)
     N = int(cfg["tf"] / dt) + 1
     n_snaps = max(1, int(exp["n_snaps"]))
@@ -132,7 +132,7 @@ def run(W, mesh, inlet, cfg, out_dirs):
         W_snapshots = {round(final_time, 6): np.array(W)}
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
     summary = None
-    if cfg["case"] in ("diamond", "bump", "naca") and (exp.get("summary", True)):
+    if cfg["case"] in ("diamond", "bump", "naca0012", "rae2822") and (exp.get("summary", True)):
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])

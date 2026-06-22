@@ -1,4 +1,4 @@
-# Cas test: "bump" | "diamond" | "naca"
+# Cas test: "bump" | "diamond" | "naca0012"
 case = "diamond"
 
 # Physique

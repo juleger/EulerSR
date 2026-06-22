@@ -1,4 +1,4 @@
-"""Utilitaires communs aux modules de maillage (diamond, naca, rae2822)."""
+"""Utilitaires communs aux modules de maillage (diamond, naca0012, rae2822)."""
 from dataclasses import dataclass
 import numpy as np
 import meshpy.triangle as triangle
@@ -25,21 +25,21 @@ class MeshSizeParams:
 
 
 def sample_segment(p0, p1, target_size_func, min_step) -> np.ndarray:
-    """Points adaptatifs le long d'un segment selon target_size_func."""
+    """Points adaptatifs le long d'un segment selon target_size_func"""
     p0 = np.asarray(p0, dtype=float)
     p1 = np.asarray(p1, dtype=float)
-    delta  = p1 - p0
+    delta = p1 - p0
     length = float(np.linalg.norm(delta))
     if length == 0.0:
         return np.empty((0, 2), dtype=float)
 
     direction = delta / length
-    samples   = [p0]
-    s         = 0.0
+    samples = [p0]
+    s = 0.0
     while s < length:
         midpoint = p0 + direction * min(s + 0.5 * min_step, length)
-        step     = max(min_step, float(target_size_func(midpoint)))
-        next_s   = min(length, s + step)
+        step = max(min_step, float(target_size_func(midpoint)))
+        next_s = min(length, s + step)
         if next_s >= length or (length - next_s) < 0.5 * min_step:
             break
         samples.append(p0 + direction * next_s)
@@ -57,7 +57,7 @@ def smoothstep(x: float) -> float:
 
 def _menger_curvature(pts: np.ndarray) -> np.ndarray:
     """Courbure de Menger discrète pour raffinement adaptatif au bord d'attaque."""
-    n     = len(pts)
+    n = len(pts)
     kappa = np.zeros(n)
     for i in range(1, n - 1):
         a, b, c = pts[i - 1], pts[i], pts[i + 1]
@@ -72,46 +72,40 @@ def _menger_curvature(pts: np.ndarray) -> np.ndarray:
 
 def _sample_half_contour(half_pts: np.ndarray, h_body: float, h_min: float) -> np.ndarray:
     """Échantillonnage adaptatif d'une demi-surface de profil selon la courbure."""
-    diffs  = np.diff(half_pts, axis=0)
+    diffs = np.diff(half_pts, axis=0)
     arclen = np.concatenate([[0.0], np.cumsum(np.linalg.norm(diffs, axis=1))])
-    total  = arclen[-1]
-    kappa  = _menger_curvature(half_pts)
+    total = arclen[-1]
+    kappa = _menger_curvature(half_pts)
 
     pts, s = [], 0.0
     while s < total:
         pts.append([float(np.interp(s, arclen, half_pts[:, 0])),
                     float(np.interp(s, arclen, half_pts[:, 1]))])
-        k  = max(float(np.interp(s, arclen, kappa)), 1e-10)
-        s += float(np.clip(h_body / k, h_min, h_body))
+        k = max(float(np.interp(s, arclen, kappa)), 1e-10)
+        s += float(np.clip(h_body / k * 2, h_min, h_body))
     return np.array(pts)
 
 
-def sample_airfoil_boundary(dense: np.ndarray, n_half: int,
-                             chord: float, x0: float, y0: float, h: float):
-    """Frontière discrète d'un profil (extrados + BF + intrados), piloté par la courbure.
-
-    `dense` : contour dense au format extrados[0..n_half-1] + intrados[1:-1] inversé.
-    `n_half` : nombre de points sur chaque demi-surface dans `dense`.
-    """
-    h_body    = h * 2.0 / 3.0
-    h_min     = h / 10.0
-    upper     = dense[:n_half]
-    lower     = np.concatenate([dense[:1], dense[n_half:][::-1], dense[n_half - 1:n_half]])
+def sample_airfoil_boundary(dense: np.ndarray, n_half: int, chord: float, x0: float, y0: float, h: float):
+    """Frontière discrète d'un profil (extrados + BF + intrados) selon la courbure et la taille h"""
+    h_body = h * 2.0 / 3.0
+    h_min = h / 5.0
+    upper = dense[:n_half]
+    lower = np.concatenate([dense[:1], dense[n_half:][::-1], dense[n_half - 1:n_half]])
     upper_pts = _sample_half_contour(upper, h_body, h_min)
     lower_pts = _sample_half_contour(lower, h_body, h_min)
-    te_pt     = np.array([[x0 + chord, y0]])
-    pts       = np.concatenate([upper_pts, te_pt, lower_pts[::-1][:-1]])
+    te_pt = np.array([[x0 + chord, y0]])
+    pts = np.concatenate([upper_pts, te_pt, lower_pts[::-1][:-1]])
     return pts, [WALL] * len(pts)
 
 
-def local_size_kdtree(point, tree, cx: float, chord: float, max_thickness: float,
-                      h: float, size_params: MeshSizeParams, kappa_array=None) -> float:
-    """Taille locale des mailles (profils avec KDTree) : croissance depuis la paroi."""
-    x_le  = cx - chord / 2.0
-    px    = float(point[0])
+def local_size_kdtree(point, tree, cx: float, chord: float, max_thickness: float, 
+                    h: float, size_params: MeshSizeParams, kappa_array=None) -> float:
+    x_le = cx - chord / 2.0
+    px = float(point[0])
     p_arr = np.array(point, dtype=np.float64)
     dist, idx = tree.query(p_arr)
-    dist  = float(dist)
+    dist = float(dist)
 
     if dist <= size_params.obstacle_factor * max_thickness:
         return float(h)
@@ -119,17 +113,16 @@ def local_size_kdtree(point, tree, cx: float, chord: float, max_thickness: float
     growth_length = max(max_thickness, h)
 
     if kappa_array is not None:
-        k      = max(float(kappa_array[idx]), 1e-10)
-        h_surf = float(np.clip(h / k, h / 10.0, h * 2.0 / 3.0))
+        k = max(float(kappa_array[idx]), 1e-10)
+        h_surf = float(np.clip(h / k, h / 5.0, h * 2.0 / 3.0))
         h_base = h_surf + min(1.0, dist / h) * (h - h_surf)
     else:
         h_base = h
 
-    left_gap        = x_le - px
+    left_gap = x_le - px
     left_transition = max(size_params.left_margin_factor * max_thickness, 4.0 * h)
-    left_blend      = smoothstep(left_gap / left_transition)
-    growth_rate     = size_params.growth_rate + left_blend * (
-                      size_params.left_growth_rate - size_params.growth_rate)
+    left_blend = smoothstep(left_gap / left_transition)
+    growth_rate = size_params.growth_rate + left_blend * (size_params.left_growth_rate - size_params.growth_rate)
     max_size_factor = size_params.max_size_factor * (1.0 + 3.0 * left_blend)
 
     target = h_base * (1.0 + growth_rate * dist / growth_length)
@@ -138,16 +131,15 @@ def local_size_kdtree(point, tree, cx: float, chord: float, max_thickness: float
 
 def make_airfoil_refinement(tree, cx: float, cy: float, chord: float, max_thickness: float, h: float,
        size_params: MeshSizeParams, kappa_array=None):
-    """Retourne la fonction de raffinement pour meshpy (profils naca/rae2822)."""
+    """Retourne la fonction de raffinement pour meshpy (profils naca0012/rae2822)"""
     def refinement_func(vertices, area):
         centroid = np.mean([(v.x, v.y) for v in vertices], axis=0)
-        target_h = local_size_kdtree(centroid, tree, cx, chord, max_thickness, h,
-                                     size_params, kappa_array)
+        target_h = local_size_kdtree(centroid, tree, cx, chord, max_thickness, h, size_params, kappa_array)
         return bool(area > triangle_area_from_h(target_h))
     return refinement_func
 
 def build_outer_boundary(Lx: float, Ly: float, size_func, h: float):
-    """Points et marqueurs sur le contour rectangulaire du domaine."""
+    """Points et marqueurs sur le contour rectangulaire du domaine"""
     outer = [(0.0, 0.0), (Lx, 0.0), (Lx, Ly), (0.0, Ly)]
     pts, ms, last = [], [], None
     for p0, p1, marker in [
@@ -176,12 +168,11 @@ def populate_mesh_from_triangle(mesh, raw_mesh):
 
 
 def triangulate_with_hole(outer_pts, outer_ms, obstacle_pts, obstacle_ms, hole_pt, refinement_func) -> Mesh:
-    """Assemble la triangulation Delaunay avec obstacle creux."""
+    """Assemble la triangulation Delaunay avec obstacle creux"""
     all_pts = np.concatenate([outer_pts, obstacle_pts])
-    off     = len(outer_pts)
-    mesh    = Mesh()
-    facets  = (mesh.round_trip_connect(0, off - 1)
-               + mesh.round_trip_connect(off, off + len(obstacle_pts) - 1))
+    off = len(outer_pts)
+    mesh = Mesh()
+    facets = (mesh.round_trip_connect(0, off - 1) + mesh.round_trip_connect(off, off + len(obstacle_pts) - 1))
 
     info = triangle.MeshInfo()
     info.set_points([tuple(pt) for pt in all_pts])

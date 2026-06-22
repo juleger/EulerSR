@@ -103,7 +103,7 @@ if __name__ == "__main__":
     alpha  = np.radians(5)
     height = chord * np.tan(alpha)
 
-    for h in [0.3]:
+    for h in [0.2]:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, chord=chord, height=height,
                                 cx=cx, cy=cy, export_vtk=False)
         mesh.plot_mesh(filename=mesh_dir / f"diamond_h{h}.png", dpi=500)
