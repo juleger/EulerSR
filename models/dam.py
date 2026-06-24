@@ -122,7 +122,7 @@ class DAMNet(nnx.Module):
 
 
 class DAM(SRModel):
-    """Deterministic Attentional Mesh — SR direct avec backbone hiérarchique FAM."""
+    """Deterministic Attentional Mesh : SR direct avec backbone hiérarchique FAM."""
 
     DEFAULT_LEVELS = [0.05, 0.1]
 

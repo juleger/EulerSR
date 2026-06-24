@@ -15,7 +15,6 @@ Entraînement :
 """
 
 import csv
-import datetime
 import math
 import os
 import functools
@@ -41,7 +40,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from loss import LOSS_FNS, grad_p_lsq
 from utils.viz._style import VAR_LABELS
-from utils.viz.training import plot_training_curves, plot_val_panels  # noqa: F401
+from utils.viz.training import plot_training_curves
 from utils.metrics import enthalpy_rms, l2_rel
 from utils.refs import to_mach, _res_tag
 from utils.layout import DataLayout
@@ -576,9 +575,7 @@ def _ensure_knn(layout: DataLayout, hr_res: float, lr_res: float, k: int) -> Pat
     if p.exists():
         return p
 
-    if str(Path(__file__).resolve().parents[1] / 'preprocessing') not in sys.path:
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'preprocessing'))
-    from knn import build
+    from preprocessing.knn import build
 
     mesh_hr = np.load(layout.mesh_path(hr_res), allow_pickle=True).item()
     mesh_lr = np.load(layout.mesh_path(lr_res), allow_pickle=True).item()
