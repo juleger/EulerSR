@@ -1,0 +1,56 @@
+model: fam
+data_root: data/
+
+resolution:
+  hr: 0.025
+  lr: 0.1
+
+architecture:
+  levels: [0.05, 0.1]
+  embed_dim: 96
+  cond_dim: 96
+  t_dim: 64
+  n_heads: 3
+  n_global_blocks: 3
+  mlp_ratio: 4
+  k_pool: 9
+  k_up: 6
+  k_self: 9
+  k_cond: 6
+  use_lr_grad: true
+  use_bf16: true
+  use_geom_cond: true
+  n_geoms: 2
+
+flow:
+  n_steps: 16
+  use_residual: true
+  n_samples: 1
+  ema_decay: 0.9995 
+  n_val_gen: 32
+  sample_seed: 42
+  t_dist: logit_normal
+  sigma_t: 1.5
+
+# Entraînement multi-géométrie : diamond + NACA0012
+datasets:
+  - name: diamond
+    weight: 1.0
+
+  - name: naca0012
+    weight: 1.0
+
+training:
+  epochs: 150
+  lr: 5.0e-4
+  weight_decay: 1.0e-4
+  val_every: 10
+  seed: 42
+  loss: shock_weighted_rel_mse
+  shock_weight_factor: 1.0
+  schedule: cosine
+  warmup_epochs: 20
+  grad_clip: 4.0
+  save_best: true
+  batch_size: 16
+  preload: true
