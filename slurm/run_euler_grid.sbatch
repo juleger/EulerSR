@@ -1,29 +1,55 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=euler-grid
-#SBATCH --partition=gpu-a40
+#SBATCH --partition=gpu-rtx6000
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=6
-#SBATCH --mem=32G
+#SBATCH --mem=24G
 #SBATCH --time=20:00:00
-#SBATCH --output=logs/%x/%j.out
-#SBATCH --error=logs/%x/%j.err
+#SBATCH --array=0-10
+#SBATCH --output=logs/euler/grid_%A_%a.out
+#SBATCH --error=logs/euler/grid_%A_%a.err
 
-set -euo pipefail
+# Grille de simulations Euler, un SLURM array par AoA, chaque tâche couvre
+# une plage de Mach pour une géométrie donnée.
+#
+# Usage :
+#   sbatch slurm/run_euler_grid.sbatch
+#
+# Paramètres (modifier directement ou via env vars) :
+#   CASE       : géométrie  — diamond | naca0012 | rae2822
+#   MESH_PATH  : chemin du maillage HR
+#   MACH       : plage Mach au format start:stop:step  (ex: 0.70:4.00:0.01)
+#   AOA_MIN    : AoA minimum correspondant au SLURM array task 0 (défaut: -5)
+#   TF         : temps final simulation (défaut: 5.0)
+#   STATIONARITY_THRESHOLD : seuil de convergence (défaut: 1e-8)
 
-CASE="diamond"
-MESH_PATH="meshes/diamond/diamond_h0.1.npy"
-MACH="0.7:1.0:0.01"
-AOA="-5:5:1"
-TF="5.0"
-STATIONARITY_THRESHOLD="1e-7"
-mkdir -p logs/"${SLURM_JOB_NAME}"
+
+CASE="${CASE:-naca0012}"
+MESH_PATH="${MESH_PATH:-data/meshes/naca0012_h0.025.npy}"
+MACH="${MACH:-1.31:1.99:0.02}"
+TF="${TF:-5.0}"
+STATIONARITY_THRESHOLD="${STATIONARITY_THRESHOLD:-1e-8}"
+AOA_MIN="${AOA_MIN:--5}"
+
+AOA=$(( SLURM_ARRAY_TASK_ID + AOA_MIN ))
 
 TMPDIR="${SLURM_TMPDIR:-/tmp}"
-mkdir -p "${TMPDIR}"
+mkdir -p "${TMPDIR}" logs/euler
 
-echo "AOA: ${AOA}"
+echo "##############################################################"
+echo "User              : ${USER}"
+echo "SLURM_JOBID       : ${SLURM_JOBID}"
+echo "SLURM_ARRAY_TASK  : ${SLURM_ARRAY_TASK_ID}  →  AoA=${AOA}"
+echo "Case              : ${CASE}"
+echo "Mesh              : ${MESH_PATH}"
+echo "Mach range        : ${MACH}"
+echo "tf / threshold    : ${TF} / ${STATIONARITY_THRESHOLD}"
+echo "SLURM_JOB_NODELIST: ${SLURM_JOB_NODELIST}"
+nvidia-smi || true
+echo "##############################################################"
+
 source .venv/bin/activate
 
 export MPLBACKEND=Agg
@@ -33,21 +59,14 @@ export JAX_COMPILATION_CACHE_DIR="${TMPDIR}/jax_cache"
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
+echo "[$(date +%T)] Lancement : case=${CASE}  AoA=${AOA}  Mach=${MACH}"
 
-echo "#############################"
-echo "User: ${USER}"
-echo "SLURM_JOBID: ${SLURM_JOBID}"
-echo "SLURM_SUBMIT_DIR: ${SLURM_SUBMIT_DIR}"
-echo "SLURM_JOB_NODELIST: ${SLURM_JOB_NODELIST}"
-echo "GPU Info:"
-nvidia-smi || true
-echo "#############################"
+python -u slurm/run_euler_grid.py \
+    --case                   "${CASE}" \
+    --mesh-path              "${MESH_PATH}" \
+    --mach                   "${MACH}" \
+    --aoa                    "${AOA}" \
+    --tf                     "${TF}" \
+    --stationarity-threshold "${STATIONARITY_THRESHOLD}"
 
-echo "[$(date +%T)] Launching grid runner"
-python slurm/run_euler_grid.py \
-	--case "${CASE}" \
-	--mesh-path "${MESH_PATH}" \
-	--mach "${MACH}" \
-	--aoa "${AOA}" \
-	--tf "${TF}" \
-	--stationarity-threshold "${STATIONARITY_THRESHOLD}"
+echo "[$(date +%T)] Done — AoA=${AOA}"
