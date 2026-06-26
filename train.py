@@ -1,10 +1,25 @@
+"""
+Module d'entrainement des modèles de super-résolution sur les données CFD. Utilise JAX/Flax pour
+l'entrainement et la validation.
+
+- Parser d'arguments pour configurer l'entrainement (config YAML, hyperparamètres, géométrie, plage Mach/AoA, etc.)
+- Chargement des datasets (single ou multi-géométrie) avec normalisation des primitives LR/HR
+- Construction du modèle à partir de la configuration (DAM, FAM, etc.)
+- Entrainement du modèle avec fit(), sauvegarde du meilleur modèle, et callback pour visualiser les prédictions sur les cas de référence
+- Logger des métriques d'entrainement et de validation (loss, erreurs, etc.) dans le répertoire results/checkpoints/<run_name>
+- Plots de validation périodiques sur les cas de référence, avec possibilité de visualiser les champs HR/LR, les erreurs, les gradients, etc.
+- Support multi-géométrie : entrainement sur plusieurs datasets simultanément.
+
+"""
+
+
 import sys
 import argparse
 import importlib
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import jax
 from flax import nnx
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -12,14 +27,15 @@ sys.path.insert(0, str(REPO_ROOT))
 sys.path.append(str(REPO_ROOT / 'euler'))
 import euler.jax_fvm.src.mesh  # noqa: F401
 
-from preprocessing.dataset import SRDataset
+from preprocessing.dataset import SRDataset, MultiSRDataset
 from models.base import TrainConfig, load_cfg
-from utils.viz.training import plot_prediction
-from utils.refs import REFERENCE_CASES, find_ref_file
+from utils.viz.training import plot_val_panels, plot_huber_regime
+from utils.refs import REFERENCE_CASES, NACA_REFERENCE_CASES, find_ref_file, _res_tag
+from utils.layout import DataLayout
 
 _MODELS = {
-    'mlp_corrector': ('models.deterministic.mlp_corrector', 'MlpCorrector'),
-    'localnet':      ('models.deterministic.localnet',      'LocalNet'),
+    'dam': ('models.dam', 'DAM'),
+    'fam': ('models.fam', 'FAM'),
 }
 
 
@@ -30,29 +46,76 @@ def _parse_range(spec: str | None):
     return (float(parts[0]), float(parts[1]))
 
 
+def _per_branch(val, n, default):
+    """Étend une valeur de config en liste par branche.
+    None -> [default]*n ; scalaire -> répété ; liste -> alignée sur lr_res."""
+    if val is None:
+        return [default] * n
+    if isinstance(val, list):
+        if len(val) != n:
+            raise ValueError(
+                f"datasets: la liste {val} doit avoir {n} éléments (un par lr_res)")
+        return list(val)
+    return [val] * n
+
+
+def build_branches(datasets_cfg, data_root, hr_res, lr_res,
+                   mach_range, aoa_range, default_train_fraction):
+    """Construit les branches du mode multi-dataset.
+
+    Une branche = un couple (géométrie, résolution_LR).
+    Les branches d'une même géométrie partagent le même geom_id (embedding), la
+    résolution étant conditionnée séparément.
+    """
+    branches, geom_to_id = [], {}
+    for ds_cfg in datasets_cfg:
+        geom = ds_cfg['name']
+        gid = geom_to_id.setdefault(geom, len(geom_to_id))
+        lr_list = ds_cfg.get('lr_res', [lr_res])
+        if not isinstance(lr_list, list):
+            lr_list = [lr_list]
+        mr = tuple(ds_cfg['mach_range']) if ds_cfg.get('mach_range') else mach_range
+        ar = tuple(ds_cfg['aoa_range']) if ds_cfg.get('aoa_range') else aoa_range
+        w_list = _per_branch(ds_cfg.get('weight'), len(lr_list), 1.0)
+        tf_list = _per_branch(ds_cfg.get('train_fraction'), len(lr_list), default_train_fraction)
+        for r, w, tf in zip(lr_list, w_list, tf_list):
+            name = geom if len(lr_list) == 1 else f'{geom}_lr{_res_tag(r)}'
+            branches.append({
+                'name': name, 'geom': geom, 'geom_id': gid, 'lr_res': r,
+                'layout': DataLayout.from_root(data_root, geom, r, hr_res),
+                'weight': float(w), 'mach_range': mr, 'aoa_range': ar,
+                'train_fraction': float(tf),
+            })
+    return branches
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default=None)
-    parser.add_argument('--model', default='mlp_corrector')
+    parser.add_argument('--model', default='dam')
     parser.add_argument('--epochs', type=int, default=None)
     parser.add_argument('--lr', type=float, default=None)
     parser.add_argument('--wd', type=float, default=None)
     parser.add_argument('--val_every', type=int, default=None)
     parser.add_argument('--seed', type=int, default=None)
-    parser.add_argument('--loss', default=None, choices=['mse', 'rel_mse', 'shock_weighted_mse', 'shock_weighted_rel_mse'])
+    parser.add_argument('--loss', default=None, choices=['mse', 'rel_mse', 'shock_weighted_mse', 'shock_weighted_rel_mse', 'huber', 'shock_weighted_huber', 'sliced_wasserstein'])
     parser.add_argument('--schedule', default=None, choices=['cosine', 'constant'])
+    parser.add_argument('--warmup_epochs', type=int, default=None)
     parser.add_argument('--grad_clip', type=float, default=None)
     parser.add_argument('--batch_size', type=int, default=None)
     parser.add_argument('--run_name', default=None)
     parser.add_argument('--no_save_best', action='store_true')
-    parser.add_argument('--data_dir', default='data/diamond/')
-    parser.add_argument('--stats', default='data/diamond/stats.npz')
+    parser.add_argument('--data', default='data/', help='Racine des données (ex: data/)')
+    parser.add_argument('--geometry', default=None, help='Géométrie pour mode single-dataset (ex: diamond)')
     parser.add_argument('--mach', default=None, help='start:stop')
     parser.add_argument('--aoa', default=None, help='start:stop')
+    parser.add_argument('--train_fraction', type=float, default=None,
+                        help='Fraction du train set à utiliser (ex: 0.25). Seed fixé pour reproductibilité.')
     args = parser.parse_args()
 
     cfg = load_cfg(args.config) if args.config else {}
     model_name = cfg.get('model', args.model)
+    args.train_fraction = args.train_fraction if args.train_fraction is not None else cfg.get('training', {}).get('train_fraction', 1.0)
 
     if model_name not in _MODELS:
         raise ValueError(f"Unknown model: {model_name!r}. Options: {list(_MODELS)}")
@@ -73,59 +136,164 @@ def main():
         loss = _get(args.loss, 'loss', 'rel_mse'),
         lambda_phys = tr.get('lambda_phys', 0.0),
         schedule = _get(args.schedule, 'schedule', 'cosine'),
+        warmup_epochs = _get(args.warmup_epochs, 'warmup_epochs', 0),
         grad_clip = _get(args.grad_clip, 'grad_clip', 0.0),
         batch_size = _get(args.batch_size, 'batch_size', 1),
         save_best = (not args.no_save_best) and tr.get('save_best', True),
+        huber_delta = tr.get('huber_delta', 1.0),
+        ema_decay = tr.get('ema_decay', 0.0),
     )
 
-    data_dir = Path(args.data_dir).resolve()
-    lr_res = cfg.get('resolution', {}).get('lr', 0.1)
-    knn = cls.load_knn(data_dir, cfg)
+    res_cfg = cfg.get('resolution', {})
+    lr_res = res_cfg.get('lr', 0.1)
+    hr_res = res_cfg.get('hr', 0.025)
     mach_range = _parse_range(args.mach)
     aoa_range = _parse_range(args.aoa)
-
     use_lr_grad = cfg.get('architecture', {}).get('use_lr_grad', False)
-    train_ds = SRDataset(data_dir, args.stats, 'train', lr_res=lr_res, use_lr_grad=use_lr_grad,
-                    mach_range=mach_range, aoa_range=aoa_range)
-    val_ds = SRDataset(data_dir, args.stats, 'val', lr_res=lr_res, use_lr_grad=use_lr_grad,
-                    mach_range=mach_range, aoa_range=aoa_range)
-    
-    cfg.setdefault('architecture', {})['use_lr_grad'] = train_ds._has_lr_grad
+    preload = tr.get('preload', True)
+    sw_factor = tr.get('shock_weight_factor', 1.0)
 
-    stats   = np.load(args.stats)
-    res_cfg = cfg.get('resolution', {})
-    mesh_hr = np.load(data_dir / f'mesh_{res_cfg.get("hr", 0.025)}.npy', allow_pickle=True).item()
-    mesh_lr = np.load(data_dir / f'mesh_{res_cfg.get("lr", 0.1)}.npy', allow_pickle=True).item()
+    data_root = Path(args.data).resolve()
 
-    from preprocessing.dataset import _res_tag
-    test_dir = data_dir / 'processed' / f'lr{_res_tag(lr_res)}' / 'test'
-    if not test_dir.exists():
-        test_dir = data_dir / 'processed' / 'test'
-    all_files = [str(f) for f in sorted(test_dir.glob('aoa*.npz'))]
-    train_dir = test_dir.parent / 'train'
+    # Dataset multi geometrie ou single dataset
+    if 'datasets' in cfg:
+        branches = build_branches(cfg['datasets'], data_root, hr_res, lr_res,
+                                  mach_range, aoa_range, args.train_fraction)
+        # n_geoms = nombre de géométries distinctes (taille de l'embedding)
+        cfg.setdefault('architecture', {})['n_geoms'] = len({b['geom_id'] for b in branches})
+        print(f"  Branches ({len(branches)}) :")
+        for b in branches:
+            print(f"    [{b['name']:<16}] geom_id={b['geom_id']}  lr={b['lr_res']}"
+                  f"  weight={b['weight']}  train_fraction={b['train_fraction']}")
+
+        train_list, val_list, names, weights, knns = [], [], [], [], {}
+        for b in branches:
+            train_list.append(SRDataset(b['layout'], 'train', use_lr_grad=use_lr_grad,
+                mach_range=b['mach_range'], aoa_range=b['aoa_range'], preload=preload,
+                shock_weight_factor=sw_factor, geom_id=b['geom_id'], train_fraction=b['train_fraction']))
+            val_list.append(SRDataset(b['layout'], 'val', use_lr_grad=use_lr_grad,
+                mach_range=b['mach_range'], aoa_range=b['aoa_range'], preload=preload,
+                shock_weight_factor=sw_factor, geom_id=b['geom_id']))
+            names.append(b['name'])
+            weights.append(b['weight'])
+            knns[b['name']] = cls.load_knn(b['layout'], cfg)
+        train_ds = MultiSRDataset(train_list, names, weights)
+        val_ds = MultiSRDataset(val_list, names, weights)
+        # Ressources primaires (première branche)
+        primary_layout = branches[0]['layout']
+        knn = knns
+        stats = np.load(primary_layout.stats_path)
+
+        # Ressources secondaires pour plots par branche
+        secondary_plot_data = []
+        for b in branches[1:]:
+            layout_s = b['layout']
+            name_s = b['name']
+            stats_s = np.load(layout_s.stats_path)
+            try:
+                mesh_hr_s = np.load(layout_s.mesh_path(hr_res), allow_pickle=True).item()
+            except FileNotFoundError as e:
+                print(f"  mesh_hr introuvable pour {name_s} — plots désactivés ({e})")
+                continue
+            try:
+                mesh_lr_s = np.load(layout_s.mesh_path(b['lr_res']), allow_pickle=True).item()
+            except FileNotFoundError:
+                mesh_lr_s = None
+            tdir_s = layout_s.proc_dir() / 'test'
+            af_s = [str(f) for f in sorted(tdir_s.glob('aoa*.npz'))] if tdir_s.exists() else []
+            rc_s = []
+            ref_pool = NACA_REFERENCE_CASES if 'naca' in b['geom'].lower() else REFERENCE_CASES
+            for mt, at, lbl in ref_pool:
+                p = find_ref_file(af_s, mt, at)
+                if p:
+                    rc_s.append((p, lbl))
+            if not rc_s and af_s:
+                n_af = len(af_s)
+                for idx_af in sorted({0, n_af // 2, n_af - 1}):
+                    rc_s.append((af_s[idx_af], Path(af_s[idx_af]).stem))
+            if rc_s:
+                print(f"  Cas référence [{name_s}] : {[l for _, l in rc_s]}")
+            secondary_plot_data.append({
+                'name': name_s, 'knn': knns[name_s],
+                'stats': stats_s, 'mesh_hr': mesh_hr_s, 'mesh_lr': mesh_lr_s,
+                'ref_cases': rc_s,
+            })
+    else:
+        secondary_plot_data = []
+        # Mode single-dataset
+        geom = args.geometry or cfg.get('geometry')
+        if not geom:
+            raise ValueError(
+                "Géométrie non spécifiée : utiliser --geometry diamond "
+                "ou ajouter 'geometry: diamond' dans le config YAML")
+        primary_layout = DataLayout.from_root(data_root, geom, lr_res, hr_res)
+        knn = cls.load_knn(primary_layout, cfg)
+        train_ds = SRDataset(primary_layout, 'train', use_lr_grad=use_lr_grad, mach_range=mach_range,
+            aoa_range=aoa_range, preload=preload, shock_weight_factor=sw_factor, train_fraction=args.train_fraction)
+        val_ds = SRDataset(primary_layout, 'val', use_lr_grad=use_lr_grad, mach_range=mach_range,
+            aoa_range=aoa_range, preload=preload, shock_weight_factor=sw_factor)
+        stats = np.load(primary_layout.stats_path)
+
+    cfg.setdefault('architecture', {})['use_lr_grad'] = (
+        train_ds.datasets[0]._has_lr_grad if isinstance(train_ds, MultiSRDataset)
+        else train_ds._has_lr_grad)
+
+    mesh_hr = np.load(primary_layout.mesh_path(hr_res), allow_pickle=True).item()
+    mesh_lr = np.load(primary_layout.mesh_path(primary_layout.lr_res), allow_pickle=True).item()
+
+    test_dir = primary_layout.proc_dir() / 'test'
+    train_dir = primary_layout.proc_dir() / 'train'
+    all_files = [str(f) for f in sorted(test_dir.glob('aoa*.npz'))] if test_dir.exists() else []
     if train_dir.exists():
         all_files += [str(f) for f in sorted(train_dir.glob('aoa*.npz'))]
 
-    run_label = args.run_name or f"{model_name}_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    pred_dir  = Path('results') / 'predictions' / run_label
+    run_label = args.run_name or f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    pred_dir = Path('results') / 'predictions' / run_label
 
-    def _plot_ref_cases(m, knn_, dest):
-        for mach_t, aoa_t, label in REFERENCE_CASES:
-            path = find_ref_file(all_files, mach_t, aoa_t)
-            if path is None:
-                continue
-            plot_prediction(m, knn_, path, stats, mesh_hr, dest, tag=f'_{label}',
-                            mesh_lr=mesh_lr)
+    ref_cases = []
+    for mach_t, aoa_t, label in REFERENCE_CASES:
+        path = find_ref_file(all_files, mach_t, aoa_t)
+        if path is not None:
+            ref_cases.append((path, label))
+    if not ref_cases:
+        print(f"  Aucun cas de référence trouvé dans {test_dir} — "
+              f"pred_callback désactivé. Vérifier le pattern aoa*.npz et la structure de dossiers.")
+    else:
+        print(f"  Cas de référence pour pred_callback : {[l for _, l in ref_cases]}")
+
+    pred_dir.mkdir(parents=True, exist_ok=True)
 
     def pred_callback(m, epoch, knn_):
-        ep_dir = pred_dir / f'ep{epoch:04d}'
-        _plot_ref_cases(m, knn_, ep_dir)
+        try:
+            plot_val_panels(m, knn_, ref_cases, stats, mesh_hr, mesh_lr,
+                            pred_dir / f'ep{epoch:04d}.png',
+                            title=f'{run_label} — epoch {epoch}')
+            if 'huber' in train_cfg.loss:
+                plot_huber_regime(m, knn_, ref_cases, stats, mesh_hr, train_cfg.huber_delta,
+                                  pred_dir / f'huber_ep{epoch:04d}.png', epoch=epoch)
+            # Plots par géométrie secondaire
+            for sec in secondary_plot_data:
+                if not sec['ref_cases']:
+                    continue
+                plot_val_panels(m, sec['knn'], sec['ref_cases'], sec['stats'], sec['mesh_hr'], sec['mesh_lr'],
+                    pred_dir / f'ep{epoch:04d}_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — epoch {epoch}')
+        except Exception as e:
+            print(f"  pred_callback epoch {epoch} : {e}")
+
+    # knn primaire pour les callbacks visuels (plot_val_panels attend un seul dict)
+    primary_knn = (list(knn.values())[0] if isinstance(knn, dict) and
+                   all(isinstance(v, dict) for v in knn.values()) else knn)
 
     model = cls(nnx.Rngs(train_cfg.seed), cfg)
     trained = model.fit(train_ds, val_ds, knn, train_cfg, out_dir='results/checkpoints',
         model_cfg=cfg, run_name=run_label, pred_callback=pred_callback)
 
-    _plot_ref_cases(trained, knn, pred_dir / 'best')
+    plot_val_panels(trained, primary_knn, ref_cases, stats, mesh_hr, mesh_lr,
+                    pred_dir / 'best.png', title=f'{run_label} — best')
+    for sec in secondary_plot_data:
+        if sec['ref_cases']:
+            plot_val_panels(trained, sec['knn'], sec['ref_cases'], sec['stats'], sec['mesh_hr'], sec['mesh_lr'],
+                    pred_dir / f'best_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — best')
     print(f"Prediction plots: {pred_dir}/")
 
 
