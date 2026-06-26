@@ -115,7 +115,7 @@ def setup_dirs(cfg, mesh):
         aoa_tag = f"AOA{aoa:.2f}"
         dirs = {
             "fig": repo_root / "euler" / "figures" / case / h_dir / aoa_tag,
-            "res": repo_root / "data" / case / "raw" / h_dir / aoa_tag,
+            "res": repo_root / "data" / "raw" / case / h_dir / aoa_tag,
         }
     else:
         dirs = {
