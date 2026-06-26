@@ -3,8 +3,15 @@ from __future__ import annotations
 import numpy as np
 from utils.refs import to_mach
 
-_EULER_EQ_NAMES = ['euler_mass', 'euler_xmom', 'euler_ymom', 'euler_energy']
 _PRIM_NAMES = ['rho', 'u', 'v', 'p']
+
+
+def idw_weights(dist: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Poids IDW normalisés (p=2) à partir des distances kNN (N, k)"""
+    d = np.asarray(dist, dtype=np.float64)
+    w = 1.0 / (d ** 2 + eps)
+    w /= w.sum(axis=1, keepdims=True)
+    return w
 
 
 def l2_rel(pred: np.ndarray, ref: np.ndarray) -> float:
@@ -22,7 +29,7 @@ def l2w_rel(pred: np.ndarray, ref: np.ndarray, w: np.ndarray) -> float:
 
 
 def sliced_wasserstein(pred: np.ndarray, ref: np.ndarray, n_proj: int = 50, seed: int = 0) -> float:
-    # W2 sliced entre deux champs scalaires (sort-based, O(N log N))
+    # SW2 sliced Wasserstein entre deux champs scalaires (sort-based, O(N log N))
     rng = np.random.default_rng(seed)
     p = pred.ravel().astype(np.float64)
     r = ref.ravel().astype(np.float64)
@@ -35,7 +42,7 @@ def sliced_wasserstein(pred: np.ndarray, ref: np.ndarray, n_proj: int = 50, seed
 
 def compute_field_errors(prim_pred: np.ndarray, prim_ref: np.ndarray, cell_adj_edges: np.ndarray,
             bary: np.ndarray, dxy: np.ndarray | None = None) -> dict[str, float]:
-    # L2, Linf, L2w (pondérée |grad p|) et W2 sur Mach et les 4 primitives.
+    # L2, Linf, L2w (pondérée |grad p|) et SW2 sur Mach et les 4 primitives.
     mach_p = to_mach(prim_pred)
     mach_r = to_mach(prim_ref)
 
@@ -50,48 +57,15 @@ def compute_field_errors(prim_pred: np.ndarray, prim_ref: np.ndarray, cell_adj_e
          np.bincount(cell_adj_edges[:, 1], weights=ge, minlength=n_cells)).astype(np.float32)
 
     res: dict[str, float] = {
-        'l2_mach':   l2_rel(mach_p, mach_r),
+        'l2_mach': l2_rel(mach_p, mach_r),
         'linf_mach': linf_rel(mach_p, mach_r),
-        'l2w_mach':  l2w_rel(mach_p, mach_r, w),
-        'w2_mach':   sliced_wasserstein(mach_p, mach_r),
+        'l2w_mach': l2w_rel(mach_p, mach_r, w),
+        'sw2_mach': sliced_wasserstein(mach_p, mach_r),
     }
     for i, nm in enumerate(_PRIM_NAMES):
-        res[f'l2_{nm}']   = l2_rel(prim_pred[:, i], prim_ref[:, i])
+        res[f'l2_{nm}'] = l2_rel(prim_pred[:, i], prim_ref[:, i])
         res[f'linf_{nm}'] = linf_rel(prim_pred[:, i], prim_ref[:, i])
     return res
-
-
-def euler_residuals(prim: np.ndarray, hr_idx: np.ndarray, grad_op: np.ndarray, gamma: float = 1.4) -> np.ndarray:
-    # Résidus Euler steady 2D sur prim (N, 4). Retourne (N, 4), doit valoir 0 pour solution exacte.
-    rho, u, v, p = prim[:, 0], prim[:, 1], prim[:, 2], prim[:, 3]
-
-    def nabla(f: np.ndarray) -> np.ndarray:
-        delta = f[hr_idx] - f[:, None]
-        return np.einsum('ndk,nk->nd', grad_op, delta)
-
-    drho, du, dv, dp = nabla(rho), nabla(u), nabla(v), nabla(p)
-
-    E = p / (gamma - 1) + 0.5 * rho * (u**2 + v**2)
-    dE = (dp / (gamma - 1)
-          + 0.5 * ((u**2 + v**2)[:, None] * drho
-                   + rho[:, None] * (2*u[:, None]*du + 2*v[:, None]*dv)))
-    H = E + p
-    dH = dE + dp
-
-    R1 = u*drho[:,0] + rho*du[:,0] + v*drho[:,1] + rho*dv[:,1]
-    R2 = (u**2*drho[:,0] + 2*rho*u*du[:,0] + dp[:,0]
-        + u*v*drho[:,1] + rho*v*du[:,1] + rho*u*dv[:,1])
-    R3 = (u*v*drho[:,0] + rho*v*du[:,0] + rho*u*dv[:,0]
-        + v**2*drho[:,1] + 2*rho*v*dv[:,1] + dp[:,1])
-    R4 = u*dH[:,0] + H*du[:,0] + v*dH[:,1] + H*dv[:,1]
-
-    return np.stack([R1, R2, R3, R4], axis=-1)
-
-
-def euler_rms(prim: np.ndarray, hr_idx: np.ndarray, grad_op: np.ndarray, gamma: float = 1.4) -> dict[str, float]:
-    res = euler_residuals(prim, hr_idx, grad_op, gamma)
-    return {name: float(np.sqrt((res[:, i]**2).mean()))
-            for i, name in enumerate(_EULER_EQ_NAMES)}
 
 
 def aero_metrics(prim_pred: np.ndarray, prim_ref: np.ndarray, wc, mach_in: float) -> dict:
@@ -99,19 +73,19 @@ def aero_metrics(prim_pred: np.ndarray, prim_ref: np.ndarray, wc, mach_in: float
     # Import local pour éviter la dépendance circulaire avec utils.aero
     from utils.aero import aero_coeffs
     ac_p = aero_coeffs(prim_pred, wc, mach_in)
-    ac_r = aero_coeffs(prim_ref,  wc, mach_in)
+    ac_r = aero_coeffs(prim_ref, wc, mach_in)
     wall_mach_l2 = float(np.linalg.norm(ac_p['wall_mach'] - ac_r['wall_mach']) /
                          (np.linalg.norm(ac_r['wall_mach']) + 1e-8))
     return {
-        'CL_pred':      float(ac_p['CL']),
-        'CL_ref':       float(ac_r['CL']),
-        'CD_pred':      float(ac_p['CD']),
-        'CD_ref':       float(ac_r['CD']),
-        'CL_err_abs':   abs(ac_p['CL'] - ac_r['CL']),
-        'CD_err_abs':   abs(ac_p['CD'] - ac_r['CD']),
+        'CL_pred': float(ac_p['CL']),
+        'CL_ref': float(ac_r['CL']),
+        'CD_pred': float(ac_p['CD']),
+        'CD_ref': float(ac_r['CD']),
+        'CL_err_abs': abs(ac_p['CL'] - ac_r['CL']),
+        'CD_err_abs': abs(ac_p['CD'] - ac_r['CD']),
         'wall_mach_l2': wall_mach_l2,
         'wall_mach_pred': ac_p['wall_mach'],
-        'wall_mach_ref':  ac_r['wall_mach'],
+        'wall_mach_ref': ac_r['wall_mach'],
     }
 
 
@@ -126,22 +100,48 @@ def euler_scales(mu: np.ndarray, gamma: float = 1.4) -> np.ndarray:
     return np.maximum(np.abs(scale), 1e-4)
 
 
-def euler_rms_norm(prim: np.ndarray, hr_idx: np.ndarray, grad_op: np.ndarray, mu: np.ndarray, gamma: float = 1.4) -> float:
-    # RMS adimensionné moyen des 4 résidus Euler
-    res = euler_residuals(prim, hr_idx, grad_op, gamma)
-    return float(np.sqrt(((res / euler_scales(mu, gamma)) ** 2).mean()))
-
-
 _P_INF = 1.0
 _RHO_INF = 1.0
 
 
-def enthalpy_rms(prim: np.ndarray, mach_in: float, gamma: float = 1.4) -> float:
-    # RMS relatif de l'enthalpie totale par rapport à H_inf (constante pour Euler stationnaire)
+def enthalpy_rms(prim: np.ndarray, mach_in: float,
+                 mask: np.ndarray | None = None, gamma: float = 1.4) -> float:
+    """RMS relatif de H_tot par rapport à H_inf (= 0 pour solution Euler parfaite)"""
     H = gamma / (gamma - 1) * prim[:, 3] / np.maximum(prim[:, 0], 1e-12) + 0.5 * (prim[:, 1]**2 + prim[:, 2]**2)
     v_inf = mach_in * np.sqrt(gamma * _P_INF / _RHO_INF)
     H_inf = gamma / (gamma - 1) * _P_INF / _RHO_INF + 0.5 * v_inf**2
-    return float(np.sqrt((((H - H_inf) / H_inf) ** 2).mean()))
+    dH = ((H - H_inf) / H_inf) ** 2
+    if mask is not None:
+        dH = dH[np.asarray(mask, dtype=bool)]
+    return float(np.sqrt(dH.mean()))
+
+
+def fvm_euler_rms(prim_phys: np.ndarray, mesh, mach_in: float, aoa_deg: float,
+                  mu: np.ndarray, gamma: float = 1.4,
+                  reconstruction: str = 'muscl', flux: str = 'hllc') -> float:
+    """Résidu Euler FVM exact (même opérateur que le solveur), normalisé par euler_scales(mu)"""
+    import sys
+    from pathlib import Path
+    _root = str(Path(__file__).resolve().parents[1])
+    for d in (_root + '/euler', _root):
+        if d not in sys.path:
+            sys.path.insert(0, d)
+    import jax.numpy as jnp
+    from jax_fvm.src.helper import getConserved
+    from jax_fvm.src.euler_solver import residual as _fvm_res
+
+    W = getConserved(jnp.array(prim_phys, dtype=jnp.float32), gamma=gamma, M=1.0)
+    c_inf = float(np.sqrt(gamma))
+    aoa_rad = float(np.deg2rad(aoa_deg))
+    prim_inf = jnp.array([1.0, mach_in * c_inf * np.cos(aoa_rad),
+                           mach_in * c_inf * np.sin(aoa_rad), 1.0])
+    inlet = getConserved(prim_inf[None], gamma=gamma, M=1.0)[0]
+
+    res = np.asarray(_fvm_res(W, mesh, gamma=gamma, M=1.0,
+                              reconstruction=reconstruction, flux=flux,
+                              value=inlet, entropy=False))
+    sc = euler_scales(mu, gamma)
+    return float(np.sqrt(((res / sc[None, :]) ** 2).mean()))
 
 
 def entropy_violation(prim: np.ndarray, gamma: float = 1.4) -> float:

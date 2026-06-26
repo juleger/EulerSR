@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 from utils.refs import to_mach, parse_case
 
@@ -14,14 +15,14 @@ _RHO_INF = 1.0
 @dataclass
 class WallCache:
     """Données paroi précalculées une fois par maillage HR."""
-    wall_cell_ids: np.ndarray        # cellule FVM adjacente à chaque face paroi
-    nx: np.ndarray                   # normale sortante (de la cellule fluide)
+    wall_cell_ids: np.ndarray  # cellule FVM adjacente à chaque face paroi
+    nx: np.ndarray  # normale sortante (de la cellule fluide)
     ny: np.ndarray
-    ds: np.ndarray                   # longueur de la face
+    ds: np.ndarray  # longueur de la face
     chord: float
     unique_wall_cell_ids: np.ndarray
-    bary: np.ndarray                 # (N_cells, 2) barycentres
-    cell_adj_edges: np.ndarray       # paires de cellules adjacentes intérieures
+    bary: np.ndarray  # (N_cells, 2) barycentres
+    cell_adj_edges: np.ndarray  # paires de cellules adjacentes intérieures
 
 
 def build_wall_cache(mesh) -> WallCache:
@@ -136,3 +137,41 @@ def compute_aero_scalars(d: dict, path: str, wc_lr: WallCache | None = None) -> 
         Cl,
         mach_wall_min,
     ], dtype=np.float32)
+
+
+def wall_features(mesh, query_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Distance à la paroi et normales sortantes pour chaque point de requête (pour l'IDW ou le calcul de CL/CD)."""
+    pts = np.asarray(mesh.points, dtype=np.float64)
+    faces = np.asarray(mesh.faces)
+    fm = np.asarray(mesh.face_markers)
+
+    bnd = faces[fm > 0]
+    mid = pts[bnd].mean(axis=1)
+    lo, hi = pts.min(0), pts.max(0)
+    tol = 1e-6 * float((hi - lo).max())
+    on_box = ((np.abs(mid[:, 0] - lo[0]) < tol) | (np.abs(mid[:, 0] - hi[0]) < tol)
+              | (np.abs(mid[:, 1] - lo[1]) < tol) | (np.abs(mid[:, 1] - hi[1]) < tol))
+    wall = bnd[~on_box]
+    if len(wall) == 0:
+        raise ValueError("Aucune face de paroi (obstacle) trouvée dans le maillage")
+
+    a, b = pts[wall[:, 0]], pts[wall[:, 1]]
+    tang = b - a
+    tang = tang / (np.linalg.norm(tang, axis=1, keepdims=True) + 1e-12)
+    face_normals = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+
+    n_samp = 8
+    t = np.linspace(0.0, 1.0, n_samp)[None, :, None]
+    samples = (a[:, None, :] * (1 - t) + b[:, None, :] * t).reshape(-1, 2)
+
+    query_pts = np.asarray(query_pts, dtype=np.float64)
+    dists, idx_samp = cKDTree(samples).query(query_pts, workers=-1)
+
+    seg_idx = idx_samp // n_samp
+    normals = face_normals[seg_idx]
+    wall_mid = (a + b) / 2.0
+    to_q = query_pts - wall_mid[seg_idx]
+    sign = np.sign((normals * to_q).sum(axis=1, keepdims=True))
+    normals = normals * np.where(sign == 0, 1.0, sign)
+
+    return dists, normals

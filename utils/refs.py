@@ -6,13 +6,23 @@ import numpy as np
 
 GAMMA = 1.4
 
+_PROC_RE = re.compile(r'^aoa([+-]?\d+\.\d+)_m(\d+\.\d+)$')
+
+
+def _res_tag(r: float) -> str:
+    return 'h' + f'{r}'.replace('0.', '')
+
 
 REFERENCE_CASES = [
-    (0.8, -1.0, 'M08_AoA-1'),
-    (0.9,  5.0, 'M09_AoA5'),
-    (1.1,  2.0, 'M11_AoA2'),
-    (2.0, -4.0, 'M20_AoA-4'),
-    (3.0,  0.0, 'M30_AoA0'),
+    (0.9, 5.0, 'M09_AoA5'),
+    (1.10, -3.0, 'M110_AoA-3'),
+    (2.0, 0.0, 'M20_AoA0'),
+]
+
+NACA_REFERENCE_CASES = [
+    (0.80, 2.0, 'M080_AoA2'),
+    (1.10, -4.0, 'M110_AoA-4'),
+    (1.50, 0.0, 'M150_AoA0'),
 ]
 
 _CASE_RE = re.compile(r'^aoa([+-]?\d+\.\d+)_m(\d+\.\d+)$')
@@ -29,15 +39,6 @@ def to_mach(prim: np.ndarray) -> np.ndarray:
 def parse_case(path) -> tuple:
     m = _CASE_RE.match(Path(path).stem)
     return (float(m.group(2)), float(m.group(1))) if m else (1.0, 0.0)
-
-
-def snap_features(d: dict, path) -> np.ndarray:
-    mach_in, aoa = parse_case(path)
-    prim = d['hr_primitives'].astype(np.float32)
-    mach = to_mach(prim)
-    gp = np.linalg.norm(d['hr_primitives_grad'][:, 3, :].astype(np.float32), axis=-1)
-    return np.array([mach_in, aoa, float(mach.max()), float(mach.std()), float(gp.max())],
-                    dtype=np.float32)
 
 
 def find_ref_file(files, mach_target: float, aoa_target: float):

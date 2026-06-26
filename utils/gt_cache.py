@@ -1,7 +1,6 @@
 """Cache des métriques GT sur le dataset complet, évite de repasser sur les fichiers HR."""
 from __future__ import annotations
 import argparse
-import re
 import sys
 from pathlib import Path
 
@@ -13,11 +12,16 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / 'euler') not in sys.path:
     sys.path.append(str(REPO_ROOT / 'euler'))
 
+from utils.refs import _PROC_RE
+from utils.layout import DataLayout
 
 
-def build_gt_cache(all_cases: list[dict], wc) -> dict:
+
+def build_gt_cache(all_cases: list[dict], wc,
+                   mesh=None, mu: np.ndarray | None = None) -> dict:
     #Calcule les grandeurs GT pour tous les cas. Retourne le dict du cache
     from utils.aero import aero_coeffs
+    from utils.metrics import enthalpy_rms, entropy_violation, fvm_euler_rms
 
     n = len(all_cases)
     stems = np.array([c['label'] for c in all_cases])
@@ -27,12 +31,20 @@ def build_gt_cache(all_cases: list[dict], wc) -> dict:
     mach_max = np.full(n, np.nan, dtype=np.float32)
     mach_min = np.full(n, np.nan, dtype=np.float32)
     grad_p_max = np.full(n, np.nan, dtype=np.float32)
+    enthalpy_hr = np.full(n, np.nan, dtype=np.float32)
+    entropy_hr = np.full(n, np.nan, dtype=np.float32)
+    fvm_residual_hr = np.full(n, np.nan, dtype=np.float32)
     wall_mach_segs: list[np.ndarray] = []
     wall_mach_lens: list[int] = []
     hr_prim_list: list[np.ndarray | None] = []
     n_cells = None
 
-    print(f"  Construction GT cache ({n} cas)...")
+    compute_fvm = mesh is not None and mu is not None
+    if compute_fvm:
+        print(f"  Construction GT cache ({n} cas) — résidu FVM activé...")
+    else:
+        print(f"  Construction GT cache ({n} cas)...")
+
     for i, c in enumerate(all_cases):
         if (i + 1) % 100 == 0:
             print(f"    {i+1}/{n}...")
@@ -48,11 +60,20 @@ def build_gt_cache(all_cases: list[dict], wc) -> dict:
         has_ref[i] = True
 
         ac = aero_coeffs(hp, wc, c['mach_in'])
-        CL[i]         = ac['CL']
-        CD[i]         = ac['CD']
-        mach_max[i]   = ac['mach_max']
-        mach_min[i]   = ac['mach_min']
+        CL[i] = ac['CL']
+        CD[i] = ac['CD']
+        mach_max[i] = ac['mach_max']
+        mach_min[i] = ac['mach_min']
         grad_p_max[i] = ac['grad_p_max']
+        enthalpy_hr[i] = enthalpy_rms(hp, c['mach_in'])
+        entropy_hr[i] = entropy_violation(hp)
+
+        if compute_fvm:
+            try:
+                fvm_residual_hr[i] = fvm_euler_rms(
+                    hp, mesh, c['mach_in'], c['aoa_in'], mu)
+            except Exception as e:
+                print(f"    [WARN] résidu FVM cas {c['label']} : {e}")
 
         wall_mach_segs.append(ac['wall_mach'])
         wall_mach_lens.append(len(ac['wall_mach']))
@@ -61,7 +82,7 @@ def build_gt_cache(all_cases: list[dict], wc) -> dict:
     if n_cells is None:
         n_cells = 0
 
-    wall_mach_flat    = np.concatenate(wall_mach_segs) if wall_mach_segs else np.array([], np.float32)
+    wall_mach_flat = np.concatenate(wall_mach_segs) if wall_mach_segs else np.array([], np.float32)
     wall_mach_offsets = np.concatenate([[0], np.cumsum(wall_mach_lens)]).astype(np.int64)
 
     hr_prim = np.full((n, n_cells, 4), np.nan, dtype=np.float32)
@@ -75,6 +96,9 @@ def build_gt_cache(all_cases: list[dict], wc) -> dict:
         'CL': CL, 'CD': CD,
         'mach_max': mach_max, 'mach_min': mach_min,
         'grad_p_max': grad_p_max,
+        'enthalpy_hr': enthalpy_hr,
+        'entropy_hr': entropy_hr,
+        'fvm_residual_hr': fvm_residual_hr,
         'wall_mach_flat': wall_mach_flat,
         'wall_mach_offsets': wall_mach_offsets,
         'hr_prim': hr_prim,
@@ -108,8 +132,9 @@ def _cache_valid(cache: dict, all_cases: list[dict]) -> bool:
     return bool((stems_new == stems_old).all())
 
 
-def load_or_build_gt_cache(data_dir: Path, all_cases: list[dict], wc) -> dict:
-    cache_path = Path(data_dir) / 'gt_cache.npz'
+def load_or_build_gt_cache(layout: DataLayout, all_cases: list[dict], wc,
+                           mesh=None, mu: np.ndarray | None = None) -> dict:
+    cache_path = layout.gt_cache_path
     if cache_path.exists():
         try:
             cache = load_gt_cache(cache_path)
@@ -121,7 +146,7 @@ def load_or_build_gt_cache(data_dir: Path, all_cases: list[dict], wc) -> dict:
         except Exception as e:
             print(f"    GT cache illisible ({e}) - reconstruction.")
 
-    cache = build_gt_cache(all_cases, wc)
+    cache = build_gt_cache(all_cases, wc, mesh=mesh, mu=mu)
     save_gt_cache(cache, cache_path)
     flat = cache['wall_mach_flat']
     offs = cache['wall_mach_offsets']
@@ -129,21 +154,10 @@ def load_or_build_gt_cache(data_dir: Path, all_cases: list[dict], wc) -> dict:
     return cache
 
 
-_PROC_RE = re.compile(r'^aoa([+-]?\d+\.\d+)_m(\d+\.\d+)$')
-
-
-def _res_tag(r: float) -> str:
-    return 'h' + f'{r}'.replace('0.', '')
-
-
-def _find_all_cases(data_dir: Path, lr_res: float) -> list[dict]:
-    base = data_dir / 'processed'
-    lr_tag = _res_tag(lr_res)
+def _find_all_cases(layout: DataLayout) -> list[dict]:
     cases = []
     for split in ('train', 'val', 'test'):
-        split_dir = base / f'lr{lr_tag}' / split
-        if not split_dir.exists():
-            split_dir = base / split
+        split_dir = layout.proc_dir() / split
         if not split_dir.exists():
             continue
         for f in sorted(split_dir.glob('aoa*.npz')):
@@ -162,21 +176,20 @@ def main():
     from utils.aero import build_wall_cache
 
     ap = argparse.ArgumentParser(description='Construit le GT cache pour l\'évaluation SR')
-    ap.add_argument('--data_dir', default='data/diamond/')
-    ap.add_argument('--out',      default=None,
-                    help='Chemin de sortie (défaut: <data_dir>/gt_cache.npz)')
-    ap.add_argument('--lr_res',   type=float, default=0.1)
-    ap.add_argument('--hr_res',   type=float, default=0.025)
-    ap.add_argument('--force',    action='store_true',
-                    help='Reconstruire même si le cache existe')
+    ap.add_argument('--data', default='data/', help='Racine des données (ex: data/)')
+    ap.add_argument('--geometry', default='diamond', help='Géométrie (ex: diamond, naca0012)')
+    ap.add_argument('--out', default=None, help='Chemin de sortie (défaut: <gt_cache_path>)')
+    ap.add_argument('--lr_res', type=float, default=0.1)
+    ap.add_argument('--hr_res', type=float, default=0.025)
+    ap.add_argument('--force', action='store_true', help='Reconstruire même si le cache existe')
     args = ap.parse_args()
 
-    data_dir = Path(args.data_dir)
-    cache_path = Path(args.out) if args.out else data_dir / 'gt_cache.npz'
+    layout = DataLayout.from_root(args.data, args.geometry, args.lr_res, args.hr_res)
+    cache_path = Path(args.out) if args.out else layout.gt_cache_path
 
-    all_cases = _find_all_cases(data_dir, args.lr_res)
+    all_cases = _find_all_cases(layout)
     if not all_cases:
-        print(f"Aucun cas trouvé dans {data_dir}/processed/")
+        print(f"Aucun cas trouvé dans {layout.proc_dir()}")
         return
     print(f"{len(all_cases)} cas trouvés.")
 
@@ -189,11 +202,14 @@ def main():
         except Exception:
             pass
 
-    mesh_hr = np.load(data_dir / f'mesh_{args.hr_res}.npy', allow_pickle=True).item()
+    mesh_hr = np.load(layout.mesh_path(args.hr_res), allow_pickle=True).item()
     wc = build_wall_cache(mesh_hr)
     print(f"  WallCache : {len(wc.unique_wall_cell_ids)} cellules paroi")
 
-    cache = build_gt_cache(all_cases, wc)
+    stats = np.load(layout.stats_path)
+    mu = stats['mu'].astype(np.float64)
+
+    cache = build_gt_cache(all_cases, wc, mesh=mesh_hr, mu=mu)
     save_gt_cache(cache, cache_path)
 
 
