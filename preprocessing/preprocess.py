@@ -14,7 +14,7 @@ import euler.jax_fvm.src.mesh  # noqa: F401
 
 from preprocessing.graph import build as build_graph
 from preprocessing.knn import build as build_knn
-from preprocessing.normalize import compute as compute_stats
+from preprocessing.dataset import compute_stats
 from utils.refs import _res_tag
 from utils.layout import DataLayout
 
@@ -53,7 +53,7 @@ def _stratified_split(
                 train_keys.append(key)
 
     # Épinglage des cas de référence dans test
-    val_set   = set(map(tuple, val_keys))
+    val_set = set(map(tuple, val_keys))
     train_set = set(map(tuple, train_keys))
     for mach_t, aoa_t, _ in ref_cases:
         best_key, best_d = None, float('inf')
@@ -160,12 +160,12 @@ def load_mesh(path):
 
 def main():
     parser = argparse.ArgumentParser(description='Prétraitement SR-CFD : processed + graphes + kNN + stats')
-    parser.add_argument('--data',     default='data/', help='Racine des données (ex: data/)')
+    parser.add_argument('--data', default='data/', help='Racine des données (ex: data/)')
     parser.add_argument('--geometry', default='diamond', help='Géométrie (ex: diamond, naca0012)')
-    parser.add_argument('--hr_res',   type=float, default=0.025)
-    parser.add_argument('--lr_res',   type=float, default=0.1)
-    parser.add_argument('--knn_k',    type=int, nargs='+', default=[6, 16])
-    parser.add_argument('--force',    action='store_true',
+    parser.add_argument('--hr_res', type=float, default=0.025)
+    parser.add_argument('--lr_res', type=float, default=0.1)
+    parser.add_argument('--knn_k', type=int, nargs='+', default=[6, 16])
+    parser.add_argument('--force', action='store_true',
                         help="Régénère les fichiers processed même s'ils existent")
     args = parser.parse_args()
 

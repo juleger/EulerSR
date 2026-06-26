@@ -3,17 +3,17 @@ import numpy as np
 from pathlib import Path
 from scipy.spatial import cKDTree
 
-_K_SELF = 4   # voisins HR->HR pour la reconstruction du gradient
+_K_SELF = 4  # voisins HR->HR pour la reconstruction du gradient
 
 
 def build_grad_op(rel_pos: np.ndarray, dists: np.ndarray) -> np.ndarray:
     # Opérateur de grad LSQ pour reconstruction des gradients
-    w = 1.0 / (dists**2 + 1e-12)          # (N, k)
-    R = rel_pos                             # (N, k, 2)
-    Rw = R * w[:, :, None]                 # (N, k, 2)
+    w = 1.0 / (dists**2 + 1e-12)  # (N, k)
+    R = rel_pos  # (N, k, 2)
+    Rw = R * w[:, :, None]  # (N, k, 2)
     A = np.einsum('nki,nkj->nij', Rw, R)  # (N, 2, 2) = R^T W R
-    RtW = Rw.transpose(0, 2, 1)           # (N, 2, k) = R^T W
-    G = np.linalg.solve(A, RtW)           # (N, 2, k)
+    RtW = Rw.transpose(0, 2, 1)  # (N, 2, k) = R^T W
+    G = np.linalg.solve(A, RtW)  # (N, 2, k)
     return G.astype(np.float32)
 
 
@@ -28,7 +28,7 @@ def build(fine_centroids: np.ndarray, coarse_centroids: np.ndarray,
     # Self-kNN HR->HR pour l'opérateur gradient LSQ
     tree_hr = cKDTree(fine_centroids)
     sd, si = tree_hr.query(fine_centroids, k=_K_SELF + 1, workers=-1)
-    hr_idx = si[:, 1:].astype(np.int32)    # exclure le point lui-même (dist=0)
+    hr_idx = si[:, 1:].astype(np.int32)  # exclure le point lui-même (dist=0)
     hr_dist = sd[:, 1:].astype(np.float32)
     hr_rel = (fine_centroids[hr_idx] - fine_centroids[:, None, :]).astype(np.float32)
     grad_op = build_grad_op(hr_rel, hr_dist)

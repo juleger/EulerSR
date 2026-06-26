@@ -1,15 +1,16 @@
 from __future__ import annotations
 import math
 import time
+from pathlib import Path
 
 import numpy as np
 
 from utils.refs import _PROC_RE
 from utils.layout import DataLayout
 
-_MACH_MID   = (0.7 + 4.0) / 2
+_MACH_MID = (0.7 + 4.0) / 2
 _MACH_SCALE = (4.0 - 0.7) / 2
-_AOA_SCALE  = 5.0
+_AOA_SCALE = 5.0
 
 
 class SRDataset:
@@ -48,37 +49,35 @@ class SRDataset:
             aoa, mach = float(m.group(1)), float(m.group(2))
             if mach_range is not None and not (mach_range[0] <= mach <= mach_range[1]):
                 continue
-            if aoa_range  is not None and not (aoa_range[0]  <= aoa  <= aoa_range[1]):
+            if aoa_range is not None and not (aoa_range[0] <= aoa <= aoa_range[1]):
                 continue
             self.entries.append((f, mach, aoa))
 
-        # Sous-échantillonnage stratifié reproductible du train set
-        # Stratification par AoA propre
+        # Sous-échantillonnage stratifié reproductible du train set uniforme pour ablation
         if split == 'train' and train_fraction < 1.0:
-            rng = np.random.default_rng(seed)
             by_aoa: dict[float, list] = {}
             for e in self.entries:
                 by_aoa.setdefault(e[2], []).append(e)
             sampled = []
             for aoa_val in sorted(by_aoa):
-                group = by_aoa[aoa_val]
-                k = max(1, int(len(group) * train_fraction))
-                idx = rng.choice(len(group), size=k, replace=False)
-                sampled.extend(group[i] for i in sorted(idx))
+                group = sorted(by_aoa[aoa_val], key=lambda e: e[1])  # tri par Mach croissant
+                k = max(1, int(round(len(group) * train_fraction)))
+                idx = np.unique(np.linspace(0, len(group) - 1, k).astype(int))
+                sampled.extend(group[i] for i in idx)
             self.entries = sampled
 
         self._geom_id = geom_id
         self._sw_factor = shock_weight_factor
         self._has_lr_grad = False
-        self._pos_center  = np.zeros(2, np.float32)
-        self._pos_scale   = 1.0
+        self._pos_center = np.zeros(2, np.float32)
+        self._pos_scale = 1.0
         if self.entries:
             probe = np.load(self.entries[0][0])
             if use_lr_grad:
                 self._has_lr_grad = 'lr_primitives_grad' in probe
             pts = np.concatenate([probe['hr_node_pos'], probe['lr_node_pos']], axis=0).astype(np.float64)
             self._pos_center = ((pts.max(0) + pts.min(0)) / 2).astype(np.float32)
-            self._pos_scale  = float((pts.max(0) - pts.min(0)).max() / 2)
+            self._pos_scale = float((pts.max(0) - pts.min(0)).max() / 2)
 
         # Preload : charge tous les samples en RAM numpy une seule fois
         # Evite les I/O répétitifs mais demande d'allouer bcp de RAM sur slurm (> 10 Go pour train)
@@ -93,7 +92,7 @@ class SRDataset:
 
     @property
     def lr_feat_dim(self) -> int:
-        return 9 if self._has_lr_grad else 6   # prim(4)+pos(2)[+grad_p(2)+div_u(1)]
+        return 9 if self._has_lr_grad else 6  # prim(4)+pos(2)[+grad_p(2)+div_u(1)]
 
     def __len__(self):
         return len(self.entries)
@@ -103,23 +102,23 @@ class SRDataset:
         path, mach_in, aoa_in = self.entries[idx]
         d = np.load(path)
 
-        hr_pos  = d['hr_node_pos'].astype(np.float32)
+        hr_pos = d['hr_node_pos'].astype(np.float32)
         hr_prim = d['hr_primitives'].astype(np.float32)
         hr_grad = d['hr_primitives_grad'].astype(np.float32)
-        lr_pos  = d['lr_node_pos'].astype(np.float32)
+        lr_pos = d['lr_node_pos'].astype(np.float32)
         lr_prim = d['lr_primitives'].astype(np.float32)
 
         N = hr_pos.shape[0]
 
         hr_pos_n = (hr_pos - self._pos_center) / self._pos_scale
         lr_pos_n = (lr_pos - self._pos_center) / self._pos_scale
-        mach_n   = (mach_in - _MACH_MID) / _MACH_SCALE
-        aoa_n    = aoa_in / _AOA_SCALE
+        mach_n = (mach_in - _MACH_MID) / _MACH_SCALE
+        aoa_n = aoa_in / _AOA_SCALE
 
         hr_feat = np.stack([
             hr_pos_n[:, 0], hr_pos_n[:, 1],
             np.full(N, mach_n, np.float32),
-            np.full(N, aoa_n,  np.float32),
+            np.full(N, aoa_n, np.float32),
             np.full(N, float(self._geom_id), np.float32),
         ], axis=1)
 
@@ -128,10 +127,10 @@ class SRDataset:
         lr_grad_feat = None
         if self._has_lr_grad:
             lr_grad = d['lr_primitives_grad'].astype(np.float32)
-            grad_p  = lr_grad[:, 3, :]
-            div_u   = lr_grad[:, 1, 0] + lr_grad[:, 2, 1]
-            grad_p_feat = np.arcsinh(grad_p  / (self.sig[3] + 1e-8))
-            div_u_feat  = np.arcsinh(div_u   / (self.sig[1] + 1e-8))[:, None]
+            grad_p = lr_grad[:, 3, :]
+            div_u = lr_grad[:, 1, 0] + lr_grad[:, 2, 1]
+            grad_p_feat = np.arcsinh(grad_p / (self.sig[3] + 1e-8))
+            div_u_feat = np.arcsinh(div_u / (self.sig[1] + 1e-8))[:, None]
             lr_grad_feat = np.concatenate([grad_p_feat, div_u_feat], axis=1)
 
         base_lr = [lr_prim_n, lr_pos_n[:, 0:1], lr_pos_n[:, 1:2]]
@@ -173,7 +172,7 @@ class MultiSRDataset:
         # entries comme SRDataset
         self.entries = [e for ds in datasets for e in ds.entries]
         # mu/sig du dataset primaire (affiché dans les métriques globales)
-        self.mu  = datasets[0].mu
+        self.mu = datasets[0].mu
         self.sig = datasets[0].sig
         # Poids d'échantillonnage normalisés
         if weights is None:
@@ -207,3 +206,19 @@ class MultiSRDataset:
             if not chunk:
                 continue
             yield [ds[i] for i in chunk], int(g)
+
+
+def compute_stats(layout: DataLayout, save_path):
+    """Calcule mu/sigma sur hr_primitives du train set et sauvegarde en .npz."""
+    train_dir = layout.proc_dir() / 'train'
+    n, s, s2 = 0, np.zeros(4, np.float64), np.zeros(4, np.float64)
+    for f in sorted(train_dir.glob('aoa*.npz')):
+        prim = np.load(f)['hr_primitives'].astype(np.float64)
+        n += prim.shape[0]
+        s += prim.sum(0)
+        s2 += (prim ** 2).sum(0)
+    mu = (s / n).astype(np.float32)
+    sig = np.sqrt(np.maximum(s2 / n - (s / n) ** 2, 1e-12)).astype(np.float32)
+    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(save_path, mu=mu, sig=sig)
+    print(f"Stats exportées: {save_path}  mu={mu.round(4)}  sig={sig.round(4)}")
