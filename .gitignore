@@ -14,3 +14,4 @@ res_bkp/
 dataset/
 archive/
 tex/
+*.log
