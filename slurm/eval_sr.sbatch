@@ -40,7 +40,10 @@ HR_RES="${HR_RES:-0.025}"
 OUT_DIR="${OUT_DIR:-results/eval/${SLURM_JOBID}/}"
 FULL_EVAL="${FULL_EVAL:-1}"
 N_EVAL="${N_EVAL:-0}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+N_STEPS="${N_STEPS:-}"
+N_SAMPLES="${N_SAMPLES:-}"
+CFG_SCALE="${CFG_SCALE:-}"
 
 mkdir -p logs "${OUT_DIR}"
 
@@ -75,6 +78,9 @@ if [[ "${FULL_EVAL}" == "1" ]]; then
         EXTRA_ARGS+=(--n_eval "${N_EVAL}")
     fi
 fi
+[[ -n "${N_STEPS}"   ]] && EXTRA_ARGS+=(--n_steps   "${N_STEPS}")
+[[ -n "${N_SAMPLES}" ]] && EXTRA_ARGS+=(--n_samples "${N_SAMPLES}")
+[[ -n "${CFG_SCALE}" ]] && EXTRA_ARGS+=(--cfg_scale "${CFG_SCALE}")
 
 echo "[$(date +%T)] Démarrage évaluation SR-CFD"
 

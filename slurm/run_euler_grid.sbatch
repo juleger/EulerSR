@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=euler-grid
-#SBATCH --partition=gpu-rtx6000
+#SBATCH --partition=gpu-rtx6000,gpu-a40,gpu-l40
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=24G
 #SBATCH --time=20:00:00
-#SBATCH --array=0-10
+#SBATCH --array=0-20
 #SBATCH --output=logs/euler/grid_%A_%a.out
 #SBATCH --error=logs/euler/grid_%A_%a.err
 
@@ -27,13 +27,13 @@
 
 
 CASE="${CASE:-naca0012}"
-MESH_PATH="${MESH_PATH:-data/meshes/naca0012_h0.025.npy}"
-MACH="${MACH:-1.31:1.99:0.02}"
+MESH_PATH="${MESH_PATH:-data/meshes/naca0012_h0.1.npy}"
+MACH="${MACH:-0.60:1.30:0.01}"
 TF="${TF:-5.0}"
 STATIONARITY_THRESHOLD="${STATIONARITY_THRESHOLD:-1e-8}"
-AOA_MIN="${AOA_MIN:--5}"
-
-AOA=$(( SLURM_ARRAY_TASK_ID + AOA_MIN ))
+AOA_MIN="${AOA_MIN:--5.0}"
+AOA_STEP="${AOA_STEP:-0.5}"
+AOA=$(awk "BEGIN {printf \"%.1f\", $AOA_MIN + $SLURM_ARRAY_TASK_ID * $AOA_STEP}")
 
 TMPDIR="${SLURM_TMPDIR:-/tmp}"
 mkdir -p "${TMPDIR}" logs/euler
@@ -41,7 +41,7 @@ mkdir -p "${TMPDIR}" logs/euler
 echo "##############################################################"
 echo "User              : ${USER}"
 echo "SLURM_JOBID       : ${SLURM_JOBID}"
-echo "SLURM_ARRAY_TASK  : ${SLURM_ARRAY_TASK_ID}  →  AoA=${AOA}"
+echo "SLURM_ARRAY_TASK  : ${SLURM_ARRAY_TASK_ID}  ->  AoA=${AOA}"
 echo "Case              : ${CASE}"
 echo "Mesh              : ${MESH_PATH}"
 echo "Mach range        : ${MACH}"
