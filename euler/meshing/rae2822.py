@@ -4,8 +4,9 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.spatial import cKDTree
 
-repo_root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(Path(__file__).parent))
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # euler/ (jax_fvm)
+sys.path.insert(0, str(Path(__file__).parent))                # meshing/ (mesh_utils)
 
 from mesh_utils import (WALL, MeshSizeParams, _menger_curvature, sample_airfoil_boundary, local_size_kdtree,
                          make_airfoil_refinement, build_outer_boundary, triangulate_with_hole)

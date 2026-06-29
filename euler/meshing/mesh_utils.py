@@ -5,8 +5,8 @@ import meshpy.triangle as triangle
 from pathlib import Path
 import sys
 
-# Ajout du répertoire courant pour permettre les imports entre modules euler/
-_euler_dir = str(Path(__file__).parent)
+# Ajout du répertoire euler/ pour permettre l'import de jax_fvm
+_euler_dir = str(Path(__file__).resolve().parents[1])
 if _euler_dir not in sys.path:
     sys.path.insert(0, _euler_dir)
 

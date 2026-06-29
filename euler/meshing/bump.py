@@ -1,9 +1,11 @@
 from pathlib import Path
 from dataclasses import dataclass
+import sys
 import numpy as np
 import meshpy.triangle as triangle
 
-repo_root = Path(__file__).resolve().parents[1]
+repo_root = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # euler/ (jax_fvm)
 
 from jax_fvm.src.mesh import Mesh
 
