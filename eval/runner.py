@@ -19,6 +19,7 @@ from utils.metrics import (compute_field_errors, l2_rel, aero_metrics,
                             idw_weights)
 from utils.aero import aero_coeffs
 from utils.gt_cache import load_or_build_gt_cache
+from utils.layout import load_sample
 
 _PRIM_NAMES = ['rho', 'u', 'v', 'p']
 
@@ -61,7 +62,7 @@ def _maybe_recalibrate(models: list[ModelEntry], ts: TestSet, knn_map: dict[str,
               f"  ({ood_kind})  LR train={trained_lr} → eval={ts.lr_res} ──")
         lr_feats, tg_list = [], []
         for c in calib_cases:
-            d = dict(np.load(c['path']))
+            d = load_sample(c['path'])
             if 'hr_primitives' not in d:
                 continue
             lr_feats.append(build_lr_feat(mesh_geom_from_case(d), d, mu, sig))
@@ -130,7 +131,7 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
     # Pré-chargement des cas
     case_data = []
     for c in ts.ref_cases:
-        d = np.load(c['path'])
+        d = load_sample(c['path'])
         hr_prim = d['hr_primitives'].astype(np.float32) if 'hr_primitives' in d else None
         mach_ref = to_mach(hr_prim) if hr_prim is not None else None
         wm_hr = (aero_coeffs(hr_prim, wc, c['mach_in'])['wall_mach']
@@ -254,7 +255,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
 
     print(f"  Chargement parallèle de {n} fichiers...")
     with ThreadPoolExecutor(max_workers=8) as ex:
-        all_data: list[dict] = list(ex.map(lambda c: dict(np.load(c['path'])), cases))
+        all_data: list[dict] = list(ex.map(lambda c: load_sample(c['path']), cases))
 
     print("  Pré-calcul des features...")
     geom = mesh_geom_from_case(all_data[0])

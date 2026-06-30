@@ -29,7 +29,7 @@ import euler.jax_fvm.src.mesh  # noqa: F401
 
 from preprocessing.dataset import SRDataset, MultiSRDataset
 from models.base import TrainConfig, load_cfg
-from utils.viz.training import plot_val_panels, plot_huber_regime
+from utils.viz.training import plot_val_panels
 from utils.refs import REFERENCE_CASES, NACA_REFERENCE_CASES, find_ref_file, _res_tag
 from utils.layout import DataLayout
 
@@ -98,7 +98,7 @@ def main():
     parser.add_argument('--wd', type=float, default=None)
     parser.add_argument('--val_every', type=int, default=None)
     parser.add_argument('--seed', type=int, default=None)
-    parser.add_argument('--loss', default=None, choices=['mse', 'rel_mse', 'shock_weighted_mse', 'shock_weighted_rel_mse', 'huber', 'shock_weighted_huber', 'sliced_wasserstein'])
+    parser.add_argument('--loss', default=None, choices=['mse', 'rel_mse', 'shock_weighted_mse', 'shock_weighted_rel_mse', 'sliced_wasserstein'])
     parser.add_argument('--schedule', default=None, choices=['cosine', 'constant'])
     parser.add_argument('--warmup_epochs', type=int, default=None)
     parser.add_argument('--grad_clip', type=float, default=None)
@@ -135,12 +135,12 @@ def main():
         seed = _get(args.seed, 'seed', 42),
         loss = _get(args.loss, 'loss', 'rel_mse'),
         lambda_phys = tr.get('lambda_phys', 0.0),
+        lambda_enthalpy = tr.get('lambda_enthalpy', 0.0),
         schedule = _get(args.schedule, 'schedule', 'cosine'),
         warmup_epochs = _get(args.warmup_epochs, 'warmup_epochs', 0),
         grad_clip = _get(args.grad_clip, 'grad_clip', 0.0),
         batch_size = _get(args.batch_size, 'batch_size', 1),
         save_best = (not args.no_save_best) and tr.get('save_best', True),
-        huber_delta = tr.get('huber_delta', 1.0),
         ema_decay = tr.get('ema_decay', 0.0),
     )
 
@@ -268,9 +268,6 @@ def main():
             plot_val_panels(m, knn_, ref_cases, stats, mesh_hr, mesh_lr,
                             pred_dir / f'ep{epoch:04d}.png',
                             title=f'{run_label} — epoch {epoch}')
-            if 'huber' in train_cfg.loss:
-                plot_huber_regime(m, knn_, ref_cases, stats, mesh_hr, train_cfg.huber_delta,
-                                  pred_dir / f'huber_ep{epoch:04d}.png', epoch=epoch)
             # Plots par géométrie secondaire
             for sec in secondary_plot_data:
                 if not sec['ref_cases']:

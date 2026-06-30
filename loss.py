@@ -1,15 +1,6 @@
 import jax
 import jax.numpy as jnp
 
-# Seuil Huber calibré pour des données normalisées 
-_HUBER_DELTA = 1.0
-
-
-def _huber_elementwise(r: jax.Array, delta: float = _HUBER_DELTA) -> jax.Array:
-    return jnp.where(jnp.abs(r) < delta,
-                     0.5 * r ** 2,
-                     delta * (jnp.abs(r) - 0.5 * delta))
-
 
 def mse(pred: jax.Array, target: jax.Array, weights: jax.Array) -> jax.Array:
     return ((pred - target) ** 2).mean()
@@ -32,18 +23,6 @@ def shock_weighted_rel_mse(pred: jax.Array, target: jax.Array, weights: jax.Arra
     return (per_var / ref).mean()
 
 
-def huber(pred: jax.Array, target: jax.Array, weights: jax.Array, delta: float = _HUBER_DELTA) -> jax.Array:
-    std = jnp.sqrt((target ** 2).mean(0) + 1e-8)  # (n_vars,) std par variable sur le batch
-    r = (pred - target) / std  # résidu relatif : delta en unités de std
-    return _huber_elementwise(r, delta).mean()
-
-
-def shock_weighted_huber(pred: jax.Array, target: jax.Array, weights: jax.Array, delta: float = _HUBER_DELTA) -> jax.Array:
-    std = jnp.sqrt((target ** 2).mean(0) + 1e-8)
-    r = (pred - target) / std
-    return (weights[:, None] * _huber_elementwise(r, delta)).mean()
-
-
 def sliced_wasserstein_loss(pred: jax.Array, ref: jax.Array, weights: jax.Array) -> jax.Array:
     """Sliced Wasserstein SW2 (trié par variable) sur champ normalisé."""
     p = jnp.sort(pred, axis=0)
@@ -56,10 +35,26 @@ LOSS_FNS = {
     'rel_mse': rel_mse,
     'shock_weighted_mse': shock_weighted_mse,
     'shock_weighted_rel_mse': shock_weighted_rel_mse,
-    'huber': huber,
-    'shock_weighted_huber': shock_weighted_huber,
     'sliced_wasserstein': sliced_wasserstein_loss,
 }
+
+# Constantes physiques
+from utils.refs import GAMMA as _GAMMA
+from preprocessing.dataset import _MACH_MID, _MACH_SCALE
+_P_INF = 1.0
+_RHO_INF = 1.0
+
+
+def enthalpy_residual(pred_norm: jax.Array, mach_n: jax.Array,
+                      mu: jax.Array, sig: jax.Array, gamma: float = _GAMMA) -> jax.Array:
+    """Résidu RMS d'enthalpie totale (= 0 pour une solution Euler parfaite), différentiable."""
+    prim = pred_norm * sig + mu  # dénormalisation
+    rho = jnp.maximum(prim[:, 0], 1e-12)
+    H = gamma / (gamma - 1) * prim[:, 3] / rho + 0.5 * (prim[:, 1] ** 2 + prim[:, 2] ** 2)
+    mach_in = mach_n * _MACH_SCALE + _MACH_MID
+    v_inf = mach_in * jnp.sqrt(gamma * _P_INF / _RHO_INF)
+    H_inf = gamma / (gamma - 1) * _P_INF / _RHO_INF + 0.5 * v_inf ** 2
+    return jnp.sqrt((((H - H_inf) / H_inf) ** 2).mean() + 1e-12)
 
 
 def grad_p_lsq(pred: jax.Array, knn: dict) -> jax.Array:

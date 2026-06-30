@@ -57,7 +57,7 @@ def _find_test_cases(layout: DataLayout) -> list[dict]:
 
 def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: dict) -> dict:
     """KNN hiérarchique pour FAM/DAM sur une géométrie quelconque."""
-    from utils.aero import wall_features as _wf
+    from utils.aero import wall_feature_array as _wfa
     from preprocessing.knn import build_hierarchy as _bh
 
     arch = (cfg or {}).get('architecture', {})
@@ -74,15 +74,19 @@ def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: d
             np.load(mesh_paths[r], allow_pickle=True).item().barycenter,
             dtype=np.float64)
 
-    mesh_hr_obj = np.load(mesh_paths[hr_res], allow_pickle=True).item()
+    def _mesh(r: float):
+        return np.load(mesh_paths[r], allow_pickle=True).item()
+
+    mesh_hr_obj = _mesh(hr_res)
     pos_hr = np.asarray(mesh_hr_obj.barycenter, dtype=np.float64)
     lr_bary = _bary(lr_res)
-    lvl_pos = [pos_hr] + [_bary(r) for r in levels]
+    lvl_meshes = [mesh_hr_obj] + [_mesh(r) for r in levels]
+    lvl_pos = [pos_hr] + [np.asarray(m.barycenter, dtype=np.float64)
+                          for m in lvl_meshes[1:]]
 
-    wd, normals = _wf(mesh_hr_obj, pos_hr)
-    wall_feat = jnp.array(np.column_stack(
-        [wd / wd.max(), np.exp(-wd / (2.0 * lr_res)), normals]
-    ).astype(np.float32))
+    # Features de paroi par niveau (cf. load_hierarchical_knn)
+    wall_feat = [jnp.array(_wfa(m, p, lr_res))
+                 for m, p in zip(lvl_meshes, lvl_pos)]
 
     z = _bh(lvl_pos, lr_bary, k_pool, k_up, k_self, k_cond)
     L = len(levels) + 1
@@ -222,11 +226,8 @@ class TestSet:
         }
         if entry.knn and 'wall_feat' in entry.knn:
             try:
-                from utils.aero import wall_features as _wf2
-                wd, normals = _wf2(mesh_hr, hr_pos)
-                knn['wall_feat'] = jnp.array(np.column_stack([
-                    wd / wd.max(), np.exp(-wd / (2.0 * self.lr_res)), normals,
-                ]).astype(np.float32))
+                from utils.aero import wall_feature_array as _wfa2
+                knn['wall_feat'] = jnp.array(_wfa2(mesh_hr, hr_pos, self.lr_res))
             except Exception:
                 pass
         return knn
