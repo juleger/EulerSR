@@ -7,32 +7,35 @@ resolution:
   lr: 0.1
 
 architecture:
-  # Hiérarchie : HR (0.025) → 0.05 → 0.1 (self-attention globale au niveau le plus grossier)
   levels: [0.05, 0.1]
-  embed_dim: 64
-  cond_dim: 64
-  n_heads: 2            # 64/4=16 dims/tête
-  n_global_blocks: 3
+  embed_dim: 96
+  cond_dim: 96
+  n_heads: 3            # dh = 32
+  n_hr_blocks: 3
+  n_global_blocks: 4
   mlp_ratio: 4
-  k_pool: 9             # voisins pour le pooling (fin → grossier)
-  k_up: 6               # voisins pour l'unpooling (grossier → fin)
-  k_self: 9             # self-attention locale au niveau HR
-  k_cond: 6             # voisins IDW pour le conditionnement LR par niveau
-  use_lr_grad: true     # gradient de pression + div(u) du maillage LR comme entrée
+  k_pool: 9
+  k_up: 6
+  k_self: 12
+  k_cond: 6
+  use_lr_grad: true
   use_bf16: true
 
 training:
   epochs: 150
   lr: 5.0e-4
-  weight_decay: 1.0e-4
+  weight_decay: 5.0e-4
   val_every: 10
   seed: 42
   loss: shock_weighted_rel_mse
+  shock_weight_factor: 1.0
+  lambda_phys: 0.0
+  lambda_enthalpy: 0.0
   schedule: cosine
   warmup_epochs: 20
   grad_clip: 1.0
   save_best: true
   batch_size: 16
-  huber_delta: 1.0
   ema_decay: 0.9995
+  train_fraction: 1.0
   preload: true

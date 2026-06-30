@@ -1,5 +1,6 @@
 model: fam
 data_root: data/
+geometry: diamond
 
 resolution:
   hr: 0.025
@@ -11,11 +12,12 @@ architecture:
   cond_dim: 96
   t_dim: 64
   n_heads: 3
-  n_global_blocks: 3
+  n_hr_blocks: 3
+  n_global_blocks: 4
   mlp_ratio: 4
   k_pool: 9
   k_up: 6
-  k_self: 9
+  k_self: 12
   k_cond: 6
   use_lr_grad: true
   use_bf16: true
@@ -23,24 +25,28 @@ architecture:
 flow:
   n_steps: 16
   use_residual: true
-  n_samples: 1
-  ema_decay: 0.9995 
+  n_samples: 4
   n_val_gen: 32
   sample_seed: 42
   t_dist: logit_normal
-  sigma_t: 1.5
+  sigma_t: 1.2
+  cfg_prob: 0.1     # prob. dropout scal (Mach/AoA) à l'entraînement ; 0.0 = désactivé
+  cfg_scale: 1.0    # guidance scale à l'inférence ; 1.0 = désactivé
 
 training:
-  epochs: 150
+  epochs: 250
   lr: 5.0e-4
-  weight_decay: 1.0e-4
+  weight_decay: 5.0e-4
   val_every: 10
   seed: 42
-  loss: sliced_wasserstein
+  loss: shock_weighted_rel_mse
   shock_weight_factor: 1.0
+  lambda_enthalpy: 0.0
   schedule: cosine
   warmup_epochs: 20
   grad_clip: 4.0
   save_best: true
   batch_size: 16
+  ema_decay: 0.9995
+  train_fraction: 1.0
   preload: true
