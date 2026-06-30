@@ -17,7 +17,6 @@ Entraînement :
 import csv
 import math
 import os
-import functools
 import pickle
 import sys
 import time
@@ -38,10 +37,10 @@ if str(REPO_ROOT / 'euler') not in sys.path:
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from loss import LOSS_FNS, grad_p_lsq
+from loss import LOSS_FNS, grad_p_lsq, enthalpy_residual
 from utils.viz._style import VAR_LABELS
 from utils.viz.training import plot_training_curves
-from utils.metrics import enthalpy_rms, l2_rel
+from utils.metrics import enthalpy_rms, l2_rel, idw_weights
 from utils.refs import to_mach, _res_tag
 from utils.layout import DataLayout
 from preprocessing.dataset import MultiSRDataset
@@ -76,11 +75,8 @@ def _rel_l2_np(pred: np.ndarray, ref: np.ndarray) -> np.ndarray:
 def eval_idw(ds, knn: dict, k: int = 6) -> dict:
     # Baseline IDW : L2, Mach, enthalpie (avec valeur GT pour comparaison pendant l'entraînement).
     k_use = min(k, np.asarray(knn['idx']).shape[1])
-    idx_np  = np.asarray(knn['idx'])[:, :k_use].astype(np.int32)
-    dist_np = np.asarray(knn['dist'])[:, :k_use].astype(np.float64)
-    w = 1.0 / (dist_np ** 2 + 1e-12)
-    w /= w.sum(axis=1, keepdims=True)
-    w32 = w.astype(np.float32)
+    idx_np = np.asarray(knn['idx'])[:, :k_use].astype(np.int32)
+    w32 = idw_weights(np.asarray(knn['dist'])[:, :k_use]).astype(np.float32)
 
     mu, sig = np.asarray(ds.mu), np.asarray(ds.sig)
     has_flow = hasattr(ds, 'entries')
@@ -90,17 +86,17 @@ def eval_idw(ds, knn: dict, k: int = 6) -> dict:
     for i in range(len(ds)):
         _, lr, tg, *_ = ds[i]
         pred_phys = (w32[:, :, None] * lr[:, :4][idx_np]).sum(axis=1) * sig + mu
-        tg_phys   = tg * sig + mu
-        l2_acc   += _rel_l2_np(pred_phys, tg_phys)
+        tg_phys = tg * sig + mu
+        l2_acc += _rel_l2_np(pred_phys, tg_phys)
         mach_acc += l2_rel(to_mach(pred_phys), to_mach(tg_phys))
         if has_flow:
             mach_in = ds.entries[i][1]
-            enth_acc     += enthalpy_rms(pred_phys, mach_in)
-            enth_ref_acc += enthalpy_rms(tg_phys,   mach_in)
+            enth_acc += enthalpy_rms(pred_phys, mach_in)
+            enth_ref_acc += enthalpy_rms(tg_phys, mach_in)
     n = len(ds)
     out = {'l2': l2_acc / n, 'mach': mach_acc / n}
     if has_flow:
-        out['enthalpy']     = enth_acc / n
+        out['enthalpy'] = enth_acc / n
         out['enthalpy_ref'] = enth_ref_acc / n
     return out
 
@@ -118,8 +114,8 @@ class TrainConfig:
     save_best: bool = True
     batch_size: int = 1
     lambda_phys: float = 0.0
+    lambda_enthalpy: float = 0.0
     warmup_epochs: int = 0
-    huber_delta: float = 1.0
     ema_decay: float = 0.0
 
 class Buffer(nnx.Variable):
@@ -137,10 +133,198 @@ class MLP(nnx.Module):
             x = jax.nn.silu(layer(x))
         return self.layers[-1](x)
 
+def _build_schedule(cfg: 'TrainConfig', n_steps: int, warmup_steps: int):
+    """Schedule de learning rate (cosine/constant, avec warmup éventuel)."""
+    if cfg.schedule == 'cosine':
+        if warmup_steps > 0:
+            return optax.warmup_cosine_decay_schedule(
+                init_value=0.0, peak_value=cfg.lr,
+                warmup_steps=warmup_steps, decay_steps=n_steps,
+            )
+        return optax.cosine_decay_schedule(cfg.lr, n_steps)
+    if warmup_steps > 0:
+        return optax.join_schedules(
+            schedules=[
+                optax.linear_schedule(0.0, cfg.lr, warmup_steps),
+                optax.constant_schedule(cfg.lr),
+            ],
+            boundaries=[warmup_steps],
+        )
+    return cfg.lr
+
+
+def _delta(model_v, idw_v) -> str:
+    pct = (model_v - idw_v) / (idw_v + 1e-9) * 100
+    sign = '-' if pct <= 0 else '+'
+    return f"{model_v:.4f}({sign}{abs(pct):.0f}%)"
+
+
+def _prims_str(vl2_arr, idw_l2) -> str:
+    return "  ".join(f"{v}={_delta(float(vl2_arr[i]), float(idw_l2[i]))}"
+                     for i, v in enumerate(VAR_LABELS))
+
+
+def _validate(eval_model, all_names, all_val, all_step_fns, train_ds, is_multi,
+              max_samples: int | None = None) -> dict:
+    """Boucle de validation : loss + métriques L2 physiques (dénormalisées) par géométrie"""
+    vl, vl2, vmach = 0.0, np.zeros(4), 0.0
+    enth_acc = enth_ref_acc = 0.0
+    n_val = 0
+    per_geom: dict = {}
+
+    for i_g, (g_name, val_ds_g) in enumerate(zip(all_names, all_val)):
+        _, _, ev_g = all_step_fns[g_name]
+        mu_g = np.asarray(train_ds.datasets[i_g].mu if is_multi else train_ds.mu)
+        sig_g = np.asarray(train_ds.datasets[i_g].sig if is_multi else train_ds.sig)
+        has_flow_g = hasattr(val_ds_g, 'entries')
+
+        if max_samples is not None and len(val_ds_g) > max_samples:
+            idxs = np.unique(np.linspace(0, len(val_ds_g) - 1, max_samples).astype(int))
+        else:
+            idxs = range(len(val_ds_g))
+
+        vl_g = 0.0
+        vl2_g, vmach_g = np.zeros(4), 0.0
+        enth_g = enth_ref_g = 0.0
+        for i in idxs:
+            hr, lr, tg, wt, *_ = val_ds_g[i]
+            l, pred = ev_g(eval_model, jnp.array(hr), jnp.array(lr),
+                           jnp.array(tg), jnp.array(wt))
+            vl_g += float(l)
+            pred_phys = np.asarray(pred) * sig_g + mu_g
+            tg_phys = tg * sig_g + mu_g
+            vl2_g += _rel_l2_np(pred_phys, tg_phys)
+            vmach_g += l2_rel(to_mach(pred_phys), to_mach(tg_phys))
+            if has_flow_g:
+                mach_in_v = val_ds_g.entries[i][1]
+                enth_g += enthalpy_rms(pred_phys, mach_in_v)
+                enth_ref_g += enthalpy_rms(tg_phys, mach_in_v)
+        n_g = len(idxs)
+        per_geom[g_name] = {
+            'vl': vl_g / max(n_g, 1),
+            'vl2': vl2_g / max(n_g, 1),
+            'vmach': vmach_g / max(n_g, 1),
+            'enth': enth_g / max(n_g, 1) if has_flow_g else None,
+            'enth_ref': enth_ref_g / max(n_g, 1) if has_flow_g else None,
+        }
+        vl += vl_g
+        vl2 += vl2_g
+        vmach += vmach_g
+        enth_acc += enth_g
+        enth_ref_acc += enth_ref_g
+        n_val += n_g
+
+    vl /= n_val; vl2 /= n_val; vmach /= n_val
+    return {'vl': vl, 'vl2': vl2, 'vmach': vmach,
+            'enth_acc': enth_acc, 'enth_ref_acc': enth_ref_acc,
+            'n_val': n_val, 'per_geom': per_geom}
+
+
+def _log_epoch(epoch, cfg, metrics, *, train_loss, lr_now, elapsed, is_best, mem,
+               gnorm_sum, gnorm_n, n_clipped, idw_ref, idw_refs,
+               all_names, is_multi, has_flow, csv_path, csv_fields) -> None:
+    """Écrit la ligne CSV de l'epoch et imprime le résumé console."""
+    vl, vl2, vmach = metrics['vl'], metrics['vl2'], metrics['vmach']
+    enth_acc, enth_ref_acc = metrics['enth_acc'], metrics['enth_ref_acc']
+    n_val, per_geom = metrics['n_val'], metrics['per_geom']
+
+    ram, gpu, gpup = mem['ram_gb'], mem['gpu_gb'], mem['gpu_peak_gb']
+    mem_parts = []
+    if not np.isnan(ram):
+        mem_parts.append(f"RAM={ram:.1f}G")
+    gpu_show = gpup if not np.isnan(gpup) else gpu
+    if not np.isnan(gpu_show):
+        mem_parts.append(f"GPU={gpu_show:.1f}G")
+    mem_str = ('  ' + '  '.join(mem_parts)) if mem_parts else ''
+
+    row = {
+        'epoch': epoch, 'time_s': elapsed,
+        'train_loss': round(train_loss, 8),
+        'val_loss': round(vl, 8),
+        'lr': f'{lr_now:.6e}',
+        **{f'l2_{v}': round(float(vl2[i]), 8) for i, v in enumerate(VAR_LABELS)},
+        'l2_mach': round(float(vmach), 8),
+        **{f'idw_{v}': round(float(idw_ref['l2'][i]), 8) for i, v in enumerate(VAR_LABELS)},
+        'idw_mach': round(float(idw_ref['mach']), 8),
+        'enthalpy': round(float(enth_acc / n_val), 8) if has_flow else '',
+        'enthalpy_gt': round(float(enth_ref_acc / n_val), 8) if has_flow else '',
+        'idw_enthalpy': round(float(idw_ref.get('enthalpy', float('nan'))), 8) if has_flow else '',
+        'ram_gb': '' if np.isnan(ram) else round(ram, 3),
+        'gpu_gb': '' if np.isnan(gpu) else round(gpu, 3),
+        'gpu_peak_gb': '' if np.isnan(gpup) else round(gpup, 3),
+        'is_best': int(is_best),
+    }
+    with open(csv_path, 'a', newline='') as f:
+        csv.DictWriter(f, fieldnames=csv_fields).writerow(row)
+
+    avg_gnorm = gnorm_sum / max(gnorm_n, 1)
+    if cfg.grad_clip > 0:
+        clip_pct = n_clipped / max(gnorm_n, 1) * 100
+        gnorm_str = f"  gn={avg_gnorm:.1e}({clip_pct:.0f}%clip)"
+    else:
+        gnorm_str = f"  gn={avg_gnorm:.1e}"
+
+    if is_multi:
+        # Ligne de résumé global, puis une ligne par géométrie
+        print(f"  ep {epoch:4d}/{cfg.epochs}  "
+              f"tr={train_loss:.4f}  val={vl:.4f}"
+              + gnorm_str + mem_str + f"  {elapsed:.0f}s")
+        w = max(len(nm) for nm in all_names)
+        for g_name in all_names:
+            gm = per_geom[g_name]
+            ref = idw_refs[g_name]
+            ht_g = (f"  Ht={gm['enth']:.3e}(gt={gm['enth_ref']:.3e})"
+                    if gm['enth'] is not None else "")
+            print(f"    [{g_name:<{w}}]  val={gm['vl']:.4f}  "
+                  + _prims_str(gm['vl2'], ref['l2'])
+                  + f"  M={_delta(gm['vmach'], ref['mach'])}"
+                  + ht_g)
+    else:
+        ht_str = f"  Ht={enth_acc/n_val:.3e}(gt={enth_ref_acc/n_val:.3e})" if has_flow else ""
+        print(f"  ep {epoch:4d}/{cfg.epochs}  "
+              f"tr={train_loss:.4f}  val={vl:.4f}  "
+              + _prims_str(vl2, idw_ref['l2'])
+              + f"  M={_delta(vmach, idw_ref['mach'])}"
+              + ht_str
+              + gnorm_str
+              + mem_str
+              + f"  {elapsed:.0f}s")
+
+
 class SRModel(nnx.Module):
     # Classe de base abstraite des modèles de Super-resolution
+
+    # Sous-échantillonnage de la validation pour les modèles à inférence coûteuse
+    val_max_samples: int | None = None
+
     def predict(self, hr_feat: jax.Array, lr_feat: jax.Array, knn: dict) -> jax.Array:
         raise NotImplementedError
+
+    def _pre_fit(self, branch_pairs: list, cfg: 'TrainConfig') -> None:
+        """Hook appelé une fois avant l'entraînement (ex: calibration res_scale FAM)
+        """
+
+    def _phys_terms(self, pred: jax.Array, hr: jax.Array, gp: jax.Array,
+                    knn_g: dict, aux: dict) -> jax.Array:
+        """Termes physiques soft (résidu grad_p + enthalpie) ajoutés à la loss"""
+        extra = 0.0
+        if aux['lambda_phys'] > 0 and 'grad_op' in knn_g:
+            extra = extra + aux['lambda_phys'] * (
+                (jnp.arcsinh(grad_p_lsq(pred, knn_g)) - gp) ** 2).mean()
+        if aux['lambda_enthalpy'] > 0 and 'mu' in knn_g:
+            extra = extra + aux['lambda_enthalpy'] * enthalpy_residual(
+                pred, hr[0, 2], knn_g['mu'], knn_g['sig'])
+        return extra
+
+    def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array,
+                     wt: jax.Array, gp: jax.Array, knn_g: dict,
+                     key: jax.Array, aux: dict) -> jax.Array:
+        """Loss d'un sample (déterministe par défaut : data + physique).
+
+        Surchargée par les modèles génératifs (ex: FAM, flow matching)
+        """
+        pred = self.predict(hr, lr, knn_g)
+        return aux['loss_fn'](pred, tg, wt) + self._phys_terms(pred, hr, gp, knn_g, aux)
 
     @classmethod
     def load_knn(cls, layout: 'DataLayout') -> dict:
@@ -176,17 +360,17 @@ class SRModel(nnx.Module):
 
     def fit(self, train_ds, val_ds, knn, cfg: TrainConfig, out_dir: str | Path = 'results/checkpoints',
             model_cfg: dict | None = None, run_name: str | None = None, pred_callback=None) -> 'SRModel':
-        
+
         _is_multi = isinstance(train_ds, MultiSRDataset)
         if _is_multi:
-            _all_knns  = knn          # dict[name -> knn_dict]
+            _all_knns = knn  # dict[name -> knn_dict]
             _all_names = train_ds.names
-            _all_val   = val_ds.datasets if isinstance(val_ds, MultiSRDataset) else [val_ds]
+            _all_val = val_ds.datasets if isinstance(val_ds, MultiSRDataset) else [val_ds]
             _primary_knn = _all_knns[_all_names[0]]
         else:
-            _all_knns    = {'primary': knn}
-            _all_names   = ['primary']
-            _all_val     = [val_ds]
+            _all_knns = {'primary': knn}
+            _all_names = ['primary']
+            _all_val = [val_ds]
             _primary_knn = knn
 
         if run_name is None:
@@ -208,29 +392,17 @@ class SRModel(nnx.Module):
               f'  params={n_params(self):,}')
         print(sep)
 
+        # Sauvegarde des stats d'entraînement pour la normalisation en éval OOD géométrique
+        _primary_ds = train_ds.datasets[0] if _is_multi else train_ds
+        if hasattr(self, 'mu_train'):
+            self.mu_train.value = jnp.array(_primary_ds.mu, jnp.float32)
+            self.sig_train.value = jnp.array(_primary_ds.sig, jnp.float32)
+
         _steps_per_epoch = math.ceil(len(train_ds) / max(cfg.batch_size, 1))
         n_steps = cfg.epochs * _steps_per_epoch
         warmup_steps = cfg.warmup_epochs * _steps_per_epoch
 
-        if cfg.schedule == 'cosine':
-            if warmup_steps > 0:
-                lr_sched = optax.warmup_cosine_decay_schedule(
-                    init_value=0.0, peak_value=cfg.lr,
-                    warmup_steps=warmup_steps, decay_steps=n_steps,
-                )
-            else:
-                lr_sched = optax.cosine_decay_schedule(cfg.lr, n_steps)
-        else:
-            if warmup_steps > 0:
-                lr_sched = optax.join_schedules(
-                    schedules=[
-                        optax.linear_schedule(0.0, cfg.lr, warmup_steps),
-                        optax.constant_schedule(cfg.lr),
-                    ],
-                    boundaries=[warmup_steps],
-                )
-            else:
-                lr_sched = cfg.lr
+        lr_sched = _build_schedule(cfg, n_steps, warmup_steps)
 
         # Optimiseur AdamW avec éventuellement du clipping de gradients
         tx = optax.adamw(lr_sched, weight_decay=cfg.weight_decay)
@@ -249,24 +421,31 @@ class SRModel(nnx.Module):
             return jax.tree.map(lambda a, b: decay * a + (1.0 - decay) * b, e, p)
 
         _loss_fn = LOSS_FNS[cfg.loss]
-        compute_loss = (functools.partial(_loss_fn, delta=cfg.huber_delta)
-                        if 'huber' in cfg.loss else _loss_fn)
-        batch_size  = cfg.batch_size
+        batch_size = cfg.batch_size
         lambda_phys = cfg.lambda_phys
+        lambda_enth = cfg.lambda_enthalpy
+
+        # Stats de dénormalisation par branche
+        _name_to_ds = {nm: (train_ds.datasets[i] if _is_multi else train_ds)
+                       for i, nm in enumerate(_all_names)}
+        for nm in _all_names:
+            ds_b = _name_to_ds[nm]
+            _all_knns[nm]['mu'] = jnp.array(ds_b.mu, jnp.float32)
+            _all_knns[nm]['sig'] = jnp.array(ds_b.sig, jnp.float32)
+        _branch_pairs = [(_name_to_ds[nm], _all_knns[nm]) for nm in _all_names]
+
+        self._pre_fit(_branch_pairs, cfg)
+
+        # aux statique capturé par les closures jit (loss + poids physiques)
+        _aux = {'loss_fn': _loss_fn, 'lambda_phys': lambda_phys,
+                'lambda_enthalpy': lambda_enth}
         use_phys_loss = lambda_phys > 0 and 'grad_op' in _primary_knn
 
         def _make_step_fns(knn_g):
-            _uph = lambda_phys > 0 and 'grad_op' in knn_g
-
             @nnx.jit
-            def _ss(opt, hr, lr, tg, wt, gp_tg):
+            def _ss(opt, hr, lr, tg, wt, gp_tg, key):
                 def lf(m):
-                    pred = m.predict(hr, lr, knn_g)
-                    loss = compute_loss(pred, tg, wt)
-                    if _uph:
-                        loss = loss + lambda_phys * (
-                            (jnp.arcsinh(grad_p_lsq(pred, knn_g)) - gp_tg) ** 2).mean()
-                    return loss
+                    return m._sample_loss(hr, lr, tg, wt, gp_tg, knn_g, key, _aux)
                 loss, grads = nnx.value_and_grad(lf)(opt.model)
                 leaves = jax.tree_util.tree_leaves(grads)
                 grad_norm = jnp.sqrt(sum(jnp.sum(g ** 2) for g in leaves if hasattr(g, 'shape')))
@@ -274,16 +453,12 @@ class SRModel(nnx.Module):
                 return loss, grad_norm
 
             @nnx.jit
-            def _sb(opt, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b):
+            def _sb(opt, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b, keys):
                 def lf(m):
-                    def one(hr, lr, tg, wt, gp):
-                        pred = m.predict(hr, lr, knn_g)
-                        loss = compute_loss(pred, tg, wt)
-                        if _uph:
-                            loss = loss + lambda_phys * (
-                                (jnp.arcsinh(grad_p_lsq(pred, knn_g)) - gp) ** 2).mean()
-                        return loss
-                    losses = jax.vmap(one)(hr_b, lr_b, tg_b, wt_b, gp_b)
+                    losses = jax.vmap(
+                        lambda hr, lr, tg, wt, gp, k:
+                            m._sample_loss(hr, lr, tg, wt, gp, knn_g, k, _aux)
+                    )(hr_b, lr_b, tg_b, wt_b, gp_b, keys)
                     return (losses * valid_b).sum() / valid_b.sum()
                 loss, grads = nnx.value_and_grad(lf)(opt.model)
                 leaves = jax.tree_util.tree_leaves(grads)
@@ -294,16 +469,15 @@ class SRModel(nnx.Module):
             @nnx.jit
             def _ev(model, hr, lr, tg, wt):
                 pred = model.predict(hr, lr, knn_g)
-                return compute_loss(pred, tg, wt), pred
+                return _loss_fn(pred, tg, wt), pred
 
             return _ss, _sb, _ev
 
         _all_step_fns = {name: _make_step_fns(_all_knns[name]) for name in _all_names}
-        step_single, step_batched, eval_step_val = _all_step_fns[_all_names[0]]
 
         _has_flow = hasattr(_all_val[0], 'entries')
 
-        def _do_one_batch(raw, sfns):
+        def _do_one_batch(raw, sfns, step_key):
             _ss, _sb, _ = sfns
             B = len(raw)
             if batch_size > 1:
@@ -316,15 +490,17 @@ class SRModel(nnx.Module):
                 tg_b = jnp.array(np.stack([s[2] for s in samples]))
                 wt_b = jnp.array(np.stack([s[3] for s in samples]))
                 gp_b = jnp.array(np.stack([s[4] for s in samples]))
-                loss, gnorm = _sb(optimizer, hr_b, lr_b, tg_b, wt_b, jnp.array(valid), gp_b)
+                keys = jax.random.split(step_key, batch_size)
+                loss, gnorm = _sb(optimizer, hr_b, lr_b, tg_b, wt_b, jnp.array(valid), gp_b, keys)
                 return float(loss) * B_real, B_real, float(gnorm)
             else:
                 hr, lr, tg, wt, gp = raw[0]
                 loss, gnorm = _ss(optimizer, jnp.array(hr), jnp.array(lr),
-                                  jnp.array(tg), jnp.array(wt), jnp.array(gp))
+                                  jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key)
                 return float(loss), 1, float(gnorm)
 
         rng = np.random.default_rng(cfg.seed)
+        base_key = jax.random.PRNGKey(cfg.seed)
         train_losses, val_losses, val_l2s = [], [], []
         best_val, best_state = float('inf'), None
         _ep_gnorm_sum, _ep_gnorm_n, _ep_n_clipped = 0.0, 0, 0
@@ -352,9 +528,6 @@ class SRModel(nnx.Module):
               f"batch={batch_size}{_ema_str}{_multi_str}")
 
         # Baseline IDW sur le jeu de validation — une référence par géométrie
-        mu_np  = np.asarray(_all_val[0].mu)
-        sig_np = np.asarray(_all_val[0].sig)
-
         _idw_refs = {_all_names[0]: eval_idw(_all_val[0], _primary_knn)}
         if _is_multi:
             for _g_i, (_g_ds, _g_knn) in enumerate(zip(_all_val[1:], list(_all_knns.values())[1:])):
@@ -370,14 +543,6 @@ class SRModel(nnx.Module):
             for _g_name in _all_names[1:]:
                 print(_idw_line(_idw_refs[_g_name], _g_name))
 
-        def _delta(model_v, idw_v):
-            pct = (model_v - idw_v) / (idw_v + 1e-9) * 100
-            sign = '-' if pct <= 0 else '+'
-            return f"{model_v:.4f}({sign}{abs(pct):.0f}%)"
-
-        def _prims_str(vl2_arr, idw_l2):
-            return "  ".join(f"{v}={_delta(float(vl2_arr[i]), float(idw_l2[i]))}" for i, v in enumerate(VAR_LABELS))
-
         for epoch in range(1, cfg.epochs + 1):
             ep_loss, n = 0.0, 0
             _ep_gnorm_sum, _ep_gnorm_n, _ep_n_clipped = 0.0, 0, 0
@@ -386,7 +551,8 @@ class SRModel(nnx.Module):
                 # Mode multi-dataset : batches mono-géométrie routés vers le bon knn
                 for raw, geom_idx in train_ds.iter_batches(batch_size, rng):
                     sfns = _all_step_fns[_all_names[geom_idx]]
-                    loss_c, B_r, gn = _do_one_batch(raw, sfns)
+                    step_key = jax.random.fold_in(base_key, _n_grad_steps)
+                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key)
                     ep_loss += loss_c; n += B_r; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:
@@ -398,7 +564,8 @@ class SRModel(nnx.Module):
                 sfns = _all_step_fns['primary']
                 for bi in range(0, len(idx), batch_size):
                     raw = [train_ds[int(i)] for i in idx[bi:bi + batch_size]]
-                    loss_c, B_r, gn = _do_one_batch(raw, sfns)
+                    step_key = jax.random.fold_in(base_key, _n_grad_steps)
+                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key)
                     ep_loss += loss_c; n += B_r; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:
@@ -412,133 +579,34 @@ class SRModel(nnx.Module):
 
             if epoch % cfg.val_every == 0 or epoch == cfg.epochs:
                 eval_model = self._with_params(ema) if ema is not None else self
-                # Validation : loss + métriques L2 physiques (dénormalisées)
-                vl, vl2, vmach = 0.0, np.zeros(4), 0.0
-                enth_acc = enth_ref_acc = 0.0
-                n_val = 0
-                _per_geom_metrics: dict = {}
-
-                for i_g, (g_name, val_ds_g) in enumerate(zip(_all_names, _all_val)):
-                    _, _, _ev_g = _all_step_fns[g_name]
-                    knn_g  = _all_knns[g_name]
-                    mu_g   = np.asarray(train_ds.datasets[i_g].mu if _is_multi else train_ds.mu)
-                    sig_g  = np.asarray(train_ds.datasets[i_g].sig if _is_multi else train_ds.sig)
-                    _hfl_g = hasattr(val_ds_g, 'entries')
-
-                    vl_g = 0.0
-                    vl2_g, vmach_g = np.zeros(4), 0.0
-                    enth_g = enth_ref_g = 0.0
-                    for i in range(len(val_ds_g)):
-                        hr, lr, tg, wt, *_ = val_ds_g[i]
-                        l, pred = _ev_g(eval_model, jnp.array(hr), jnp.array(lr), jnp.array(tg), jnp.array(wt))
-                        vl_g += float(l)
-                        pred_phys = np.asarray(pred) * sig_g + mu_g
-                        tg_phys   = tg * sig_g + mu_g
-                        vl2_g   += _rel_l2_np(pred_phys, tg_phys)
-                        vmach_g += l2_rel(to_mach(pred_phys), to_mach(tg_phys))
-                        if _hfl_g:
-                            mach_in_v = val_ds_g.entries[i][1]
-                            enth_g     += enthalpy_rms(pred_phys, mach_in_v)
-                            enth_ref_g += enthalpy_rms(tg_phys,   mach_in_v)
-                    n_g = len(val_ds_g)
-                    _per_geom_metrics[g_name] = {
-                        'vl':       vl_g / max(n_g, 1),
-                        'vl2':      vl2_g / max(n_g, 1),
-                        'vmach':    vmach_g / max(n_g, 1),
-                        'enth':     enth_g / max(n_g, 1) if _hfl_g else None,
-                        'enth_ref': enth_ref_g / max(n_g, 1) if _hfl_g else None,
-                    }
-                    vl          += vl_g
-                    vl2         += vl2_g
-                    vmach       += vmach_g
-                    enth_acc    += enth_g
-                    enth_ref_acc += enth_ref_g
-                    n_val       += n_g
-
-                vl /= n_val; vl2 /= n_val; vmach /= n_val
+                metrics = _validate(eval_model, _all_names, _all_val,
+                                    _all_step_fns, train_ds, _is_multi,
+                                    max_samples=self.val_max_samples)
+                vl = metrics['vl']
                 val_losses.append(vl)
-                val_l2s.append([*vl2.tolist(), vmach])
+                val_l2s.append([*metrics['vl2'].tolist(), metrics['vmach']])
 
-                is_best = cfg.save_best and vl < best_val
+                # save_best sur la L2 physique (vraie métrique cible), pas la loss val
+                score = float(metrics['vl2'].mean())
+                is_best = cfg.save_best and score < best_val
                 if is_best:
-                    best_val = vl
+                    best_val = score
                     _, best_state = nnx.split(eval_model)
 
                 eval_model.save(out_dir / f'{self.__class__.__name__}.pkl', cfg=model_cfg)
 
                 # Export des courbes en direct à chaque validation
-                plot_training_curves(train_losses, val_losses, val_l2s,
-                                     out_dir / 'training_curves.png',
+                plot_training_curves(train_losses, val_losses, val_l2s, out_dir / 'training_curves.png',
                                      lr_track=lr_track, idw_l2_ref=idw_ref)
 
                 if pred_callback is not None:
                     pred_callback(eval_model, epoch, _primary_knn)
 
-                _mem = _get_mem()
-                _ram, _gpu, _gpup = _mem['ram_gb'], _mem['gpu_gb'], _mem['gpu_peak_gb']
-                mem_parts = []
-                if not np.isnan(_ram):
-                    mem_parts.append(f"RAM={_ram:.1f}G")
-                _gpu_show = _gpup if not np.isnan(_gpup) else _gpu
-                if not np.isnan(_gpu_show):
-                    mem_parts.append(f"GPU={_gpu_show:.1f}G")
-                mem_str = ('  ' + '  '.join(mem_parts)) if mem_parts else ''
-
-                # Écriture CSV
                 _elapsed = round(time.time() - t0, 1)
-                _row = {
-                    'epoch': epoch, 'time_s': _elapsed,
-                    'train_loss': round(train_losses[-1], 8),
-                    'val_loss': round(vl, 8),
-                    'lr': f'{lr_now:.6e}',
-                    **{f'l2_{v}': round(float(vl2[i]), 8) for i, v in enumerate(VAR_LABELS)},
-                    'l2_mach': round(float(vmach), 8),
-                    **{f'idw_{v}': round(float(idw_ref['l2'][i]), 8) for i, v in enumerate(VAR_LABELS)},
-                    'idw_mach': round(float(idw_ref['mach']), 8),
-                    'enthalpy':     round(float(enth_acc / n_val), 8) if _has_flow else '',
-                    'enthalpy_gt':  round(float(enth_ref_acc / n_val), 8) if _has_flow else '',
-                    'idw_enthalpy': round(float(idw_ref.get('enthalpy', float('nan'))), 8) if _has_flow else '',
-                    'ram_gb':       '' if np.isnan(_ram)  else round(_ram, 3),
-                    'gpu_gb':       '' if np.isnan(_gpu)          else round(_gpu, 3),
-                    'gpu_peak_gb':  '' if np.isnan(_gpup)         else round(_gpup, 3),
-                    'is_best': int(is_best),
-                }
-                with open(_csv_path, 'a', newline='') as _f:
-                    csv.DictWriter(_f, fieldnames=_csv_fields).writerow(_row)
-
-                # Indicateur grad clip : norme moy des gradients bruts + % d'étapes clippées
-                _avg_gnorm = _ep_gnorm_sum / max(_ep_gnorm_n, 1)
-                if cfg.grad_clip > 0:
-                    _clip_pct = _ep_n_clipped / max(_ep_gnorm_n, 1) * 100
-                    _gnorm_str = f"  gn={_avg_gnorm:.1e}({_clip_pct:.0f}%clip)"
-                else:
-                    _gnorm_str = f"  gn={_avg_gnorm:.1e}"
-
-                if _is_multi:
-                    # Ligne de résumé global, puis une ligne par géométrie
-                    print(f"  ep {epoch:4d}/{cfg.epochs}  "
-                          f"tr={train_losses[-1]:.4f}  val={vl:.4f}"
-                          + _gnorm_str + mem_str + f"  {_elapsed:.0f}s")
-                    _w = max(len(n) for n in _all_names)
-                    for g_name in _all_names:
-                        gm  = _per_geom_metrics[g_name]
-                        ref = _idw_refs[g_name]
-                        _ht_g = (f"  Ht={gm['enth']:.3e}(gt={gm['enth_ref']:.3e})"
-                                 if gm['enth'] is not None else "")
-                        print(f"    [{g_name:<{_w}}]  val={gm['vl']:.4f}  "
-                              + _prims_str(gm['vl2'], ref['l2'])
-                              + f"  M={_delta(gm['vmach'], ref['mach'])}"
-                              + _ht_g)
-                else:
-                    _ht_str = f"  Ht={enth_acc/n_val:.3e}(gt={enth_ref_acc/n_val:.3e})" if _has_flow else ""
-                    print(f"  ep {epoch:4d}/{cfg.epochs}  "
-                        f"tr={train_losses[-1]:.4f}  val={vl:.4f}  "
-                        + _prims_str(vl2, idw_ref['l2'])
-                        + f"  M={_delta(vmach, idw_ref['mach'])}"
-                        + _ht_str
-                        + _gnorm_str
-                        + mem_str
-                        + f"  {_elapsed:.0f}s")
+                _log_epoch(epoch, cfg, metrics, train_loss=train_losses[-1], lr_now=lr_now, elapsed=_elapsed,
+                        is_best=is_best, mem=_get_mem(), gnorm_sum=_ep_gnorm_sum, gnorm_n=_ep_gnorm_n,
+                        n_clipped=_ep_n_clipped, idw_ref=idw_ref, idw_refs=_idw_refs, all_names=_all_names,
+                        is_multi=_is_multi, has_flow=_has_flow, csv_path=_csv_path, csv_fields=_csv_fields)
 
         # Si besoin, sauvegarde le meilleur modèle trouvé pendant l'entraînement (en fonction de la val)
         if cfg.save_best and best_state is not None:
