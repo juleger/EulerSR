@@ -76,82 +76,106 @@ def _stratified_split(
     return {'test': test_keys, 'val': val_keys, 'train': train_keys}
 
 
-def build_processed(layout: DataLayout, hr_res='h0.025', lr_res='h0.1', force=False):
-    """Construction du dataset traité à partir des fichiers bruts
-    Split déterministe 80/10/10 par AoA et Mach trié
-    Les REFERENCE_CASES sont épinglés dans test
-    """
-    all_files: dict[str, dict] = {}
-    for res in (hr_res, lr_res):
-        all_files[res] = {}
-        for aoa_dir in sorted((layout.raw_dir / res).iterdir()):
-            if not aoa_dir.is_dir():
-                continue
-            for f in sorted(aoa_dir.iterdir()):
-                m = _FNAME_RE.search(f.name)
-                if not m:
-                    continue
-                key = (m.group(1), m.group(2))
-                t = float(m.group(3))
-                all_files[res].setdefault(key, {})[t] = f
-
-    keys = set(all_files[hr_res]) & set(all_files[lr_res])
-    paired: dict[tuple, tuple] = {}
-    for key in sorted(keys):
-        common_ts = set(all_files[hr_res][key]) & set(all_files[lr_res][key])
-        if not common_ts:
+def _index_raw(res_dir: Path) -> dict[tuple, Path]:
+    by_key: dict[tuple, dict[float, Path]] = {}
+    for aoa_dir in sorted(res_dir.iterdir()):
+        if not aoa_dir.is_dir():
             continue
-        best_t = max(common_ts)
-        paired[key] = (all_files[hr_res][key][best_t], all_files[lr_res][key][best_t])
-
-    from utils.refs import REFERENCE_CASES
-    splits = _stratified_split(paired, REFERENCE_CASES)
-
-    proc_base = layout.proc_dir()
-    for split_name in ('train', 'val', 'test'):
-        (proc_base / split_name).mkdir(parents=True, exist_ok=True)
-
-    fname_to_target = {
-        f"aoa{float(aoa_s):+.2f}_m{float(mach_s):.2f}.npz": split_name
-        for split_name, keys in splits.items()
-        for (aoa_s, mach_s) in keys
-    }
-    for split_name in ('train', 'val', 'test'):
-        for existing in list((proc_base / split_name).glob('aoa*.npz')):
-            target = fname_to_target.get(existing.name)
-            if target is None:
-                existing.unlink()
-            elif target != split_name:
-                dest = proc_base / target / existing.name
-                if dest.exists():
-                    existing.unlink()
-                else:
-                    shutil.move(str(existing), dest)
-
-    for split_name, split_keys in splits.items():
-        split_dir = proc_base / split_name
-        n_written = 0
-        for (aoa_s, mach_s) in split_keys:
-            out = split_dir / f"aoa{float(aoa_s):+.2f}_m{float(mach_s):.2f}.npz"
-            if out.exists() and not force:
+        for f in sorted(aoa_dir.iterdir()):
+            m = _FNAME_RE.search(f.name)
+            if not m:
                 continue
-            hr_src, lr_src = paired[(aoa_s, mach_s)]
-            hr = np.load(hr_src, allow_pickle=True)
-            lr = np.load(lr_src, allow_pickle=True)
-            extra = {}
-            if 'primitives_grad' in lr.files:
-                extra['lr_primitives_grad'] = lr['primitives_grad']
-            np.savez(out,
-                     hr_node_pos=hr['node_pos'],
-                     hr_node_area=hr['node_area'],
-                     hr_primitives=hr['primitives'],
-                     hr_primitives_grad=hr['primitives_grad'],
-                     lr_node_pos=lr['node_pos'],
-                     lr_node_area=lr['node_area'],
-                     lr_primitives=lr['primitives'],
-                     **extra)
-            n_written += 1
-        print(f"{proc_base.name}/{split_name}: {len(split_keys)} samples, {n_written} écrits")
+            key = (m.group(1), m.group(2))
+            by_key.setdefault(key, {})[float(m.group(3))] = f
+    return {k: ts[max(ts)] for k, ts in by_key.items()}
+
+
+def _case_name(aoa_s: str, mach_s: str) -> str:
+    return f"aoa{float(aoa_s):+.2f}_m{float(mach_s):.2f}.npz"
+
+
+def _write_store(store_dir: Path, files: dict[tuple, Path], key2split: dict[tuple, str],
+                 save_fn, force: bool, kind: str) -> None:
+    """Écrit/synchronise un store (HR ou LR) selon le split canonique key2split."""
+    for split_name in ('train', 'val', 'test'):
+        (store_dir / split_name).mkdir(parents=True, exist_ok=True)
+
+    target = {_case_name(*k): key2split[k] for k in files if k in key2split}
+    for split_name in ('train', 'val', 'test'):
+        for existing in list((store_dir / split_name).glob('aoa*.npz')):
+            tgt = target.get(existing.name)
+            if tgt is None:
+                existing.unlink()
+            elif tgt != split_name:
+                dest = store_dir / tgt / existing.name
+                existing.unlink() if dest.exists() else shutil.move(str(existing), dest)
+
+    counts = {'train': 0, 'val': 0, 'test': 0}
+    n_written = 0
+    for k, src in files.items():
+        split_name = key2split.get(k)
+        if split_name is None:
+            continue
+        counts[split_name] += 1
+        out = store_dir / split_name / _case_name(*k)
+        if out.exists() and not force:
+            continue
+        save_fn(out, src)
+        n_written += 1
+    print(f"{store_dir.name} [{kind}]: "
+          f"train={counts['train']} val={counts['val']} test={counts['test']}  "
+          f"({n_written} écrits)")
+
+
+def _save_hr(out: Path, src: Path) -> None:
+    # On ne garde que le gradient de pression hr_grad_p (= primitives_grad[:, 3, :]).
+    hr = np.load(src, allow_pickle=True)
+    np.savez(out,hr_node_pos=hr['node_pos'], hr_primitives=hr['primitives'], hr_grad_p=hr['primitives_grad'][:, 3, :])
+
+
+def _save_lr(out: Path, src: Path) -> None:
+    lr = np.load(src, allow_pickle=True)
+    kw = dict(lr_node_pos=lr['node_pos'], lr_primitives=lr['primitives'])
+    if 'primitives_grad' in lr.files:
+        kw['lr_primitives_grad'] = lr['primitives_grad']
+    np.savez(out, **kw)
+
+
+def build_processed(layout: DataLayout, hr_res='h0.025', lr_res='h0.1', force=False,
+                    test_only=False):
+    """Construction des stores traités, HR et LR séparés
+
+    - Store HR partagé  : processed/{geom}_hr/{split}/        (écrit une fois par géométrie)
+    - Store LR résolu   : processed/{geom}_lr{tag}/{split}/   (un par résolution LR)
+
+    Split déterministe 80/10/10 calculé sur l'ensemble des cas HR.
+    test_only=True : tous les cas dans le split 'test' (géométrie OOD d'évaluation).
+    """
+    hr_files = _index_raw(layout.raw_dir / hr_res)
+    lr_files = _index_raw(layout.raw_dir / lr_res)
+
+    if test_only:
+        key2split = {k: 'test' for k in hr_files}
+    else:
+        from utils.refs import REFERENCE_CASES
+        # Split canonique sur les cas HR, indépendant du LR
+        splits = _stratified_split({k: None for k in hr_files}, REFERENCE_CASES)
+        key2split = {k: s for s, keys in splits.items() for k in keys}
+
+    # Store HR partagé (tous les cas HR disponibles)
+    _write_store(layout.hr_proc_dir, hr_files, key2split, _save_hr, force, kind='HR')
+
+    # Store LR : uniquement les cas qui ont une HR correspondante
+    paired = {k: lr_files[k] for k in hr_files if k in lr_files}
+    _write_store(layout.proc_dir(), paired, key2split, _save_lr, force, kind='LR')
+
+
+def build_hr_only(layout: DataLayout, hr_res='h0.025', force=False):
+    """Store HR seul, tous les cas dans le split 'test' (si aucun LR dispo)"""
+    hr_files = _index_raw(layout.raw_dir / hr_res)
+    key2split = {k: 'test' for k in hr_files}
+    _write_store(layout.hr_proc_dir, hr_files, key2split, _save_hr, force,
+                 kind='HR (test-only)')
 
 
 def load_mesh(path):
@@ -165,8 +189,11 @@ def main():
     parser.add_argument('--hr_res', type=float, default=0.025)
     parser.add_argument('--lr_res', type=float, default=0.1)
     parser.add_argument('--knn_k', type=int, nargs='+', default=[6, 16])
-    parser.add_argument('--force', action='store_true',
-                        help="Régénère les fichiers processed même s'ils existent")
+    parser.add_argument('--force', action='store_true', help="Régénère les fichiers processed même s'ils existent")
+    parser.add_argument('--hr_only', action='store_true',
+                        help="Géométrie sans LR : construit uniquement le store HR (split test).")
+    parser.add_argument('--test_only', action='store_true',
+                        help="Géométrie OOD : HR+LR avec tous les cas dans le split test (pas de train/val).")
     args = parser.parse_args()
 
     # Layout global pour la géométrie et les résolutions
@@ -179,10 +206,29 @@ def main():
     lr_tag = _res_tag(args.lr_res)
 
     print(f"\nPrétraitement  {layout.root}  géométrie={layout.geometry}")
-    print(f"  HR={hr_str}  LR={lr_str}\n")
+
+    if args.hr_only:
+        print(f"  HR={hr_str}  (mode HR-only, pas de LR)\n")
+        print("Construction du store HR (test-only)...")
+        build_hr_only(layout, hr_res=hr_str, force=args.force)
+        # Graphe HR seul (utile pour viz / recompute de gradients)
+        mesh_hr = load_mesh(layout.mesh_path(args.hr_res))
+        layout.graphs_dir.mkdir(parents=True, exist_ok=True)
+        build_graph(mesh_hr, layout.graphs_dir / f'graph_{hr_tag}.npz')
+        stats_path = layout.stats_path
+        if stats_path.exists():
+            print(f"Stats existantes réutilisées ({stats_path})")
+        else:
+            compute_stats(layout, stats_path, split='test')
+        print("\nTerminé (HR-only)")
+        return
+
+    mode = "  (test-only OOD)" if args.test_only else ""
+    print(f"  HR={hr_str}  LR={lr_str}{mode}\n")
 
     print("Construction du dataset traité...")
-    build_processed(layout, hr_res=hr_str, lr_res=lr_str, force=args.force)
+    build_processed(layout, hr_res=hr_str, lr_res=lr_str, force=args.force,
+                    test_only=args.test_only)
 
     mesh_hr = load_mesh(layout.mesh_path(args.hr_res))
     mesh_lr = load_mesh(layout.mesh_path(args.lr_res))
@@ -205,7 +251,7 @@ def main():
     if stats_path.exists():
         print(f"Stats existantes réutilisées ({stats_path}) : indépendantes de LR")
     else:
-        compute_stats(layout, stats_path)
+        compute_stats(layout, stats_path, split='test' if args.test_only else 'train')
 
     print("\nTerminé")
 

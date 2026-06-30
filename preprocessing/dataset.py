@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from utils.refs import _PROC_RE
-from utils.layout import DataLayout
+from utils.layout import DataLayout, load_sample
 
 _MACH_MID = (0.7 + 4.0) / 2
 _MACH_SCALE = (4.0 - 0.7) / 2
@@ -72,7 +72,7 @@ class SRDataset:
         self._pos_center = np.zeros(2, np.float32)
         self._pos_scale = 1.0
         if self.entries:
-            probe = np.load(self.entries[0][0])
+            probe = load_sample(self.entries[0][0])
             if use_lr_grad:
                 self._has_lr_grad = 'lr_primitives_grad' in probe
             pts = np.concatenate([probe['hr_node_pos'], probe['lr_node_pos']], axis=0).astype(np.float64)
@@ -100,11 +100,12 @@ class SRDataset:
     def _load(self, idx: int) -> tuple:
         """Charge et prépare un sample depuis le disque. Appelé une fois si preload=True"""
         path, mach_in, aoa_in = self.entries[idx]
-        d = np.load(path)
+        d = load_sample(path)
 
         hr_pos = d['hr_node_pos'].astype(np.float32)
         hr_prim = d['hr_primitives'].astype(np.float32)
-        hr_grad = d['hr_primitives_grad'].astype(np.float32)
+        hr_grad_p = (d['hr_grad_p'] if 'hr_grad_p' in d
+                     else d['hr_primitives_grad'][:, 3, :]).astype(np.float32)
         lr_pos = d['lr_node_pos'].astype(np.float32)
         lr_prim = d['lr_primitives'].astype(np.float32)
 
@@ -138,10 +139,10 @@ class SRDataset:
 
         target = (hr_prim - self.mu) / self.sig
 
-        gp = np.sqrt((hr_grad[:, 3, :] ** 2).sum(-1))
+        gp = np.sqrt((hr_grad_p ** 2).sum(-1))
         weights = np.minimum(1.0 + self._sw_factor * gp / (gp.mean() + 1e-8), 5.0).astype(np.float32)
 
-        grad_p_target = np.arcsinh(hr_grad[:, 3, :] / self.sig[3]).astype(np.float32)
+        grad_p_target = np.arcsinh(hr_grad_p / self.sig[3]).astype(np.float32)
 
         return hr_feat, lr_feat, target, weights, grad_p_target
 
@@ -208,9 +209,9 @@ class MultiSRDataset:
             yield [ds[i] for i in chunk], int(g)
 
 
-def compute_stats(layout: DataLayout, save_path):
-    """Calcule mu/sigma sur hr_primitives du train set et sauvegarde en .npz."""
-    train_dir = layout.proc_dir() / 'train'
+def compute_stats(layout: DataLayout, save_path, split: str = 'train'):
+    """Calcule mu/sigma sur hr_primitives d'un split et sauvegarde en .npz"""
+    train_dir = layout.hr_proc_dir / split
     n, s, s2 = 0, np.zeros(4, np.float64), np.zeros(4, np.float64)
     for f in sorted(train_dir.glob('aoa*.npz')):
         prim = np.load(f)['hr_primitives'].astype(np.float64)

@@ -12,8 +12,11 @@ Structure attendue sous data_root/ :
   figures/
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+import numpy as np
 
 from utils.refs import _res_tag  # noqa: F401
 
@@ -38,9 +41,13 @@ class DataLayout:
         return self.root / 'raw' / self.geometry
 
     def proc_dir(self, lr_res: float | None = None) -> Path:
-        """processed/{geometry}_lr{tag}/"""
+        """processed/{geometry}_lr{tag}/ — store LR (lr_* uniquement)."""
         r = lr_res if lr_res is not None else self.lr_res
         return self.root / 'processed' / f'{self.geometry}_lr{_res_tag(r)}'
+
+    @property
+    def hr_proc_dir(self) -> Path:
+        return self.root / 'processed' / f'{self.geometry}_hr'
 
     @property
     def meshes_dir(self) -> Path:
@@ -72,7 +79,7 @@ class DataLayout:
 
     @property
     def fvm_times_path(self) -> Path:
-        """Fichier FVM timing global — partagé entre toutes les géométries."""
+        """Fichier FVM timing global partagé entre toutes les géométries."""
         return self.root / 'fvm_times.json'
 
     @property
@@ -93,3 +100,27 @@ class DataLayout:
         res = cfg.get('resolution', {})
         return cls(root=root, geometry=geom,
                    lr_res=res.get('lr', 0.1), hr_res=res.get('hr', 0.025))
+
+
+""" Chargement des samples processed (fusion HR et LR) pour l'éval et le training. """
+_LR_SET_RE = re.compile(r'_lrh[0-9]+$')
+
+
+def hr_store_path(lr_path) -> Path:
+    """Chemin du fichier HR partagé correspondant à un fichier du store LR. """
+    lr_path = Path(lr_path)
+    split = lr_path.parent.name
+    set_dir = lr_path.parent.parent
+    hr_set = _LR_SET_RE.sub('_hr', set_dir.name)
+    return set_dir.parent / hr_set / split / lr_path.name
+
+
+def load_sample(path) -> dict:
+    """Charge un sample processed en fusionnant la HR partagée et le LR"""
+    d = dict(np.load(path))
+    if 'hr_primitives' not in d:
+        hp = hr_store_path(path)
+        if hp.exists():
+            for k, v in np.load(hp).items():
+                d.setdefault(k, v)
+    return d
