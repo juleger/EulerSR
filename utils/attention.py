@@ -25,6 +25,23 @@ _HAS_FLASH = hasattr(jax.nn, 'dot_product_attention')
 N_FREQS = 8  # nombre de bandes de fréquences par axe spatial
 PE_DIM = 4 * N_FREQS  # 32 (sin+cos x x+y x n_freqs)
 
+SCAL_FREQS = 6  # bandes de fréquences pour l'embedding Fourier des scalaires (Mach, AoA)
+
+
+def scalar_fourier_embedding(s: jax.Array, n_freqs: int = SCAL_FREQS) -> jax.Array:
+    """Embedding Fourier des scalaires de conditionnement physiques (ex: Mach, AoA normalisés).
+
+    Évite que les 2-3 scalaires soient noyés face à l'embedding sinusoïdal du temps/PE"""
+    freqs = jnp.exp(jnp.linspace(0.0, math.log(50.0), n_freqs, dtype=jnp.float32))
+    args = s[..., None] * freqs  # (n_scalars, n_freqs)
+    enc = jnp.concatenate([jnp.sin(args), jnp.cos(args)], axis=-1)  # (n_scalars, 2*n_freqs)
+    return jnp.concatenate([s[..., None], enc], axis=-1).reshape(-1)
+
+
+def scalar_embed_dim(n_scalars: int, n_freqs: int = SCAL_FREQS) -> int:
+    """Dimension de sortie de scalar_fourier_embedding pour n_scalars scalaires."""
+    return n_scalars * (1 + 2 * n_freqs)
+
 
 def fourier_pos_enc(rel_pos: jax.Array) -> jax.Array:
     # Encodage positionnel Fourier : (..., 2) -> (..., PE_DIM), fréquences log-espacées.

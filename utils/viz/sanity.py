@@ -13,6 +13,7 @@ from utils.viz._style import _DPI, CMAP_FIELD, CMAP_ERR, CMAP_GRAD
 from utils.refs import to_mach, REFERENCE_CASES, find_ref_file, _PROC_RE
 from utils.metrics import sliced_wasserstein
 from utils.layout import DataLayout
+from utils.layout import load_sample
 
 _SPLIT_COLORS = {'train': 'steelblue', 'val': 'tomato', 'test': 'seagreen'}
 
@@ -25,9 +26,10 @@ def _snap_mach(m: float, tol: float = 0.05) -> float:
 
 
 def _load_pair(path):
-    d = np.load(path)
-    hr = {'pos': d['hr_node_pos'], 'prim': d['hr_primitives'],
-           'grad': d['hr_primitives_grad'] if 'hr_primitives_grad' in d else None}
+    d = load_sample(path)
+    hr_gp = (d['hr_grad_p'] if 'hr_grad_p' in d
+             else d['hr_primitives_grad'][:, 3, :] if 'hr_primitives_grad' in d else None)
+    hr = {'pos': d['hr_node_pos'], 'prim': d['hr_primitives'], 'grad_p': hr_gp}
     lr = {'pos': d['lr_node_pos'], 'prim': d['lr_primitives'],
            'grad': d['lr_primitives_grad'] if 'lr_primitives_grad' in d else None}
     m = _PROC_RE.match(Path(path).stem)
@@ -277,8 +279,8 @@ def plot_reference_errors(ref_paths, mesh_hr, mesh_lr, out_dir):
         mach_idw = _idw(lr['pos'], hr['pos'], to_mach(lr['prim']))
         err_rel = np.abs(mach_idw - mach_hr) / (np.abs(mach_hr) + 1e-6)
         sw2 = sliced_wasserstein(mach_idw, mach_hr) / (np.mean(np.abs(mach_hr)) + 1e-8)
-        if hr['grad'] is not None:
-            w = np.linalg.norm(hr['grad'].astype(np.float32)[:, 3, :], axis=-1)
+        if hr['grad_p'] is not None:
+            w = np.linalg.norm(hr['grad_p'].astype(np.float32), axis=-1)
             # Annule le poids des cellules de frontière (artefact LSQ aux BC)
             pos = hr['pos']; px, py = pos[:, 0], pos[:, 1]; m = 0.1
             bnd = ((px < px.min()+m)|(px > px.max()-m)|(py < py.min()+m)|(py > py.max()-m))
@@ -337,8 +339,8 @@ def plot_pressure_gradient(ref_paths, mesh_hr, out_dir):
     cases = []
     for path in ref_paths:
         hr, lr, aoa, mach_in = _load_pair(path)
-        if hr['grad'] is not None:
-            gp = np.linalg.norm(hr['grad'].astype(np.float32)[:, 3, :], axis=-1)
+        if hr['grad_p'] is not None:
+            gp = np.linalg.norm(hr['grad_p'].astype(np.float32), axis=-1)
         else:
             gp_lr = (np.linalg.norm(lr['grad'].astype(np.float32)[:, 3, :], axis=-1)
                      if lr['grad'] is not None else np.zeros(len(lr['pos'])))
@@ -464,7 +466,7 @@ def plot_aero_distributions(layout: DataLayout, mesh_hr, mesh_lr, out_dir):
     CL_hr, CD_hr = [], []
     CL_lr, CD_lr = [], []
     for split, aoa, mach_in, path in _scan_dataset(layout):
-        d = np.load(path)
+        d = load_sample(path)
         if 'hr_primitives' in d:
             ac = aero_coeffs(d['hr_primitives'].astype(np.float32), wc_hr, mach_in)
             CL_hr.append(ac['CL']); CD_hr.append(ac['CD'])
@@ -512,7 +514,7 @@ def plot_dataset_balance(layout: DataLayout, mesh_lr, out_dir, max_per_split=0):
                for s in ('train', 'val', 'test')}
 
     for split, aoa, mach_in, path in _scan_dataset(layout, max_per_split=max_per_split):
-        d = np.load(path)
+        d = load_sample(path)
         lr_prim = d['lr_primitives'].astype(np.float32)
         records[split]['mach_max'].append(float(to_mach(lr_prim).max()))
         if 'lr_primitives_grad' in d:

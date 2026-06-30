@@ -14,6 +14,7 @@ if str(REPO_ROOT / 'euler') not in sys.path:
 
 from utils.refs import _PROC_RE
 from utils.layout import DataLayout
+from utils.layout import load_sample
 
 
 
@@ -48,7 +49,7 @@ def build_gt_cache(all_cases: list[dict], wc,
     for i, c in enumerate(all_cases):
         if (i + 1) % 100 == 0:
             print(f"    {i+1}/{n}...")
-        d = np.load(c['path'])
+        d = load_sample(c['path'])
         if 'hr_primitives' not in d:
             wall_mach_lens.append(0)
             hr_prim_list.append(None)

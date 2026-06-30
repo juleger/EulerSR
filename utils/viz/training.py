@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
 import matplotlib.tri as mtri
 from utils.viz._style import VAR_NAMES, _DPI
 from utils.refs import to_mach, _PROC_RE
+from utils.layout import load_sample
 if TYPE_CHECKING:
     from models.base import SRModel
 
@@ -98,70 +98,6 @@ def _tri(mesh):
                               np.asarray(mesh.tris))
 
 
-def plot_huber_regime(model: 'SRModel', knn: dict, cases: list, stats,
-                      mesh_hr, delta: float, out_path: str | Path,
-                      epoch: int | None = None):
-    """Carte spatiale du régime Huber (L2/L1) sur les cas de référence.
-
-    Chaque cellule = une variable sur un cas : tripcolor de |pred-tg| / delta,
-    vert=L2, jaune=seuil, rouge=L1. Titre = variable + % L1.
-    """
-    if not cases:
-        return
-    mu = stats['mu'].astype(np.float32)
-    sig = stats['sig'].astype(np.float32)
-
-    triang = _tri(mesh_hr)
-    n_cases = len(cases)
-    n_vars = 4
-    cmap = mcolors.LinearSegmentedColormap.from_list(
-        'huber', ['#2ecc71', '#f1c40f', '#e74c3c'], N=256)
-    norm = mcolors.Normalize(vmin=0, vmax=2.0)  # delta → jaune, 2×delta → rouge saturé
-
-    fig, axes = plt.subplots(n_cases, n_vars,
-                              figsize=(3.5 * n_vars, 3.0 * n_cases),
-                              dpi=_DPI, constrained_layout=True)
-    axes = np.atleast_2d(axes)
-
-    for r, (path, label) in enumerate(cases):
-        path = Path(path)
-        m = _PROC_RE.match(path.stem)
-        aoa_in, mach_in = float(m.group(1)), float(m.group(2))
-        d = np.load(path)
-
-        hr_feat, lr_feat, hr_prim, _ = _snapshot_feats(d, mach_in, aoa_in, stats)
-        pred_norm = np.array(model.predict(hr_feat, lr_feat, knn))
-        tg_norm = (hr_prim - mu) / sig
-        tg_std = np.sqrt((tg_norm ** 2).mean(0) + 1e-8)  # (4,) std par variable
-        resid = np.abs(pred_norm - tg_norm) / tg_std  # résidu relatif (N_cells, 4)
-
-        for c, vname in enumerate(VAR_NAMES):
-            r_v = resid[:, c]
-            l1_pct = float((r_v >= delta).mean()) * 100
-            axes[r, c].tripcolor(triang, facecolors=r_v / delta,
-                                 cmap=cmap, norm=norm)
-            axes[r, c].set_aspect('equal')
-            axes[r, c].set_axis_off()
-            axes[r, c].set_title(f'{vname}  L1: {l1_pct:.1f}%', fontsize=8, pad=2)
-
-        axes[r, 0].set_ylabel(label, fontsize=8)
-
-    cb = fig.colorbar(
-        plt.cm.ScalarMappable(norm=norm, cmap=cmap),
-        ax=axes, location='right', shrink=0.6, pad=0.02, aspect=30)
-    cb.set_label(f'|résidu norm.| / δ   (δ={delta})', fontsize=8)
-    cb.ax.axhline(1.0, color='k', lw=1.0, ls='--')
-    cb.ax.tick_params(labelsize=7)
-
-    ep_str = f'  —  epoch {epoch}' if epoch is not None else ''
-    fig.suptitle(f'Régime Huber{ep_str}', fontsize=11, fontweight='bold')
-
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight')
-    plt.close(fig)
-
-
 def plot_val_panels(model: SRModel, knn: dict, cases: list, stats,
                     mesh_hr, mesh_lr, out_path: str | Path,
                     title: str | None = None, dpi: int = _DPI):
@@ -189,7 +125,7 @@ def plot_val_panels(model: SRModel, knn: dict, cases: list, stats,
         path = Path(path)
         m = _PROC_RE.match(path.stem)
         aoa_in, mach_in = float(m.group(1)), float(m.group(2))
-        d = np.load(path)
+        d = load_sample(path)
 
         hr_feat, lr_feat, hr_prim, lr_prim = _snapshot_feats(d, mach_in, aoa_in, stats)
 

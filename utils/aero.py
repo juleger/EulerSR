@@ -139,8 +139,8 @@ def compute_aero_scalars(d: dict, path: str, wc_lr: WallCache | None = None) -> 
     ], dtype=np.float32)
 
 
-def wall_features(mesh, query_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Distance à la paroi et normales sortantes pour chaque point de requête (pour l'IDW ou le calcul de CL/CD)."""
+def _wall_segments(mesh) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Segments de paroi (obstacle) du maillage : endpoints a, b et normales sortantes"""
     pts = np.asarray(mesh.points, dtype=np.float64)
     faces = np.asarray(mesh.faces)
     fm = np.asarray(mesh.face_markers)
@@ -159,6 +159,29 @@ def wall_features(mesh, query_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     tang = b - a
     tang = tang / (np.linalg.norm(tang, axis=1, keepdims=True) + 1e-12)
     face_normals = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+    return a, b, face_normals
+
+
+def obstacle_length(mesh) -> float:
+    """Longueur caractéristique du corps (corde), partagée entre géométries"""
+    md = getattr(mesh, 'metadata', None)
+    if isinstance(md, dict):
+        for k in ('obstacle_length', 'chord'):
+            v = md.get(k)
+            if v is not None and float(v) > 0:
+                return float(v)
+    for k in ('chord', 'obstacle_length'):
+        v = getattr(mesh, k, None)
+        if v is not None and float(v) > 0:
+            return float(v)
+    a, b, _ = _wall_segments(mesh)
+    wp = np.concatenate([a, b], axis=0)
+    return float(np.linalg.norm(wp.max(0) - wp.min(0)))
+
+
+def wall_features(mesh, query_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Distance à la paroi et normales sortantes pour chaque point de requête (pour l'IDW ou le calcul de CL/CD)."""
+    a, b, face_normals = _wall_segments(mesh)
 
     n_samp = 8
     t = np.linspace(0.0, 1.0, n_samp)[None, :, None]
@@ -175,3 +198,13 @@ def wall_features(mesh, query_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     normals = normals * np.where(sign == 0, 1.0, sign)
 
     return dists, normals
+
+
+def wall_feature_array(mesh, query_pts: np.ndarray, lr_res: float) -> np.ndarray:
+    """Stack des features de paroi par noeud : [wd_norm, wd_exp, nx, ny]"""
+    wd, normals = wall_features(mesh, query_pts)
+    return np.column_stack([
+        wd / obstacle_length(mesh),
+        np.exp(-wd / (2.0 * lr_res)),
+        normals,
+    ]).astype(np.float32)
