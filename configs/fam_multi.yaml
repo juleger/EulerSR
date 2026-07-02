@@ -6,58 +6,59 @@ resolution:
   lr: 0.1
 
 architecture:
-  levels: [0.05, 0.1]
+  levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
   embed_dim: 96
-  cond_dim: 96
-  t_dim: 64
+  cond_dim: 96           # dimension du vecteur de conditionnement
+  t_dim: 64               # dimension de l'embedding du temps de flow
   n_heads: 3
-  n_hr_blocks: 3
-  n_global_blocks: 4
+  n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
+  n_global_blocks: 3      # blocs d'attention globale au niveau grossier
   mlp_ratio: 4
-  k_pool: 9
-  k_up: 6
-  k_self: 12
-  k_cond: 6
-  use_lr_grad: true
+  k_pool: 9               # voisins kNN pour le pooling
+  k_up: 6                 # voisins kNN pour l'upsampling
+  k_self: 9               # voisins kNN pour la self-attention
+  k_cond: 6               # voisins kNN pour le conditionnement
+  use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
-  use_geom_cond: false
-  n_geoms: 2
+  use_geom_cond: false    # embedding de geometrie
+  n_geoms: 2              # nombre de geometries distinctes
 
 flow:
-  n_steps: 16
-  use_residual: true
-  n_samples: 4
-  n_val_gen: 32
+  n_steps: 16             # pas d'integration ODE a l'inference
+  use_residual: true      # predit le residu sur la baseline IDW
+  n_samples: 4            # echantillons moyennes par prediction
+  n_val_gen: 16           # nombre de cas evalues en validation
   sample_seed: 42
-  t_dist: logit_normal
-  sigma_t: 1.2
-  cfg_prob: 0.1 # prob. dropout scal (Mach/AoA) à l'entraînement ; 0.0 = désactivé
-  cfg_scale: 1.0    # guidance scale à l'inférence ; 1.0 = désactivé
+  t_dist: logit_normal    # distribution du temps d'entrainement. options: logit_normal, uniform, beta
+  sigma_t: 1.2            # ecart-type du temps si t_dist = logit_normal
+  cfg_prob: 0.0           # proba de dropout du conditionnement a l'entrainement (0 = desactive)
+  cfg_scale: 1.0          # echelle de guidance a l'inference (1 = desactive)
 
-# Entraînement multi-branche : une branche = (géométrie, résolution_LR).
+# Entrainement multi-branche : une branche = (geometrie, resolution LR).
+# weight = proportion d'echantillonnage de la branche (somme normalisee).
 datasets:
   - name: diamond
-    lr_res:         [0.1, 0.2]
-    weight:         [1.0, 0.5]
-    train_fraction: [1.0, 0.5]
+    lr_res:         [0.05, 0.1, 0.2]   # resolutions LR d'entree
+    weight:         [2,    2,   2]     # proportion d'echantillonnage par resolution
+    train_fraction: [1.0,  1.0, 1.0]   # fraction des donnees utilisee par branche
 
   - name: naca0012
     lr_res:         [0.1, 0.2]
-    weight:         [1.0, 0.5]
-    train_fraction: [1.0, 0.5]
+    weight:         [3,   3]
+    train_fraction: [1.0, 1.0]
 
 training:
   epochs: 250
   lr: 5.0e-4
   weight_decay: 5.0e-4
-  val_every: 10
+  val_every: 20
   seed: 42
-  loss: shock_weighted_rel_mse
-  shock_weight_factor: 1.0
-  lambda_enthalpy: 0.0
-  schedule: cosine
+  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, sliced_wasserstein
+  shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
+  lambda_enthalpy: 0.02          # poids de la perte de conservation d'enthalpie (0 = desactive)
+  schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
-  grad_clip: 4.0
+  grad_clip: 4.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
   batch_size: 16
   ema_decay: 0.9995
