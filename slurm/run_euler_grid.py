@@ -59,18 +59,20 @@ def build_case_cfg(base_cfg, case, mach, aoa):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", choices=("bump", "diamond", "naca0012", "rae2822"), required=True)
+    parser.add_argument("--case", choices=("bump", "diamond", "naca0012", "rae2822", "oneraD"), required=True)
     parser.add_argument("--mesh-path", required=True)
     parser.add_argument("--mach", default="0.7:1.5:0.1")
     parser.add_argument("--aoa", default="0:0:1")
     parser.add_argument("--tf", type=float, default=None)
     parser.add_argument("--stationarity-threshold", type=float, default=None)
+    parser.add_argument("--verbose", action="store_true", help="Logs détaillés par cas (par défaut : mode concis pour les logs slurm)")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(normalize_optional_value(sys.argv[1:], "--aoa"))
 
     base_cfg = copy.deepcopy(euler_main.CFG)
     base_cfg["case"] = args.case
     base_cfg["mesh_path"] = args.mesh_path
+    base_cfg["verbose"] = bool(args.verbose)
     if args.tf is not None:
         base_cfg["tf"] = float(args.tf)
     if args.stationarity_threshold is not None:
@@ -91,7 +93,8 @@ def main():
 
     for idx, (mach, aoa) in enumerate(grid, start=1):
         cfg = build_case_cfg(base_cfg, args.case, mach, aoa)
-        print("\n" + "=" * 78)
+        if cfg.get("verbose", True):
+            print("\n" + "=" * 78)
         print(f"Case {idx}/{len(grid)}: case={cfg['case']} Mach={cfg['Mach']} AoA={cfg.get('aoa', 0.0)}")
 
         out_dirs = setup_dirs(cfg, mesh)

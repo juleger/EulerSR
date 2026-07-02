@@ -12,12 +12,13 @@ _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))              # jax_fvm
 sys.path.insert(0, str(_HERE / "meshing"))  # modules de maillage
 
-import bump, diamond, naca0012, rae2822
+import bump, diamond, naca0012, rae2822, oneraD
 
 # paramètres géométriques
 GEOMS = {
     "naca0012": (naca0012, dict(Lx=4.0, Ly=4.0, chord=1.0, cx=1.5, cy=2.0, m=0.0, p=0.0, t=0.12)),
     "rae2822":  (rae2822, dict(Lx=4.0, Ly=4.0, chord=1.0, cx=1.5, cy=2.0)),
+    "oneraD":   (oneraD, dict(Lx=4.0, Ly=4.0, chord=1.0, cx=1.5, cy=2.0)),
     "bump":     (bump, dict(Lx=3.0, Ly=1.0, thickness=0.04, chord=1.0, center=1.5)),
     "diamond":  (diamond, dict(Lx=4.0, Ly=4.0, chord=1.0, cx=1.5, cy=2.0, height=tan(radians(5)))),
 }

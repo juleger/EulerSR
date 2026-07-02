@@ -1,4 +1,4 @@
-"""Utilitaires communs aux modules de maillage (diamond, naca0012, rae2822)."""
+"""Utilitaires communs aux modules de maillage (diamond, naca0012, rae2822, oneraD)."""
 from dataclasses import dataclass
 import numpy as np
 import meshpy.triangle as triangle
@@ -75,13 +75,19 @@ def _sample_half_contour(half_pts: np.ndarray, h_body: float, h_min: float) -> n
     diffs = np.diff(half_pts, axis=0)
     arclen = np.concatenate([[0.0], np.cumsum(np.linalg.norm(diffs, axis=1))])
     total = arclen[-1]
-    kappa = _menger_curvature(half_pts)
+
+    # Courbure évaluée sur un ré-échantillonnage à pas d'arc uniforme
+    n_uni = max(int(total / (0.5 * h_min)) + 1, 8)
+    s_uni = np.linspace(0.0, total, n_uni)
+    xy_uni = np.column_stack([np.interp(s_uni, arclen, half_pts[:, 0]),
+                              np.interp(s_uni, arclen, half_pts[:, 1])])
+    kappa = _menger_curvature(xy_uni)
 
     pts, s = [], 0.0
     while s < total:
         pts.append([float(np.interp(s, arclen, half_pts[:, 0])),
                     float(np.interp(s, arclen, half_pts[:, 1]))])
-        k = max(float(np.interp(s, arclen, kappa)), 1e-10)
+        k = max(float(np.interp(s, s_uni, kappa)), 1e-10)
         s += float(np.clip(h_body / k * 2, h_min, h_body))
     return np.array(pts)
 
@@ -95,6 +101,11 @@ def sample_airfoil_boundary(dense: np.ndarray, n_half: int, chord: float, x0: fl
     upper_pts = _sample_half_contour(upper, h_body, h_min)
     lower_pts = _sample_half_contour(lower, h_body, h_min)
     te_pt = np.array([[x0 + chord, y0]])
+    # Unique point de jonction TE si le dernier point de chaque demi-surface est proche du TE
+    if len(upper_pts) > 1 and np.linalg.norm(upper_pts[-1] - te_pt[0]) < 0.5 * h_body:
+        upper_pts = upper_pts[:-1]
+    if len(lower_pts) > 1 and np.linalg.norm(lower_pts[-1] - te_pt[0]) < 0.5 * h_body:
+        lower_pts = lower_pts[:-1]
     pts = np.concatenate([upper_pts, te_pt, lower_pts[::-1][:-1]])
     return pts, [WALL] * len(pts)
 

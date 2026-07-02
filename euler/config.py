@@ -22,7 +22,7 @@ def load_default_config(config_path: str | Path | None = None):
 
 def build_config_from_cli(default_cfg):
     parser = ArgumentParser(description="Simulation supersonique avec Euler 2D")
-    parser.add_argument("--case", choices=("bump", "diamond", "naca0012", "rae2822"), default=default_cfg["case"], help="Cas test : bump, diamond, naca ou rae2822")
+    parser.add_argument("--case", choices=("bump", "diamond", "naca0012", "rae2822", "oneraD"), default=default_cfg["case"], help="Cas test : bump, diamond, naca0012, rae2822 ou oneraD")
     parser.add_argument("--mach", type=float, default=default_cfg["Mach"], help="Nombre de Mach du flux entrant")
     parser.add_argument("--mesh-path", type=str, default=default_cfg["mesh_path"], help="Chemin vers le fichier de maillage (.npy)")
     parser.add_argument("--time-scheme", choices=("EE", "RK2", "RK4", "SRK2", "SSP_RK2"), default=default_cfg["time_scheme"], help="Schéma temporel")
@@ -31,6 +31,8 @@ def build_config_from_cli(default_cfg):
     parser.add_argument("--aoa", type=float, default=default_cfg.get("aoa", 0.0), help="Angle d'attaque en degrés (utilisé pour le cas diamond)")
     parser.add_argument("--stationarity-threshold", type=float, default=default_cfg.get("stationarity_threshold", 1e-6), help="Seuil d'arrêt sur le résidu relatif")
     parser.add_argument("--stationarity-check-every", type=int, default=default_cfg.get("stationarity_check_every", 25), help="Nombre de pas entre deux tests de stationnarité")
+    parser.add_argument("--verbose", dest="verbose", action="store_true", default=default_cfg.get("verbose", True), help="Affiche les logs détaillés de la simulation")
+    parser.add_argument("--quiet", dest="verbose", action="store_false", help="Mode concis : uniquement les infos principales au début et le temps de simulation à la fin")
     args = parser.parse_args()
 
     cfg = deepcopy(default_cfg)
@@ -43,6 +45,7 @@ def build_config_from_cli(default_cfg):
     cfg["aoa"] = float(args.aoa)
     cfg["stationarity_threshold"] = float(args.stationarity_threshold)
     cfg["stationarity_check_every"] = max(1, int(args.stationarity_check_every))
+    cfg["verbose"] = bool(args.verbose)
     return cfg
 
 
@@ -74,7 +77,7 @@ def format_h(mesh):
 
 def format_condition_tag(cfg):
     mach = f"M{float(cfg.get('Mach')):.2f}"
-    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "rae2822"):
+    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "rae2822", "onerad"):
         aoa = float(cfg.get("aoa", 0.0))
         return f"AOA{aoa:.2f}_{mach}"
     return mach
@@ -96,7 +99,7 @@ def format_sample_id(cfg):
 def format_subtitle(cfg, mesh, t):
     reconstruction = str(cfg["reconstruction"]).upper()
     time_scheme = str(cfg["time_scheme"]).upper()
-    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "rae2822"):
+    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "rae2822", "onerad"):
         return (
             f"t={t:.2f}s, M={cfg['Mach']}, AoA={float(cfg.get('aoa', 0.0)):.1f}°, "
             f"h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
@@ -110,7 +113,7 @@ def format_subtitle(cfg, mesh, t):
 def setup_dirs(cfg, mesh):
     h_dir = format_h(mesh)
     case = str(cfg.get("case", ""))
-    if case in ("diamond", "naca0012", "rae2822"):
+    if case.lower() in ("diamond", "naca0012", "rae2822", "onerad"):
         aoa = float(cfg.get("aoa", 0.0))
         aoa_tag = f"AOA{aoa:.2f}"
         dirs = {
@@ -124,11 +127,22 @@ def setup_dirs(cfg, mesh):
         }
     for directory in dirs.values():
         directory.mkdir(parents=True, exist_ok=True)
-    print(f"Output : {dirs['res']}")
+    if cfg.get("verbose", True):
+        print(f"Output : {dirs['res']}")
     return dirs
 
 
 def print_config(cfg, mesh, out_dirs):
+    reconstruction = str(cfg["reconstruction"]).upper()
+    time_scheme = str(cfg["time_scheme"]).upper()
+    if not cfg.get("verbose", True):
+        # Mode concis : une seule ligne avec les infos principales
+        tag = format_condition_tag(cfg)
+        print(
+            f"[{cfg['case']}] {tag} | h={mesh.metadata.get('h', 'n/a')} "
+            f"| {cfg['flux']}/{reconstruction}/{time_scheme} -> {out_dirs['res']}"
+        )
+        return
     print("\n" + "-" * 78)
     print("CONFIGURATION SIMULATION")
     print("-" * 78)
@@ -136,14 +150,12 @@ def print_config(cfg, mesh, out_dirs):
     print(f"Mesh path : {cfg['mesh_path']} (h={mesh.metadata.get('h', 'n/a')})")
     print("-" * 78)
     print("Physique")
-    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "rae2822"):
+    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "rae2822", "onerad"):
         print(f"  Mach : {cfg['Mach']}, AoA : {float(cfg.get('aoa', 0.0)):.1f}°, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     else:
         print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     print("-" * 78)
     print("Solveur")
-    reconstruction = str(cfg["reconstruction"]).upper()
-    time_scheme = str(cfg["time_scheme"]).upper()
     print(f"  scheme FVM : {cfg['flux']}, {reconstruction}, {time_scheme}")
     print(f"  CFL : {cfg['CFL']}, tf={cfg['tf']}")
     print(f"  stationarity_threshold={cfg.get('stationarity_threshold', 'n/a')} | check_every={cfg.get('stationarity_check_every', 'n/a')}")

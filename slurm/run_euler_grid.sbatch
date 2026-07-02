@@ -18,7 +18,7 @@
 #   sbatch slurm/run_euler_grid.sbatch
 #
 # Paramètres (modifier directement ou via env vars) :
-#   CASE       : géométrie  — diamond | naca0012 | rae2822
+#   CASE       : géométrie  — diamond | naca0012 | rae2822 | oneraD
 #   MESH_PATH  : chemin du maillage HR
 #   MACH       : plage Mach au format start:stop:step  (ex: 0.70:4.00:0.01)
 #   AOA_MIN    : AoA minimum correspondant au SLURM array task 0 (défaut: -5)
@@ -61,12 +61,19 @@ export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
 echo "[$(date +%T)] Lancement : case=${CASE}  AoA=${AOA}  Mach=${MACH}"
 
+# Mode concis par défaut (logs slurm allégés) ; VERBOSE=1 pour les logs détaillés.
+VERBOSE_FLAG=""
+if [ "${VERBOSE:-0}" = "1" ]; then
+    VERBOSE_FLAG="--verbose"
+fi
+
 python -u slurm/run_euler_grid.py \
     --case                   "${CASE}" \
     --mesh-path              "${MESH_PATH}" \
     --mach                   "${MACH}" \
     --aoa                    "${AOA}" \
     --tf                     "${TF}" \
-    --stationarity-threshold "${STATIONARITY_THRESHOLD}"
+    --stationarity-threshold "${STATIONARITY_THRESHOLD}" \
+    ${VERBOSE_FLAG}
 
 echo "[$(date +%T)] Done — AoA=${AOA}"

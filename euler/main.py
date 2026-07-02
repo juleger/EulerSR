@@ -29,7 +29,7 @@ def initialize(mesh, cfg):
     rho_inf, p_inf = cfg["rho_inf"], cfg["p_inf"]
     gamma, Mach = cfg["gamma"], cfg["Mach"]
     c_inf = (gamma * p_inf / rho_inf) ** 0.5
-    aoa_deg = float(cfg.get("aoa", 0.0)) if cfg.get("case") in ("diamond", "naca0012", "rae2822") else 0.0
+    aoa_deg = float(cfg.get("aoa", 0.0)) if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "rae2822", "onerad") else 0.0
     aoa_rad = jnp.deg2rad(jnp.asarray(aoa_deg))
     u_inf = Mach * c_inf * jnp.cos(aoa_rad)
     v_inf = Mach * c_inf * jnp.sin(aoa_rad)
@@ -41,6 +41,7 @@ def initialize(mesh, cfg):
 
 def run(W, mesh, inlet, cfg, out_dirs):
     # Résolution numérique d'euler compressible
+    verbose = bool(cfg.get("verbose", True))
     W_initial = W
 
     # Schéma en temps
@@ -57,7 +58,8 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
     # Calcul dt selon CFL (fixe dans ce cas)
     if 0.6 < cfg["Mach"] < 1.1 and cfg["CFL"] > 0.45:
-        print(f"Attention : régime transsonique avec CFL={cfg['CFL']} potentiellement instable. CFL réduite à 0.45")
+        if verbose:
+            print(f"Attention : régime transsonique avec CFL={cfg['CFL']} potentiellement instable. CFL réduite à 0.45")
         cfg["CFL"] = 0.45
     dt = helper.get_dt(W, mesh, CFL=cfg["CFL"], gamma=cfg["gamma"], M=1.0)
     N = int(cfg["tf"] / dt) + 1
@@ -67,14 +69,17 @@ def run(W, mesh, inlet, cfg, out_dirs):
     if n_snaps == 1:
         snap_steps = [N]
 
-    print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
+    if verbose:
+        print(f"    dt={float(dt):.2e}, Nt={N}, n_snaps={n_snaps}")
 
     # Warm-up pour compilation JIT
-    print("\nCompilation JIT (warm-up)...")
+    if verbose:
+        print("\nCompilation JIT (warm-up)...")
     W_warmup = fn(W, mesh, dt, **kw)
     jax.block_until_ready(W_warmup)
 
-    print("\nRésolution numérique en cours...")
+    if verbose:
+        print("\nRésolution numérique en cours...")
     start_time = time.time()
 
     def scan_body(carry, _):
@@ -123,26 +128,30 @@ def run(W, mesh, inlet, cfg, out_dirs):
     wall_time_s = end_time - start_time
     final_time = current_step * float(dt)
     snapshot_name = format_snapshot_name(cfg, final_time)
-    print("\n" + "-" * 78)
-    print(f"Simulation terminée en {wall_time_s:.2f}s (converged={converged}, t={final_time:.4f}s)")
-    print(f"Résidu final : {final_residual:.6e}")
+    if verbose:
+        print("\n" + "-" * 78)
+        print(f"Simulation terminée en {wall_time_s:.2f}s (converged={converged}, t={final_time:.4f}s)")
+        print(f"Résidu final : {final_residual:.6e}")
+    else:
+        print(f"Simulation terminée en {wall_time_s:.2f}s (converged={converged}, t={final_time:.4f}s, résidu={final_residual:.2e})")
     if exp["results"] or exp["figures"] or exp.get("bundle", True):
         export_snapshot(W, mesh, final_time, cfg, out_dirs, helper, inlet=inlet)
     if exp["graph"]:
         W_snapshots = {round(final_time, 6): np.array(W)}
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
     summary = None
-    if cfg["case"] in ("diamond", "bump", "naca0012", "rae2822") and (exp.get("summary", True)):
+    if str(cfg["case"]).lower() in ("diamond", "bump", "naca0012", "rae2822", "onerad") and (exp.get("summary", True)):
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         delta_S = helper.get_entropy_creation(W_initial, W, mesh, gamma=cfg["gamma"])
-        print(f"C_D = {C_D:.6f}, C_L = {C_L:.6f}, ΔS = {delta_S:.6e}")
+        if verbose:
+            print(f"C_D = {C_D:.6f}, C_L = {C_L:.6f}, ΔS = {delta_S:.6e}")
         summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s,
             stationarity_rel=final_residual, converged=converged, stopping_step=stopping_step)
 
     if exp.get("summary", True) and summary is not None:
-        export_run_summary(out_dirs, summary, snapshot_name)
+        export_run_summary(out_dirs, summary, snapshot_name, verbose=verbose)
     return W
 
 if __name__ == "__main__":

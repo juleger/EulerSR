@@ -39,7 +39,8 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         prims_grad = helper.getgradientLSQ(prims_L, prims_R, mesh)
         mach_field = helper.get_mach_number(prims, gamma=gamma)
         bundle_path = out_dirs["res"] / f"{snapshot_name}.npz"
-        print(f"Bundle export : {bundle_path}")
+        if cfg.get("verbose", True):
+            print(f"Bundle export : {bundle_path}")
 
         mesh_path_val = str(cfg.get('mesh_path', ''))
         n_cells_val = int(np.asarray(mesh.tris).shape[0]) if getattr(mesh, 'tris', None) is not None else -1
@@ -106,7 +107,8 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
             if field_name not in field_lookup:
                 raise ValueError(f"Unknown figure field '{field_name}'. Expected one of: rho, u, v, p, M, S")
             fig_path = out_dirs["fig"] / f"{field_name}_{snapshot_name}.png"
-            print(f"Figure export : {fig_path}")
+            if cfg.get("verbose", True):
+                print(f"Figure export : {fig_path}")
             mesh.plot_solution(
                 field_lookup[field_name],
                 labels=labels[field_name],
@@ -134,7 +136,8 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
         if exp["figures"] and wall_profile["s"].size > 0:
             subtitle = format_subtitle(cfg, mesh, t)
             fig_path = out_dirs["fig"] / f"Mwall_{snapshot_name}.png"
-            print(f"Figure export : {fig_path}")
+            if cfg.get("verbose", True):
+                print(f"Figure export : {fig_path}")
             mesh.plot_profile(wall_profile["s"], wall_profile["mach"], labels=r'$M_{wall}$', filename=fig_path,
                 dpi=400, title="Profil de Mach de paroi", subtitle=subtitle, xlabel=r"Abscisse curviligne $s$")
 
@@ -164,13 +167,14 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=
     }
 
 
-def export_run_summary(out_dirs, summary, snapshot_name):
+def export_run_summary(out_dirs, summary, snapshot_name, verbose=True):
     # Exporte le résumé de la simulation (temps de calcul, C_D, etc...) dans un fichier JSON
     out_dirs["res"].mkdir(parents=True, exist_ok=True)
     path = out_dirs["res"] / f"summary_{snapshot_name}.json"
     with open(path, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"Summary written : {path}")
+    if verbose:
+        print(f"Summary written : {path}")
 
 
 def normalize_figure_fields(figures_value):
