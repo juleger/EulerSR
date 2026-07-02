@@ -415,6 +415,8 @@ class SRModel(nnx.Module):
         decay = cfg.ema_decay
         ema = (jax.tree.map(jnp.copy, nnx.state(self, nnx.Param))
                if decay > 0 else None)
+        # Modèle d'évaluation EMA construit UNE seule fois (évite fuite ram)
+        eval_model = self._with_params(ema) if ema is not None else self
 
         @jax.jit
         def _ema_update(e, p):
@@ -578,7 +580,8 @@ class SRModel(nnx.Module):
             lr_track.append(lr_now)
 
             if epoch % cfg.val_every == 0 or epoch == cfg.epochs:
-                eval_model = self._with_params(ema) if ema is not None else self
+                if ema is not None:
+                    nnx.update(eval_model, ema)
                 metrics = _validate(eval_model, _all_names, _all_val,
                                     _all_step_fns, train_ds, _is_multi,
                                     max_samples=self.val_max_samples)

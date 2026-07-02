@@ -89,9 +89,7 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
     # KNN IDW dédié : toujours reconstruit sur la géométrie/résolution du TestSet
     print("  [IDW]  construction kNN simple...")
     idw_knn = ts.build_idw_knn(k=6)
-
-    _maybe_recalibrate(models, ts, knn_map)
-
+    
     ref_results = None
     sweep_results = None
 

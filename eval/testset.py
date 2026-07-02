@@ -303,6 +303,7 @@ _GEOM_LABELS = {
     'diamond': 'Diamond',
     'naca0012': 'NACA 0012',
     'rae2822': 'RAE 2822',
+    'oneraD': 'ONERA D',
 }
 
 def _geom_label(geometry: str) -> str:

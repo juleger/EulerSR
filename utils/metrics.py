@@ -116,10 +116,28 @@ def enthalpy_rms(prim: np.ndarray, mach_in: float,
     return float(np.sqrt(dH.mean()))
 
 
+_INTERIOR_MASK_CACHE: dict[int, np.ndarray] = {}
+
+
+def interior_cell_mask(mesh) -> np.ndarray:
+    """Masque booléen (N_cells,) : True pour les cellules purement intérieures"""
+    key = id(mesh)
+    cached = _INTERIOR_MASK_CACHE.get(key)
+    if cached is not None:
+        return cached
+    fm = np.asarray(mesh.face_markers)
+    fc = np.asarray(mesh.face_connectivity).astype(np.int64)  # (N_cells, n_faces) -> face ids
+    touches_bnd = (fm[fc] != 0).any(axis=1)
+    mask = ~touches_bnd
+    _INTERIOR_MASK_CACHE[key] = mask
+    return mask
+
+
 def fvm_euler_rms(prim_phys: np.ndarray, mesh, mach_in: float, aoa_deg: float,
                   mu: np.ndarray, gamma: float = 1.4,
-                  reconstruction: str = 'muscl', flux: str = 'hllc') -> float:
-    """Résidu Euler FVM exact (même opérateur que le solveur), normalisé par euler_scales(mu)"""
+                  reconstruction: str = 'muscl', flux: str = 'hllc',
+                  interior_only: bool = True) -> float:
+    """Résidu Euler FVM exact (même opérateur que le solveur), normalisé par euler_scales(mu)."""
     import sys
     from pathlib import Path
     _root = str(Path(__file__).resolve().parents[1])
@@ -140,8 +158,10 @@ def fvm_euler_rms(prim_phys: np.ndarray, mesh, mach_in: float, aoa_deg: float,
     res = np.asarray(_fvm_res(W, mesh, gamma=gamma, M=1.0,
                               reconstruction=reconstruction, flux=flux,
                               value=inlet, entropy=False))
-    sc = euler_scales(mu, gamma)
-    return float(np.sqrt(((res / sc[None, :]) ** 2).mean()))
+    resn = res / euler_scales(mu, gamma)[None, :]
+    if interior_only:
+        resn = resn[interior_cell_mask(mesh)]
+    return float(np.sqrt((resn ** 2).mean()))
 
 
 def entropy_violation(prim: np.ndarray, gamma: float = 1.4) -> float:

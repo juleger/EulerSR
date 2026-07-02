@@ -811,6 +811,20 @@ def plot_summary_table(results_ref: dict, dataset_results: dict | None, out_dir:
     print(f"  > {out_path.name}")
 
 
+def _print_summary_table(clean: list, rows: list):
+    """Affiche la table récapitulative alignée dans le terminal."""
+    widths = [max(len(str(clean[j])), *(len(str(r[j])) for r in rows))
+              for j in range(len(clean))]
+    sep = '─' * (sum(widths) + 3 * len(widths) + 1)
+    fmt = ' │ '.join('{:<' + str(w) + '}' for w in widths)
+    print('\n── Résumé des métriques ' + '─' * max(0, len(sep) - 24))
+    print(fmt.format(*clean))
+    print(sep)
+    for r in rows:
+        print(fmt.format(*[str(c) for c in r]))
+    print()
+
+
 def save_summary_csv(results_ref: dict, dataset_results: dict | None, out_path: Path):
     _, col_labels, rows = _summary_methods_rows(results_ref, dataset_results)
     if not rows:
@@ -821,6 +835,7 @@ def save_summary_csv(results_ref: dict, dataset_results: dict | None, out_path: 
         w = csv.writer(fh)
         w.writerow(clean)
         w.writerows(rows)
+    _print_summary_table(clean, rows)
     print(f"  > {Path(out_path).name}")
 
 
