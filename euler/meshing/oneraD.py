@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # euler/ (jax_fvm)
 sys.path.insert(0, str(Path(__file__).parent))                # meshing/ (mesh_utils)
 
 from mesh_utils import (WALL, MeshSizeParams, _menger_curvature, sample_airfoil_boundary, local_size_kdtree,
-                         make_airfoil_refinement, build_outer_boundary, triangulate_with_hole)
+                         make_airfoil_refinement, build_outer_boundary, triangulate_with_hole,
+                         sample_airfoil_upper, triangulate_symmetric_airfoil)
 from jax_fvm.src.mesh import Mesh
 
 mesh_dir = repo_root / "meshes" / "oneraD"
@@ -66,7 +67,7 @@ def oneraD_contour(n_pts: int = 300, chord: float = 1.0, x0: float = 0.0, y0: fl
 
 
 def build_mesh(Lx=4.0, Ly=4.0, h=0.05, chord=1.0, cx=None, cy=None,
-               export_vtk=False, size_params=DEFAULT_SIZE_PARAMS):
+               export_vtk=False, size_params=DEFAULT_SIZE_PARAMS, symmetric=True):
 
     cx = Lx / 2 if cx is None else cx
     cy = Ly / 2 if cy is None else cy
@@ -86,14 +87,19 @@ def build_mesh(Lx=4.0, Ly=4.0, h=0.05, chord=1.0, cx=None, cy=None,
     kappa = _menger_curvature(dense)
 
     size_func = lambda pt: local_size_kdtree(pt, tree, cx, chord, t_max, h, size_params, kappa)
-    outer_pts, outer_ms = build_outer_boundary(Lx, Ly, size_func, h)
-    airfoil_pts, airfoil_ms = sample_airfoil_boundary(dense, 2000, chord, x_le, cy, h)
     refinement = make_airfoil_refinement(tree, cx, cy, chord, t_max, h, size_params, kappa)
 
-    y_camber_mid = 0.5 * (float(cs_u(0.5)) + float(cs_l(0.5)))
-    hole_pt = (cx, cy + y_camber_mid * chord)
-
-    mesh = triangulate_with_hole(outer_pts, outer_ms, airfoil_pts, airfoil_ms, hole_pt, refinement)
+    if symmetric:
+        # Maillage symétrique par miroir : indispensable à AoA=0 sur ce profil transsonique
+        airfoil_upper = sample_airfoil_upper(dense, 2000, chord, x_le, cy, h)
+        mesh = triangulate_symmetric_airfoil(Lx, Ly, cy, x_le, x_te, airfoil_upper,
+                                             size_func, refinement, h)
+    else:
+        outer_pts, outer_ms = build_outer_boundary(Lx, Ly, size_func, h)
+        airfoil_pts, airfoil_ms = sample_airfoil_boundary(dense, 2000, chord, x_le, cy, h)
+        y_camber_mid = 0.5 * (float(cs_u(0.5)) + float(cs_l(0.5)))
+        hole_pt = (cx, cy + y_camber_mid * chord)
+        mesh = triangulate_with_hole(outer_pts, outer_ms, airfoil_pts, airfoil_ms, hole_pt, refinement)
     mesh.set_metadata(
         case="oneraD", h=h, domain={"Lx": Lx, "Ly": Ly},
         obstacle_length=chord, chord=chord,

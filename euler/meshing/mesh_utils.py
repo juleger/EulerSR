@@ -195,3 +195,100 @@ def triangulate_with_hole(outer_pts, outer_ms, obstacle_pts, obstacle_ms, hole_p
         min_angle=30, generate_faces=True, generate_neighbor_lists=True,
     )
     return populate_mesh_from_triangle(Mesh(), raw_mesh)
+
+
+# Maillage symétrique : maillage supérieur puis miroir sur l'axe y=cy
+
+def sample_airfoil_upper(dense: np.ndarray, n_half: int, chord: float, x0: float, y0: float, h: float):
+    """Surface supérieure LE→BF seule (extrémités sur l'axe y0), pour maillage symétrique."""
+    h_body = h * 2.0 / 3.0
+    h_min = h / 5.0
+    upper_pts = _sample_half_contour(dense[:n_half], h_body, h_min)
+    te_pt = np.array([[x0 + chord, y0]])
+    if len(upper_pts) > 1 and np.linalg.norm(upper_pts[-1] - te_pt[0]) < 0.5 * h_body:
+        upper_pts = upper_pts[:-1]
+    return np.concatenate([upper_pts, te_pt])
+
+
+def _mirror_upper_half(pts_u: np.ndarray, tris_u: np.ndarray, cy: float, tol: float = 1e-9):
+    """Reflète le demi-maillage supérieur sous l'axe y=cy"""
+    on_axis = np.abs(pts_u[:, 1] - cy) < tol
+    n_u = len(pts_u)
+    mir = np.arange(n_u)
+    lower = []
+    nxt = n_u
+    for i in range(n_u):
+        if not on_axis[i]:
+            mir[i] = nxt
+            nxt += 1
+            lower.append((pts_u[i, 0], 2.0 * cy - pts_u[i, 1]))
+    points = np.vstack([pts_u, np.array(lower, dtype=float).reshape(-1, 2)])
+    tris_l = mir[tris_u[:, ::-1]]
+    tris = np.vstack([tris_u, tris_l]).astype(np.int32)
+    return points, tris
+
+
+def _faces_neighbors_from_tris(tris: np.ndarray):
+    """Reconstruit faces (arêtes uniques), voisins (convention arête i=(v_i,v_i+1)) et masque de bord."""
+    from collections import defaultdict
+    edge_map = defaultdict(list)
+    for t, tri in enumerate(tris):
+        for i in range(3):
+            a, b = int(tri[i]), int(tri[(i + 1) % 3])
+            edge_map[(a, b) if a < b else (b, a)].append((t, i))
+    n_tris = len(tris)
+    neighbors = -np.ones((n_tris, 3), dtype=np.int32)
+    faces = np.empty((len(edge_map), 2), dtype=np.int32)
+    boundary = np.zeros(len(edge_map), dtype=bool)
+    for fidx, (key, owners) in enumerate(edge_map.items()):
+        faces[fidx] = key
+        if len(owners) == 2:
+            (t0, i0), (t1, i1) = owners
+            neighbors[t0, i0] = t1
+            neighbors[t1, i1] = t0
+        else:
+            boundary[fidx] = True
+    return faces, neighbors, boundary
+
+
+def _classify_face_markers(points, faces, boundary, Lx, Ly, tol=1e-6):
+    """Marqueurs de bord par géométrie : gauche=INLET, autres bords rect.=OUTLET, sinon WALL."""
+    markers = np.zeros(len(faces), dtype=np.int32)
+    for f in np.where(boundary)[0]:
+        (xa, ya), (xb, yb) = points[faces[f, 0]], points[faces[f, 1]]
+        if xa < tol and xb < tol:
+            markers[f] = INLET
+        elif ((xa > Lx - tol and xb > Lx - tol) or (ya < tol and yb < tol)
+              or (ya > Ly - tol and yb > Ly - tol)):
+            markers[f] = OUTLET
+        else:
+            markers[f] = WALL
+    return markers
+
+
+def triangulate_symmetric_airfoil(Lx, Ly, cy, x_le, x_te, airfoil_upper,size_func, refinement_func, h) -> Mesh:
+    """Maille la moitié supérieure puis reflete"""
+    seg_l = sample_segment((0.0, cy), (x_le, cy), size_func, min_step=h)
+    seg_r = sample_segment((x_te, cy), (Lx, cy), size_func, min_step=h)
+    right = sample_segment((Lx, cy), (Lx, Ly), size_func, min_step=h)
+    top = sample_segment((Lx, Ly), (0.0, Ly), size_func, min_step=h)
+    left = sample_segment((0.0, Ly), (0.0, cy), size_func, min_step=h)
+    loop = np.concatenate([seg_l, airfoil_upper, seg_r[1:], right, top, left])
+
+    mesh = Mesh()
+    facets = mesh.round_trip_connect(0, len(loop) - 1)
+    info = triangle.MeshInfo()
+    info.set_points([tuple(pt) for pt in loop])
+    info.set_facets(facets)
+    raw = triangle.build(
+        info, refinement_func=refinement_func,
+        min_angle=30, generate_faces=True, generate_neighbor_lists=True,
+    )
+
+    points, tris = _mirror_upper_half(np.asarray(raw.points), np.asarray(raw.elements), cy)
+    faces, neighbors, boundary = _faces_neighbors_from_tris(tris)
+    markers = _classify_face_markers(points, faces, boundary, Lx, Ly)
+
+    out = Mesh()
+    out.mesh_generator_from_points(points, tris, neighbors, faces, markers)
+    return out
