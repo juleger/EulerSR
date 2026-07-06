@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=euler-grid
-#SBATCH --partition=gpu-rtx6000,gpu-a40,gpu-l40
+#SBATCH --job-name=onera-d
+#SBATCH --partition=gpu-a40,gpu-l40
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -8,8 +8,8 @@
 #SBATCH --mem=24G
 #SBATCH --time=20:00:00
 #SBATCH --array=0-20
-#SBATCH --output=logs/euler/grid_%A_%a.out
-#SBATCH --error=logs/euler/grid_%A_%a.err
+#SBATCH --output=logs/euler/oneraD_%A_%a.out
+#SBATCH --error=logs/euler/oneraD_%A_%a.err
 
 # Grille de simulations Euler, un SLURM array par AoA, chaque tâche couvre
 # une plage de Mach pour une géométrie donnée.
@@ -26,9 +26,9 @@
 #   STATIONARITY_THRESHOLD : seuil de convergence (défaut: 1e-8)
 
 
-CASE="${CASE:-naca0012}"
-MESH_PATH="${MESH_PATH:-data/meshes/naca0012_h0.1.npy}"
-MACH="${MACH:-0.60:1.30:0.01}"
+CASE="${CASE:-oneraD}"
+MESH_PATH="${MESH_PATH:-data/meshes/oneraD_h0.025.npy}"
+MACH="${MACH:-0.60:2.00:0.01}"
 TF="${TF:-5.0}"
 STATIONARITY_THRESHOLD="${STATIONARITY_THRESHOLD:-1e-8}"
 AOA_MIN="${AOA_MIN:--5.0}"

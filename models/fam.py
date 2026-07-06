@@ -42,7 +42,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from models.base import SRModel, Buffer
 from utils.layout import DataLayout
-from models.dam import AMNet, build_context, load_hierarchical_knn
+from models.dam import AMNet, build_context, load_hierarchical_knn, _LR_REF
 from utils.viz._style import VAR_LABELS
 
 
@@ -97,8 +97,9 @@ class FAM(SRModel):
         # Validation sous-échantillonnée : sampling FAM = intégration ODE (coûteux)
         self.val_max_samples = self.n_val_gen
 
-        # Échelle par canal du résiduel
+        # Échelle par canal du résiduel.
         self.res_scale = Buffer(jnp.ones((4,), jnp.float32))
+        self._nominal_lr = float((cfg.get('resolution') or {}).get('lr', _LR_REF))
         # Stats d'entraînement 
         self.mu_train = Buffer(jnp.zeros((4,), jnp.float32))
         self.sig_train = Buffer(jnp.ones((4,), jnp.float32))
@@ -108,6 +109,18 @@ class FAM(SRModel):
         s = ctx['scal'] if scal is None else scal
         return self.net(ctx['c'], s, knn['fm'], ctx['wall'], ctx['geom_id'],
                         x_t=x_t, t=t)
+
+    def _res_scale(self, knn: dict) -> jax.Array:
+        """Échelle du résiduel pour cette branche de résolution LR (pour l'inférence)."""
+        rs = knn.get('res_scale')
+        return self.res_scale.value if rs is None else rs
+
+    def _project(self, field: jax.Array) -> jax.Array:
+        """Projection dure de positivité (rho, p >= eps) en unités physiques."""
+        prim = field * self.sig_train.value + self.mu_train.value
+        prim = prim.at[:, 0].set(jnp.maximum(prim[:, 0], 1e-3))
+        prim = prim.at[:, 3].set(jnp.maximum(prim[:, 3], 1e-3))
+        return (prim - self.mu_train.value) / self.sig_train.value
 
     def _guided_velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict) -> jax.Array:
         v_cond = self.velocity(x_t, t, ctx, knn)
@@ -132,6 +145,7 @@ class FAM(SRModel):
                key: jax.Array | None = None, n_samples: int | None = None) -> jax.Array:
         """Tire n_samples champs HR normalisés [S, N, 4] (ensemble / UQ)."""
         ctx = build_context(self, hr_feat, lr_feat, knn)
+        rs = self._res_scale(knn)
         n_s = n_samples if n_samples is not None else self.n_samples
         key = key if key is not None else jax.random.PRNGKey(self.sample_seed)
         keys = jax.random.split(key, n_s)
@@ -139,10 +153,8 @@ class FAM(SRModel):
         def one(k):
             x0 = jax.random.normal(k, (hr_feat.shape[0], 4))
             r = self._integrate(x0, ctx, knn)
-            if self.use_residual:
-                return ctx['baseline'] + r * self.res_scale.value
-            else:
-                return r * self.res_scale.value
+            field = ctx['baseline'] + r * rs if self.use_residual else r * rs
+            return self._project(field)
 
         return jax.vmap(one)(keys)
 
@@ -167,7 +179,9 @@ class FAM(SRModel):
             else:
                 acc.append(np.asarray(tg))
         res_std = np.maximum(np.concatenate(acc, axis=0).std(0), 1e-6)
-        self.res_scale.value = jnp.array(res_std, jnp.float32)
+        scale = jnp.array(res_std, jnp.float32)
+        self.res_scale.value = scale
+        knn['res_scale'] = scale  # cohérence buffer / knn pour predict()
         print('  res_scale recalibrée : '
               + '  '.join(f'{v}={res_std[i]:.4f}' for i, v in enumerate(VAR_LABELS)))
 
@@ -183,33 +197,58 @@ class FAM(SRModel):
             return jax.random.beta(key, self._t_alpha, self._t_beta)
         return jax.random.uniform(key)
 
-    def _pre_fit(self, branch_pairs: list, cfg) -> None:
-        """Calibre res_scale (std du résiduel) sur TOUTES les branches"""
+    def _branch_res_std(self, ds_b, knn_b) -> np.ndarray:
+        """Std par canal du résiduel HR - IDW(LR)"""
+        w0 = np.asarray(knn_b['fm']['cond'][0]['w'])
+        i0 = np.asarray(knn_b['fm']['cond'][0]['idx'])
+        n = len(ds_b)
+        sub = np.unique(np.linspace(0, n - 1, min(256, n)).astype(int))
         acc = []
-        for ds_b, knn_b in branch_pairs:
-            w0 = np.asarray(knn_b['fm']['cond'][0]['w'])
-            i0 = np.asarray(knn_b['fm']['cond'][0]['idx'])
-            sub = np.unique(np.linspace(0, len(ds_b) - 1,
-                                        min(256, len(ds_b))).astype(int))
-            for i in sub:
-                _, lr, tg, *_ = ds_b[int(i)]
-                if self.use_residual:
-                    baseline = (w0[:, :, None] * lr[:, :4][i0]).sum(axis=1)
-                    acc.append(tg - baseline)
-                else:
-                    acc.append(tg)
-        res_std = np.maximum(np.concatenate(acc, 0).std(0), 1e-6)
-        self.res_scale.value = jnp.array(res_std, jnp.float32)
+        for i in sub:
+            _, lr, tg, *_ = ds_b[int(i)]
+            lr = np.asarray(lr)
+            tg = np.asarray(tg)
+            if self.use_residual:
+                baseline = (w0[:, :, None] * lr[:, :4][i0]).sum(axis=1)
+                acc.append(tg - baseline)
+            else:
+                acc.append(tg)
+        return np.maximum(np.concatenate(acc, 0).std(0), 1e-6)
+
+    @staticmethod
+    def _branch_lr(knn_b) -> float:
+        """Résolution LR d'une branche, retrouvée depuis res_scalar = log(lr/_LR_REF)."""
+        rsc = knn_b.get('res_scalar')
+        if rsc is None:
+            return _LR_REF
+        return float(_LR_REF * np.exp(float(np.asarray(rsc).reshape(-1)[0])))
+
+    def _pre_fit(self, branch_pairs: list, cfg) -> None:
+        """Calibre res_scale par branche (résolution/géometire)"""
         _label = "std résiduel" if self.use_residual else "std cible"
-        print(f"  res_scale ({_label}) : "
-              + "  ".join(f"{v}={res_std[i]:.4f}" for i, v in enumerate(VAR_LABELS)))
+        multi = len(branch_pairs) > 1
+        best_i, best_gap = 0, float('inf')
+        for bi, (ds_b, knn_b) in enumerate(branch_pairs):
+            res_std = self._branch_res_std(ds_b, knn_b)
+            knn_b['res_scale'] = jnp.array(res_std, jnp.float32)
+            lr_b = self._branch_lr(knn_b)
+            gap = abs(lr_b - self._nominal_lr)
+            if gap < best_gap:
+                best_gap, best_i = gap, bi
+            tag = f" [lr={lr_b:g}]" if multi else ""
+            print(f"  res_scale{tag} ({_label}) : "
+                  + "  ".join(f"{v}={res_std[i]:.4f}" for i, v in enumerate(VAR_LABELS)))
+        self.res_scale.value = jnp.array(branch_pairs[best_i][1]['res_scale'])
+        if multi:
+            print(f"  buffer res_scale : branche lr={self._branch_lr(branch_pairs[best_i][1]):g}"
+                  f"  (résolution nominale {self._nominal_lr:g})")
 
     def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array, wt: jax.Array,
                 gp: jax.Array, knn_g: dict, key: jax.Array, aux: dict) -> jax.Array:
         """Loss flow matching : v(x_t, t | cond) doit transporter x0 -> résidu r."""
         ctx = build_context(self, hr, lr, knn_g)
-        r = ((tg - ctx['baseline']) / self.res_scale.value if self.use_residual
-             else tg / self.res_scale.value)
+        rs = self._res_scale(knn_g)
+        r = ((tg - ctx['baseline']) / rs if self.use_residual else tg / rs)
         kt, kx, kcfg = jax.random.split(key, 3)
         t = self._sample_t(kt)
         x0 = jax.random.normal(kx, r.shape)
@@ -225,7 +264,7 @@ class FAM(SRModel):
         # Soft-loss physique sur l'endpoint prédit en un pas : r_hat = x_t + (1-t)*v
         if aux['lambda_phys'] > 0 or aux['lambda_enthalpy'] > 0:
             r_hat = x_t + (1.0 - t) * v
-            field = (ctx['baseline'] + r_hat * self.res_scale.value if self.use_residual
-                     else r_hat * self.res_scale.value)
+            field = (ctx['baseline'] + r_hat * rs if self.use_residual
+                     else r_hat * rs)
             loss = loss + self._phys_terms(field, hr, gp, knn_g, aux)
         return loss

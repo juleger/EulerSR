@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=24:00:00
-#SBATCH --output=logs/train_%j.out
-#SBATCH --error=logs/train_%j.err
+#SBATCH --output=logs/train/train_%j.out
+#SBATCH --error=logs/train/train_%j.err
 
 # Usage:
 #   sbatch slurm/train.sbatch <config> [run_name]

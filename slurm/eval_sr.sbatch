@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=02:00:00
-#SBATCH --output=logs/eval-sr_%j.out
-#SBATCH --error=logs/eval-sr_%j.err
+#SBATCH --output=logs/eval/eval-sr_%j.out
+#SBATCH --error=logs/eval/eval-sr_%j.err
 
 # Exemples :
 #   # Éval standard diamond + NACA

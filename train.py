@@ -36,6 +36,7 @@ from utils.layout import DataLayout
 _MODELS = {
     'dam': ('models.dam', 'DAM'),
     'fam': ('models.fam', 'FAM'),
+    'siam': ('models.siam', 'SIAM'),
 }
 
 

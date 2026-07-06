@@ -43,12 +43,12 @@ training:
   seed: 42
   loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, sliced_wasserstein
   shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
-  lambda_enthalpy: 0.02          # poids de la perte de conservation d'enthalpie (0 = desactive)
+  lambda_enthalpy: 0.01          # poids de la perte de conservation d'enthalpie (0 = desactive)
   schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 20
+  batch_size: 16
   ema_decay: 0.999
   train_fraction: 1.0
   preload: true

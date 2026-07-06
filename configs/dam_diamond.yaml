@@ -1,6 +1,5 @@
-model: fam
+model: dam
 data_root: data/
-geometry: diamond
 
 resolution:
   hr: 0.025
@@ -9,8 +8,7 @@ resolution:
 architecture:
   levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
   embed_dim: 96
-  cond_dim: 96            # dimension du vecteur de conditionnement
-  t_dim: 64               # dimension de l'embedding du temps de flow
+  cond_dim: 96           # dimension du vecteur de conditionnement
   n_heads: 3
   n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
   n_global_blocks: 3      # blocs d'attention globale au niveau grossier
@@ -21,32 +19,31 @@ architecture:
   k_cond: 6               # voisins kNN pour le conditionnement
   use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
+  use_geom_cond: false    # embedding de geometrie ; false pour le zero-shot sur geometrie inconnue
+  n_geoms: 1              # nombre de geometries distinctes
 
-flow:
-  n_steps: 16             # pas d'integration ODE a l'inference
-  use_residual: true      # predit le residu sur la baseline IDW
-  n_samples: 4            # echantillons moyennes par prediction
-  n_val_gen: 16           # nombre de cas evalues en validation
-  sample_seed: 42
-  t_dist: logit_normal    # distribution du temps d'entrainement. options: logit_normal, uniform, beta
-  sigma_t: 1.2            # ecart-type du temps si t_dist = logit_normal
-  cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement (0 = desactive)
-  cfg_scale: 1.0          # echelle de guidance a l'inference (1 = desactive)
+# Entrainement multi-branche : une branche = (geometrie, resolution LR).
+# weight = proportion d'echantillonnage de la branche (somme normalisee).
+datasets:
+  - name: diamond
+    lr_res:         [0.05, 0.1, 0.2]   # resolutions LR d'entree
+    weight:         [1,    1,   1]     # proportion d'echantillonnage par resolution
+    train_fraction: [1.0,  1.0, 1.0]   # fraction des donnees utilisee par branche
 
 training:
-  epochs: 250
+  epochs: 200
   lr: 5.0e-4
   weight_decay: 5.0e-4
-  val_every: 10
+  val_every: 20
   seed: 42
   loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, sliced_wasserstein
   shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
   lambda_enthalpy: 0.01          # poids de la perte de conservation d'enthalpie (0 = desactive)
   schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
-  grad_clip: 4.0                 # clipping de la norme du gradient (0 = desactive)
+  grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 16
-  ema_decay: 0.9995
-  train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
+  batch_size: 20
+  ema_decay: 0.999
+  train_fraction: 1.0
   preload: true

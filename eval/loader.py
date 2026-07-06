@@ -15,6 +15,7 @@ from utils.metrics import idw_weights
 _MODEL_REGISTRY = {
     'fam': ('models.fam', 'FAM'),
     'dam': ('models.dam', 'DAM'),
+    'siam': ('models.siam', 'SIAM'),
 }
 
 
