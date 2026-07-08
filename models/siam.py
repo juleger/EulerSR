@@ -1,25 +1,23 @@
 """
 SIAM : Stochastic Interpolant Attention Mesh (Model)
 Interpolant stochastique conditionnel pour la super-resolution CFD.
+Reference : Albergo, Boffi & Vanden-Eijnden, "Stochastic Interpolants:
+A Unifying Framework for Flows and Diffusions", arXiv:2303.08797 (2023).
 
 Au lieu de transporter du bruit gaussien vers le residu (FAM), on construit un
 pont direct entre le champ basse resolution et le champ haute resolution :
-    x0 = baseline IDW(LR)        (champ deja physique)
+    x0 = LR IDW        (champ LR interpole sur le maillage HR, deja physique)
     x1 = champ HR cible
-    x_t = (1-t)*x0 + t*x1 + sigma*g(t)*z ,   z ~ N(0, I) ,  g(t) = sin(pi t)
-Le reseau apprend la derive du pont b(x_t, t | cond) = E[ d/dt x_t | x_t ], et
-l'echantillonnage integre l'ODE dx/dt = b de x0 (baseline) a x1 (HR).
-
-Avantages sur le transport bruit -> residu :
-- On part d'un champ physique, jamais du bruit pur : trajectoire plus courte,
-  plus stable, pas de champ aberrant aux petits t.
-- sigma_bridge = 0 : pont deterministe (flow matching baseline -> HR).
-  sigma_bridge > 0 : interpolant stochastique -> le bruit z du pont faconne la
-  derive apprise b = E[d/dt x_t | x_t]. L'inference reste la PF-ODE
-  deterministe dx/dt = b (preserve les marginales), donc predict() est
-  deterministe : un HR par (geometrie, Mach, AoA).
-- Positivite garantie par une projection dure (rho, p >= eps) en fin
-  d'integration ; conservation optionnelle via lambda_enthalpy a l'entrainement.
+    x_t = alpha(t)*x0 + beta(t)*x1 + gamma(t)*z ,   z ~ N(0, I)
+Les coefficients de l'interpolant (cf. Albergo et al.) sont modulables :
+    alpha, beta : le "chemin" LR IDW -> HR   (schema 'linear' ou 'trig')
+    gamma       : l'"enveloppe de bruit" (variable latente, schema 'sin'/'sqrt')
+avec pour conditions aux bords alpha(0)=beta(1)=1, alpha(1)=beta(0)=0 et
+gamma(0)=gamma(1)=0 : les deux extremites du pont sont epinglees (x0 et x1
+exacts), le bruit ne gonfle qu'au milieu. Le facteur d'echelle du bruit est
+sigma (=sigma_bridge). Le reseau apprend la derive du pont
+b(x_t, t | cond) = E[ d/dt x_t | x_t ], et l'echantillonnage integre l'ODE
+dx/dt = b de x0 (LR IDW) a x1 (HR).
 
 Backbone : AMNet, identique a DAM/FAM (temps t + champ courant x_t en entree).
 Le conditionnement (champ LR interpole, Mach/AoA, geometrie, paroi, resolution)
@@ -44,7 +42,7 @@ from models.dam import AMNet, build_context, load_hierarchical_knn
 
 class SIAM(SRModel):
     """Pont interpolant stochastique multi-echelles pour la super-resolution CFD :
-    b(x_t, t | cond) sur hierarchie de maillages, integration de x0=baseline a x1=HR.
+    b(x_t, t | cond) sur hierarchie de maillages, integration de x0=LR IDW a x1=HR.
     """
 
     # Multi echelles de maillages pour le reseau (meme hierarchie que FAM)
@@ -62,6 +60,10 @@ class SIAM(SRModel):
         use_bf16 = arch.get('use_bf16', False)
         compute_dtype = jnp.bfloat16 if use_bf16 else None
 
+        # Tete denoiser : eta = E[z|x_t] (canaux 4:8) pour estimer le score du pont
+        # s = -eta/gamma, requis par l'echantillonnage SDE. Gate pour ne pas changer les
+        # shapes de checkpoint quand desactive (drift b seul, canaux 0:4).
+        self.learn_score = bool(flow.get('learn_score', False))
         self._use_geom_cond = arch.get('use_geom_cond', False)
         self.net = AMNet(
             n_levels=len(self.levels),
@@ -76,15 +78,33 @@ class SIAM(SRModel):
             use_geom_cond=self._use_geom_cond,
             n_geoms=arch.get('n_geoms', 8),
             n_hr_blocks=arch.get('n_hr_blocks', 1),
-            dtype=compute_dtype)
+            dtype=compute_dtype,
+            n_out=8 if self.learn_score else 4)
 
-        # Interpolant : bruit sigma*g(t), g(t) = sin(pi t)
+        # Interpolant stochastique : x_t = alpha(t) x0 + beta(t) x1 + gamma(t) z.
+        #   path  : schema du chemin alpha/beta      ('linear' | 'trig')
+        #   gamma : schema de l'enveloppe de bruit   ('sin' | 'sqrt')
+        #   sigma_bridge : facteur d'echelle du bruit (sigma)
         self.sigma_bridge = float(flow.get('sigma_bridge', 0.0))
+        self._path = flow.get('path', 'linear')
+        self._gamma_env = flow.get('gamma', 'sin')
+
         # Distribution d'echantillonnage de t a l'entrainement
         self._t_dist = flow.get('t_dist', 'uniform')
         self._sigma_t = float(flow.get('sigma_t', 1.0))
         self._t_alpha = float(flow.get('t_alpha', 2.0))
         self._t_beta = float(flow.get('t_beta', 2.0))
+
+        # Echantillonnage : PF-ODE deterministe ('ode') ou SDE score-based ('sde', Euler-Maruyama).
+        self.sampler = flow.get('sampler', 'ode')          # 'ode' | 'sde'
+        self.lambda_score = float(flow.get('lambda_score', 1.0))  # poids perte denoising
+        self.eps_schedule = flow.get('eps_schedule', 'gamma')  # 'gamma'|'const'|'linear'
+        self.eps0 = float(flow.get('eps0', 1.0))            # echelle du coeff de diffusion
+        self.n_sde_steps = flow.get('n_sde_steps', 32)      # pas Euler-Maruyama
+        if self.sampler == 'sde' and not (self.learn_score and self.sigma_bridge > 0):
+            raise ValueError(
+                "sampler='sde' requiert learn_score=true et sigma_bridge>0 "
+                "(sans bruit du pont, pas de score a estimer).")
 
         # Echantillonnage
         self.n_steps = flow.get('n_steps', 16)
@@ -93,17 +113,77 @@ class SIAM(SRModel):
         self.sample_seed = flow.get('sample_seed', 0)
         self.val_max_samples = self.n_val_gen
 
+        # Residu type DAM (baseline + delta) : le pont opere en coords residu
+        self.use_residual = flow.get('use_residual', True)
+
+        # Dropout de conditionnement (classifier-free guidance) : regularise + guidance
+        self.cfg_prob = float(flow.get('cfg_prob', 0.0))   # proba de dropout a l'entrainement
+        self.cfg_scale = float(flow.get('cfg_scale', 1.0))  # echelle de guidance a l'inference
+
         # Stats d'entrainement (denormalisation pour la projection de positivite)
         self.mu_train = Buffer(jnp.zeros((4,), jnp.float32))
         self.sig_train = Buffer(jnp.ones((4,), jnp.float32))
 
-    def velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict) -> jax.Array:
-        return self.net(ctx['c'], ctx['scal'], knn['fm'], ctx['wall'], ctx['geom_id'], x_t=x_t, t=t)
+    def _net_out(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict, scal: jax.Array | None = None) -> jax.Array:
+        """Sortie brute du reseau : [N, 4] (drift b) ou [N, 8] (drift b + denoiser eta)."""
+        s = ctx['scal'] if scal is None else scal
+        return self.net(ctx['c'], s, knn['fm'], ctx['wall'], ctx['geom_id'], x_t=x_t, t=t)
 
-    @staticmethod
-    def _noise_env(t: jax.Array) -> tuple[jax.Array, jax.Array]:
-        """Envelope de bruit du pont g(t) = sin(pi t) et sa derivee g'(t)."""
-        return jnp.sin(jnp.pi * t), jnp.pi * jnp.cos(jnp.pi * t)
+    def velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict,
+                 scal: jax.Array | None = None) -> jax.Array:
+        """Drift du pont b(x_t, t | cond) (canaux 0:4)."""
+        return self._net_out(x_t, t, ctx, knn, scal=scal)[..., :4]
+
+    def _guided_velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict) -> jax.Array:
+        """Vitesse du pont avec classifier-free guidance (inference)."""
+        v_cond = self.velocity(x_t, t, ctx, knn)
+        if self.cfg_scale == 1.0:
+            return v_cond
+        scal_null = jnp.zeros_like(ctx['scal'])
+        v_uncond = self.velocity(x_t, t, ctx, knn, scal=scal_null)
+        return v_uncond + self.cfg_scale * (v_cond - v_uncond)
+
+    def _eps(self, t: jax.Array, gamma: jax.Array) -> jax.Array:
+        """Coefficient de diffusion eps(t) >= 0 du SDE (preserve les marginales)."""
+        if self.eps_schedule == 'const':
+            return self.eps0 * jnp.ones_like(t)
+        if self.eps_schedule == 'linear':
+            return self.eps0 * (1.0 - t)
+        return self.eps0 * gamma
+
+    def _drift_score(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict) -> tuple:
+        """Renvoie (drift guide b, score s) du pont pour l'echantillonnage SDE."""
+        out = self._net_out(x_t, t, ctx, knn)
+        b_cond, eta = out[..., :4], out[..., 4:8]
+        if self.cfg_scale == 1.0:
+            b = b_cond
+        else:
+            b_uncond = self.velocity(x_t, t, ctx, knn, scal=jnp.zeros_like(ctx['scal']))
+            b = b_uncond + self.cfg_scale * (b_cond - b_uncond)
+        _, _, _, _, gamma, _ = self._interp_coeffs(t)
+        s = -eta / jnp.clip(gamma, 1e-4, None)
+        return b, s
+
+    def _interp_coeffs(self, t: jax.Array) -> tuple[jax.Array, ...]:
+        """Coefficients de l'interpolant stochastique et leurs derivees temporelles"""
+        one = jnp.ones_like(t)
+        if self._path == 'trig':    # interpolation trigonométrique
+            half_pi = 0.5 * jnp.pi
+            alpha, dalpha = jnp.cos(half_pi * t), -half_pi * jnp.sin(half_pi * t)
+            beta,  dbeta  = jnp.sin(half_pi * t),  half_pi * jnp.cos(half_pi * t)
+        else:       # interpolation linéaire
+            alpha, dalpha = 1.0 - t, -one
+            beta,  dbeta  = t, one
+
+        # variable latente du pont 
+        s = self.sigma_bridge
+        if self._gamma_env == 'sqrt':                  # gamma = sigma sqrt(t(1-t)) (pont brownien)
+            tc = jnp.clip(t, 1e-4, 1.0 - 1e-4)
+            root = jnp.sqrt(tc * (1.0 - tc))
+            gamma, dgamma = s * root, s * (0.5 - tc) / root
+        else:                                          # 'sin' : gamma = sigma sin(pi t)
+            gamma, dgamma = s * jnp.sin(jnp.pi * t), s * jnp.pi * jnp.cos(jnp.pi * t)
+        return alpha, dalpha, beta, dbeta, gamma, dgamma
 
     def _sample_t(self, key: jax.Array) -> jax.Array:
         """Tire t ~ distribution configuree (uniform / logit_normal / beta)."""
@@ -120,30 +200,58 @@ class SIAM(SRModel):
         prim = prim.at[:, 3].set(jnp.maximum(prim[:, 3], 1e-3))
         return (prim - self.mu_train.value) / self.sig_train.value
 
-    def _integrate(self, x0: jax.Array, ctx: dict, knn: dict) -> jax.Array:
-        """Integre le pont baseline (t=0) -> HR (t=1) par la PF-ODE (Heun).
-        Positivite imposee en sortie."""
+    def _integrate(self, ctx: dict, knn: dict) -> jax.Array:
+        """Integre le pont (t=0) -> (t=1) par la PF-ODE (Heun)."""
         dt = 1.0 / self.n_steps
 
         def body(k, x):
             t1 = k * dt
-            v1 = self.velocity(x, t1, ctx, knn)
-            v2 = self.velocity(x + dt * v1, t1 + dt, ctx, knn)
+            v1 = self._guided_velocity(x, t1, ctx, knn)
+            v2 = self._guided_velocity(x + dt * v1, t1 + dt, ctx, knn)
             return x + 0.5 * dt * (v1 + v2)
 
+        x0 = jnp.zeros_like(ctx['baseline']) if self.use_residual else ctx['baseline']
         x1 = jax.lax.fori_loop(0, self.n_steps, body, x0)
-        return self._project(x1)
+        field = ctx['baseline'] + x1 if self.use_residual else x1
+        return self._project(field)
+
+    def _integrate_sde(self, ctx: dict, knn: dict, key: jax.Array) -> jax.Array:
+        """Integre le pont par le SDE forward (Euler-Maruyama, n_sde_steps pas) :
+            dX = [b + eps(t) s] dt + sqrt(2 eps(t)) dW ,   s = -eta/gamma."""
+        dt = 1.0 / self.n_sde_steps
+        sqrt_dt = jnp.sqrt(dt)
+
+        def body(k, carry):
+            key, x = carry
+            key, ksub = jax.random.split(key)
+            t1 = k * dt
+            b, s = self._drift_score(x, t1, ctx, knn)
+            _, _, _, _, gamma, _ = self._interp_coeffs(t1)
+            eps = self._eps(t1, gamma)
+            xi = jax.random.normal(ksub, x.shape)
+            x = x + dt * (b + eps * s) + jnp.sqrt(2.0 * eps) * sqrt_dt * xi
+            return key, x
+
+        x0 = jnp.zeros_like(ctx['baseline']) if self.use_residual else ctx['baseline']
+        _, x1 = jax.lax.fori_loop(0, self.n_sde_steps, body, (key, x0))
+        field = ctx['baseline'] + x1 if self.use_residual else x1
+        return self._project(field)
 
     def sample(self, hr_feat: jax.Array, lr_feat: jax.Array, knn: dict,
                key: jax.Array | None = None, n_samples: int | None = None) -> jax.Array:
-        """Integre le pont deterministe baseline -> HR (PF-ODE). Renvoie [S, N, 4].
+        """Integre le pont LR IDW -> HR. Renvoie [S, N, 4].
 
-        Le pont etant deterministe, les S echantillons sont identiques ; l'axe S
-        est conserve pour la compatibilite d'interface (ensemble). `key` est ignore.
+        sampler='ode' : PF-ODE deterministe, les S echantillons sont identiques
+        sampler='sde' : Euler-Maruyama stochastique, S trajectoires différentes (score-based sampling).
         """
         ctx = build_context(self, hr_feat, lr_feat, knn)
         n_s = n_samples if n_samples is not None else self.n_samples
-        field = self._integrate(ctx['baseline'], ctx, knn)
+        if self.sampler == 'sde':
+            if key is None:
+                key = jax.random.PRNGKey(self.sample_seed)
+            keys = jax.random.split(key, n_s)
+            return jax.vmap(lambda k: self._integrate_sde(ctx, knn, k))(keys)
+        field = self._integrate(ctx, knn)
         return jnp.broadcast_to(field, (n_s,) + field.shape)
 
     def predict(self, hr_feat: jax.Array, lr_feat: jax.Array, knn: dict) -> jax.Array:
@@ -159,25 +267,46 @@ class SIAM(SRModel):
         ds0, _ = branch_pairs[0]
         self.mu_train.value = jnp.array(ds0.mu, jnp.float32)
         self.sig_train.value = jnp.array(ds0.sig, jnp.float32)
-        print(f"  SIAM pont baseline -> HR  (sigma_bridge={self.sigma_bridge})")
+        mode = "residu IDW + delta" if self.use_residual else "champ"
+        print(f"  SIAM pont LR IDW -> HR  (path={self._path}, gamma={self._gamma_env}, "
+              f"sigma={self.sigma_bridge}, mode={mode})")
 
     def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array, wt: jax.Array,
                      gp: jax.Array, knn_g: dict, key: jax.Array, aux: dict) -> jax.Array:
         """Loss du pont : b(x_t, t | cond) doit matcher la derive x1 - x0 (+ bruit)."""
         ctx = build_context(self, hr, lr, knn_g)
-        x0 = ctx['baseline']   # champ LR interpole (normalise)
-        x1 = tg                # champ HR cible (normalise)
-        kt, kz = jax.random.split(key)
+        if self.use_residual:                    # coords residu (type DAM) : x0=0 -> x1=HR-IDW
+            x0 = jnp.zeros_like(ctx['baseline'])
+            x1 = tg - ctx['baseline']
+        else:                                    # coords champ : x0=IDW -> x1=HR
+            x0 = ctx['baseline']
+            x1 = tg
+        kt, kz, kcfg = jax.random.split(key, 3)
         t = self._sample_t(kt)
         z = jax.random.normal(kz, x1.shape)
-        g, gprime = self._noise_env(t)
-        x_t = (1.0 - t) * x0 + t * x1 + self.sigma_bridge * g * z
-        drift_target = (x1 - x0) + self.sigma_bridge * gprime * z
-        v = self.velocity(x_t, t, ctx, knn_g)
+        alpha, dalpha, beta, dbeta, gamma, dgamma = self._interp_coeffs(t)
+        x_t = alpha * x0 + beta * x1 + gamma * z
+        drift_target = dalpha * x0 + dbeta * x1 + dgamma * z
+
+        # Dropout de conditionnement (classifier-free guidance), branche compilee une fois
+        if self.cfg_prob > 0:
+            drop = jax.random.bernoulli(kcfg, self.cfg_prob)
+            scal_used = jnp.where(drop, jnp.zeros_like(ctx['scal']), ctx['scal'])
+        else:
+            scal_used = ctx['scal']
+        out = self._net_out(x_t, t, ctx, knn_g, scal=scal_used)
+        v = out[..., :4]
         loss = aux['loss_fn'](v, drift_target, wt)
-        # Physique soft sur l'endpoint predit, ponderee par t : on ne la pose que
-        # la ou l'endpoint x1_hat est fiable (evite la divergence aux petits t).
+
+        # Tete denoiser : eta = E[z|x_t]
+        if self.learn_score:
+            eta = out[..., 4:8]
+            loss = loss + self.lambda_score * (wt[:, None] * (eta - z) ** 2).mean()
+
+        # Termes physiques : conservation de la masse et de l'energie (enthalpie)
         if aux['lambda_phys'] > 0 or aux['lambda_enthalpy'] > 0:
-            x1_hat = x_t + (1.0 - t) * v
-            loss = loss + t * self._phys_terms(x1_hat, hr, gp, knn_g, aux)
+            det = alpha * dbeta - beta * dalpha
+            x1_hat = (alpha * v - dalpha * x_t) / det
+            field = ctx['baseline'] + x1_hat if self.use_residual else x1_hat
+            loss = loss + t * self._phys_terms(field, hr, gp, knn_g, aux)
         return loss

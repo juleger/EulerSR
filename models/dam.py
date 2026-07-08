@@ -59,7 +59,7 @@ class AMNet(nnx.Module):
     def __init__(self, n_levels: int, n_c: int, d: int, d_cond: int,
                  n_heads: int, n_global: int, mlp_ratio: int, rngs: nnx.Rngs,
                  d_t: int = 0, n_x: int = 0, use_geom_cond: bool = False,
-                 n_geoms: int = 8, n_hr_blocks: int = 1, dtype=None):
+                 n_geoms: int = 8, n_hr_blocks: int = 1, dtype=None, n_out: int = 4):
         self.use_time = d_t > 0
         self.d_t = d_t
         self.n_x = n_x
@@ -99,8 +99,7 @@ class AMNet(nnx.Module):
                           for _ in range(n_hr_blocks)]
 
         self.dec_norm = nnx.LayerNorm(d, rngs=rngs)
-        # Init à zéro : delta/vitesse = 0 au départ, prédiction = baseline IDW
-        self.dec = nnx.Linear(d, 4, rngs=rngs, dtype=dtype)
+        self.dec = nnx.Linear(d, n_out, rngs=rngs, dtype=dtype)
         self.dec.kernel.value = jnp.zeros_like(self.dec.kernel.value)
         self.dec.bias.value = jnp.zeros_like(self.dec.bias.value)
 
