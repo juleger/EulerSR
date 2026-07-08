@@ -17,6 +17,7 @@ import airfoils, diamond, bump
 
 _AIRFOIL_PARAMS = dict(Lx=4.0, Ly=4.0, chord=1.0, cx=1.5, cy=2.0)
 _DEFAULT_H = [0.3, 0.2, 0.15, 0.1, 0.05, 0.025]
+_FIG_DIR = _HERE.parent / "data" / "figures" / "meshes"
 
 
 def _airfoil_builder(name):
@@ -41,13 +42,16 @@ def main():
     parser.add_argument("--geom", nargs="*", choices=list(GEOMS), default=list(GEOMS))
     parser.add_argument("-h", "--mesh-size", dest="h", type=float, nargs="+", default=None)
     parser.add_argument("--out-dir", default=None)
+    parser.add_argument("--fig-dir", default=str(_FIG_DIR))
     args = parser.parse_args()
 
+    fig_dir = Path(args.fig_dir)
+    fig_dir.mkdir(parents=True, exist_ok=True)
     for geom in args.geom:
         builder, default_h = GEOMS[geom]
         for h in (args.h if args.h is not None else default_h):
             mesh, path = builder(h, args.out_dir)
-            mesh.plot_mesh(filename=str(path.with_suffix(".png")), dpi=500)
+            mesh.plot_mesh(filename=str(fig_dir / f"{path.stem}.png"), dpi=500)
 
 
 if __name__ == "__main__":
