@@ -43,7 +43,7 @@ training:
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 20
+  batch_size: 16
   ema_decay: 0.999
   train_fraction: 1.0
   preload: true

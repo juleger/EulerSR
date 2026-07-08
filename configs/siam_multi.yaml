@@ -28,9 +28,15 @@ flow:
   n_samples: 1
   n_val_gen: 16           # nombre de cas evalues en validation
   sample_seed: 42
-  sigma_bridge: 0.1       # bruit z du pont a l'entrainement
+  # Interpolant : x_t = alpha(t) x0 + beta(t) x1 + gamma(t) z  (Albergo et al. 2023)
+  path: linear            # chemin alpha/beta LR IDW -> HR. options: linear, trig
+  gamma: sin              # enveloppe de bruit gamma(t). options: sin (sigma sin(pi t)), sqrt (sigma sqrt(t(1-t)))
+  sigma_bridge: 0.1       # sigma : facteur d'echelle du bruit z du pont
   t_dist: logit_normal    # distribution du temps d'entrainement. options: logit_normal, uniform, beta
   sigma_t: 1.2            # ecart-type du temps si t_dist = logit_normal
+  use_residual: true      # residu type DAM : sortie = IDW + delta (pas de res_scale)
+  cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement (0 = desactive)
+  cfg_scale: 1.0          # echelle de guidance a l'inference (1 = desactive)
 
 datasets:
   - name: diamond
