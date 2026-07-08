@@ -91,6 +91,25 @@ def predict_det(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
     return (np.array(pred) * sig + mu).astype(np.float32), t_ms
 
 
+def predict_ensemble(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
+                     stats: dict, knn: dict | None = None, geom_id: int = 0,
+                     key: jax.Array | None = None,
+                     ) -> tuple[np.ndarray, np.ndarray, float]:
+    """Ensemble stochastique (SDE) : renvoie (mean, std, t_ms) en unites physiques."""
+    hr_feat, lr_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id)
+    knn_used = knn if knn is not None else entry.knn
+    if key is None:
+        key = jax.random.PRNGKey(int(getattr(entry.model, 'sample_seed', 0)))
+    t0 = time.perf_counter()
+    samples = jax.block_until_ready(
+        entry.model.sample(hr_feat, lr_feat, knn_used, key=key))  # [S, N, 4] normalise
+    t_ms = (time.perf_counter() - t0) * 1e3
+    samples = np.asarray(samples) * sig + mu
+    mean = samples.mean(axis=0).astype(np.float32)
+    std = samples.std(axis=0).astype(np.float32)
+    return mean, std, t_ms
+
+
 def make_batch_predict(model, knn):
     @nnx.jit
     def _fn(hr_b: jax.Array, lr_b: jax.Array) -> jax.Array:

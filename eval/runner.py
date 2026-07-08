@@ -12,7 +12,8 @@ import jax.numpy as jnp
 from eval.loader import ModelEntry
 from eval.testset import TestSet
 from eval.core import (mesh_geom_from_case, build_hr_feat, build_lr_feat, build_features,
-                       predict_det, predict_idw, make_batch_predict, run_batched, _BATCH_SIZE)
+                       predict_det, predict_ensemble, predict_idw, make_batch_predict,
+                       run_batched, _BATCH_SIZE)
 from utils.refs import to_mach
 from utils.metrics import (compute_field_errors, l2_rel, aero_metrics,
                             enthalpy_rms, entropy_violation, fvm_euler_rms,
@@ -115,7 +116,8 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
         _save_summary_csv(ref_results, sweep_results, out / 'summary.csv')
 
     print(f"\nDone — {out}/")
-    return {'ref': ref_results, 'sweep': sweep_results}
+    return {'ref': ref_results, 'sweep': sweep_results,
+            'triang': getattr(ts, 'triang_hr', None), 'tag': ts.tag}
 
 
 def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dict], idw_knn: dict) -> dict:
@@ -190,17 +192,26 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
         gid = ts.geom_id_for(entry)
         _mu_e, _sig_e = _train_stats(entry, ts.stats)
         _stats_e = {'mu': _mu_e, 'sig': _sig_e}
+        # Modele stochastique (interpolant SDE) : ensemble -> moyenne + incertitude
+        is_sde = getattr(entry.model, 'sampler', 'ode') == 'sde'
         row = {'name': ts.display_name(entry), 'prim_preds': [], 'mach_preds': [],
                'l2': [], 'linf': [], 'l2w': [], 'time_ms': [],
-               'wall_mach': [], 'aero': []}
+               'wall_mach': [], 'aero': [], 'prim_std': []}
         for cd in case_data:
             c = cd['meta']
-            prim, t = predict_det(entry, cd['d'], c['mach_in'], c['aoa_in'],
-                                   _stats_e, knn=knn_map[entry.name], geom_id=gid)
+            if is_sde:
+                prim, prim_std, t = predict_ensemble(
+                    entry, cd['d'], c['mach_in'], c['aoa_in'],
+                    _stats_e, knn=knn_map[entry.name], geom_id=gid)
+            else:
+                prim, t = predict_det(entry, cd['d'], c['mach_in'], c['aoa_in'],
+                                       _stats_e, knn=knn_map[entry.name], geom_id=gid)
+                prim_std = None
             mach = to_mach(prim)
             li, lw = _field_errs(prim, cd)
             wm, am = _aero(prim, cd)
             row['prim_preds'].append(prim)
+            row['prim_std'].append(prim_std)
             row['mach_preds'].append(mach)
             row['l2'].append(l2_rel(mach, cd['mach_ref'])
                              if cd['mach_ref'] is not None else None)
@@ -574,30 +585,23 @@ def plot_combined(ts_results: dict[str, dict], out_dir: Path) -> None:
     """Figures globales agrégées sur tous les TestSets évalués.
 
     Appelé automatiquement quand il y a plusieurs TestSets avec un sweep complet.
-    Les noms de modèles sont normalisés (nom de base, sans suffixe OOD)
+    Contrairement à l'ancienne approche (pool fusionné), la sortie garde la
+    ventilation *par testset* : tableau global modèle×test, barres d'erreur par
+    test, distributions facettées, et panel de champs (1 cas ref / testset).
     """
-    from utils.viz.eval import (plot_global_errors, plot_distributions,
-                                 plot_error_kde, plot_cl_cd_distributions,
-                                 plot_aero_distributions)
-
-    sweep_list = [v['sweep'] for v in ts_results.values()
-                  if v.get('sweep') is not None]
-    if len(sweep_list) < 2:
-        return
+    from utils.viz.combined import plot_all_combined
 
     tags = [tag for tag, v in ts_results.items() if v.get('sweep') is not None]
+    if len(tags) < 2:
+        return
+
     print(f"\n── Figures combinées ({' + '.join(tags)}) "
           f"{'─' * max(0, 46 - len(' + '.join(tags)))}")
 
-    merged = _merge_sweep_results(sweep_list)
     out = Path(out_dir) / 'combined'
     out.mkdir(exist_ok=True)
 
-    plot_global_errors(merged, out)
-    plot_distributions(merged, out)
-    plot_aero_distributions(merged, out)
-    plot_cl_cd_distributions(merged, out)
-    plot_error_kde(merged, out)
+    plot_all_combined(ts_results, out)
 
     print(f"  -> {out}/")
 
