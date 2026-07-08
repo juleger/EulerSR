@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=onera-d
+#SBATCH --job-name=oneraD
 #SBATCH --partition=gpu-a40,gpu-l40
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -8,8 +8,8 @@
 #SBATCH --mem=24G
 #SBATCH --time=20:00:00
 #SBATCH --array=0-20
-#SBATCH --output=logs/euler/oneraD_%A_%a.out
-#SBATCH --error=logs/euler/oneraD_%A_%a.err
+#SBATCH --output=logs/euler/%x_%A_%a.out
+#SBATCH --error=logs/euler/%x_%A_%a.err
 
 # Grille de simulations Euler, un SLURM array par AoA, chaque tâche couvre
 # une plage de Mach pour une géométrie donnée.
@@ -19,7 +19,10 @@
 #
 # Paramètres (modifier directement ou via env vars) :
 #   CASE       : géométrie  — diamond | naca0012 | rae2822 | oneraD
-#   MESH_PATH  : chemin du maillage HR
+#   MESH_PATHS : un ou plusieurs maillages, séparés par des virgules et/ou
+#                espaces (ex: "mesh_LR.npy,mesh_HR.npy" pour générer LR et HR).
+#                Chaque maillage exécute la grille (Mach x AoA) complète.
+#                MESH_PATH reste accepté pour la compatibilité (maillage unique).
 #   MACH       : plage Mach au format start:stop:step  (ex: 0.70:4.00:0.01)
 #   AOA_MIN    : AoA minimum correspondant au SLURM array task 0 (défaut: -5)
 #   TF         : temps final simulation (défaut: 5.0)
@@ -27,7 +30,8 @@
 
 
 CASE="${CASE:-oneraD}"
-MESH_PATH="${MESH_PATH:-data/meshes/oneraD_h0.025.npy}"
+MESH_PATHS="${MESH_PATHS:-${MESH_PATH:-data/meshes/oneraD_h0.025.npy}}"
+IFS=', ' read -r -a MESH_ARRAY <<< "${MESH_PATHS}"
 MACH="${MACH:-0.60:2.00:0.01}"
 TF="${TF:-5.0}"
 STATIONARITY_THRESHOLD="${STATIONARITY_THRESHOLD:-1e-8}"
@@ -43,7 +47,7 @@ echo "User              : ${USER}"
 echo "SLURM_JOBID       : ${SLURM_JOBID}"
 echo "SLURM_ARRAY_TASK  : ${SLURM_ARRAY_TASK_ID}  ->  AoA=${AOA}"
 echo "Case              : ${CASE}"
-echo "Mesh              : ${MESH_PATH}"
+echo "Meshes            : ${MESH_ARRAY[*]}"
 echo "Mach range        : ${MACH}"
 echo "tf / threshold    : ${TF} / ${STATIONARITY_THRESHOLD}"
 echo "SLURM_JOB_NODELIST: ${SLURM_JOB_NODELIST}"
@@ -59,21 +63,24 @@ export JAX_COMPILATION_CACHE_DIR="${TMPDIR}/jax_cache"
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 
-echo "[$(date +%T)] Lancement : case=${CASE}  AoA=${AOA}  Mach=${MACH}"
-
 # Mode concis par défaut (logs slurm allégés) ; VERBOSE=1 pour les logs détaillés.
 VERBOSE_FLAG=""
 if [ "${VERBOSE:-0}" = "1" ]; then
     VERBOSE_FLAG="--verbose"
 fi
 
-python -u slurm/run_euler_grid.py \
-    --case                   "${CASE}" \
-    --mesh-path              "${MESH_PATH}" \
-    --mach                   "${MACH}" \
-    --aoa                    "${AOA}" \
-    --tf                     "${TF}" \
-    --stationarity-threshold "${STATIONARITY_THRESHOLD}" \
-    ${VERBOSE_FLAG}
+# Une exécution complète de la grille (Mach x AoA) par maillage.
+for MESH_PATH in "${MESH_ARRAY[@]}"; do
+    echo "[$(date +%T)] Lancement : case=${CASE}  mesh=${MESH_PATH}  AoA=${AOA}  Mach=${MACH}"
 
-echo "[$(date +%T)] Done — AoA=${AOA}"
+    python -u slurm/run_euler_grid.py \
+        --case                   "${CASE}" \
+        --mesh-path              "${MESH_PATH}" \
+        --mach                   "${MACH}" \
+        --aoa                    "${AOA}" \
+        --tf                     "${TF}" \
+        --stationarity-threshold "${STATIONARITY_THRESHOLD}" \
+        ${VERBOSE_FLAG}
+
+    echo "[$(date +%T)] Done — mesh=${MESH_PATH}  AoA=${AOA}"
+done
