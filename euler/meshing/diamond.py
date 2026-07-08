@@ -11,8 +11,7 @@ from mesh_utils import (WALL, INLET, OUTLET, MeshSizeParams,
                          build_outer_boundary, triangulate_with_hole)
 from jax_fvm.src.mesh import Mesh
 
-mesh_dir = repo_root / "meshes" / "diamond"
-mesh_dir.mkdir(parents=True, exist_ok=True)
+DEFAULT_OUT_DIR = repo_root / "data" / "meshes"
 
 DEFAULT_SIZE_PARAMS = MeshSizeParams(growth_rate=0.07, left_growth_rate=0.18)
 
@@ -69,7 +68,7 @@ def _diamond_refinement(cx, cy, chord, height, h, size_params):
 
 
 def build_mesh(Lx=6.0, Ly=4.0, h=0.05, chord=1.0, height=0.24, cx=None, cy=None,
-               export_vtk=False, size_params=DEFAULT_SIZE_PARAMS):
+               export_vtk=False, size_params=DEFAULT_SIZE_PARAMS, out_dir=None):
 
     cx = Lx / 2 if cx is None else cx
     cy = Ly / 2 if cy is None else cy
@@ -90,7 +89,9 @@ def build_mesh(Lx=6.0, Ly=4.0, h=0.05, chord=1.0, height=0.24, cx=None, cy=None,
                       center={"cx": cx, "cy": cy})
     mesh.print_statistics()
 
-    path = mesh_dir / f"diamond_h{h}.npy"
+    out_dir = DEFAULT_OUT_DIR if out_dir is None else Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"diamond_h{h}.npy"
     mesh.save_mesh(str(path))
     if export_vtk:
         mesh.export_vtk(str(path.with_suffix(".vtk")))
@@ -107,4 +108,4 @@ if __name__ == "__main__":
     for h in [0.2]:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, chord=chord, height=height,
                                 cx=cx, cy=cy, export_vtk=False)
-        mesh.plot_mesh(filename=mesh_dir / f"diamond_h{h}.png", dpi=500)
+        mesh.plot_mesh(filename=str(path.with_suffix(".png")), dpi=500)

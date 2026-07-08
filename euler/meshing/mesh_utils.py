@@ -1,7 +1,8 @@
-"""Utilitaires communs aux modules de maillage (diamond, naca0012, rae2822, oneraD)."""
+"""Utilitaires communs aux modules de maillage (airfoils, diamond, bump)."""
 from dataclasses import dataclass
 import numpy as np
 import meshpy.triangle as triangle
+from scipy.spatial import cKDTree
 from pathlib import Path
 import sys
 
@@ -195,6 +196,42 @@ def triangulate_with_hole(outer_pts, outer_ms, obstacle_pts, obstacle_ms, hole_p
         min_angle=30, generate_faces=True, generate_neighbor_lists=True,
     )
     return populate_mesh_from_triangle(Mesh(), raw_mesh)
+
+
+DEFAULT_MESH_DIR = Path(__file__).resolve().parents[2] / "data" / "meshes"
+
+
+def build_airfoil_mesh(case, dense, t_max, hole_pt, *, Lx, Ly, h, chord, cx, cy,
+                       symmetric, size_params, extra_metadata,
+                       out_dir=None, export_vtk=False):
+    x_le = cx - chord / 2.0
+    x_te = cx + chord / 2.0
+    tree = cKDTree(dense)
+    kappa = _menger_curvature(dense)
+    size_func = lambda pt: local_size_kdtree(pt, tree, cx, chord, t_max, h, size_params, kappa)
+    refinement = make_airfoil_refinement(tree, cx, cy, chord, t_max, h, size_params, kappa)
+
+    if symmetric:
+        airfoil_upper = sample_airfoil_upper(dense, 2000, chord, x_le, cy, h)
+        mesh = triangulate_symmetric_airfoil(Lx, Ly, cy, x_le, x_te, airfoil_upper,
+                                             size_func, refinement, h)
+    else:
+        outer_pts, outer_ms = build_outer_boundary(Lx, Ly, size_func, h)
+        airfoil_pts, airfoil_ms = sample_airfoil_boundary(dense, 2000, chord, x_le, cy, h)
+        mesh = triangulate_with_hole(outer_pts, outer_ms, airfoil_pts, airfoil_ms, hole_pt, refinement)
+
+    mesh.set_metadata(case=case, h=h, domain={"Lx": Lx, "Ly": Ly},
+                      obstacle_length=chord, chord=chord, **extra_metadata)
+    mesh.print_statistics()
+
+    out_dir = DEFAULT_MESH_DIR if out_dir is None else Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{case}_h{h}.npy"
+    mesh.save_mesh(str(path))
+    if export_vtk:
+        mesh.export_vtk(str(path.with_suffix(".vtk")))
+    print(f"Mesh saved : {path}")
+    return mesh, path
 
 
 # Maillage symétrique : maillage supérieur puis miroir sur l'axe y=cy

@@ -10,8 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # euler/ (jax_fvm)
 from jax_fvm.src.mesh import Mesh
 
 BUMP, INLET, OUTLET, WALL = 2, 3, 4, 6
-mesh_dir = repo_root / "meshes" / "bump"
-mesh_dir.mkdir(parents=True, exist_ok=True)
+DEFAULT_OUT_DIR = repo_root / "data" / "meshes"
 
 
 @dataclass(frozen=True)
@@ -138,7 +137,7 @@ def bump_refinement(center_x, circle_center_y, circle_radius, chord, thickness, 
 
 
 def build_mesh(Lx=3.0, Ly=1.0, h=0.05, thickness=0.08, chord=0.25, center=1.0, export_vtk=False,
-               size_params=DEFAULT_SIZE_PARAMS):
+               size_params=DEFAULT_SIZE_PARAMS, out_dir=None):
     # Création d'un maillage pour un bump circulaire coupé au mur inférieur.
 
     if thickness <= 0.0:
@@ -211,7 +210,9 @@ def build_mesh(Lx=3.0, Ly=1.0, h=0.05, thickness=0.08, chord=0.25, center=1.0, e
     )
     mesh.print_statistics()
 
-    path = mesh_dir / f"bump_h{h}.npy"
+    out_dir = DEFAULT_OUT_DIR if out_dir is None else Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"bump_h{h}.npy"
     mesh.save_mesh(str(path))
     if export_vtk:
         mesh.export_vtk(str(path.with_suffix(".vtk")))
@@ -225,4 +226,4 @@ if __name__ == "__main__":
 
     for h in [0.02]:
         mesh, path = build_mesh(Lx=Lx, Ly=Ly, h=h, thickness=thickness, chord=chord, center=center, export_vtk=False)
-        mesh.plot_mesh(filename=mesh_dir / f"bump_h{h}.png", dpi=500)
+        mesh.plot_mesh(filename=str(path.with_suffix(".png")), dpi=500)
