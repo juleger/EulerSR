@@ -24,17 +24,18 @@ architecture:
   n_geoms: 1              # nombre de geometries distinctes
 
 flow:
-  n_steps: 8              # pas d'integration PF-ODE (pont court : peu de pas suffisent)
+  n_steps: 16              # pas d'integration PF-ODE (pont court : peu de pas suffisent)
   n_samples: 1            # pont deterministe : un echantillon suffit
   n_val_gen: 16           # nombre de cas evalues en validation
   sample_seed: 42
   # Interpolant : x_t = alpha(t) x0 + beta(t) x1 + gamma(t) z  (Albergo et al. 2023)
   path: linear            # chemin alpha/beta LR IDW -> HR. options: linear, trig
-  gamma: sin              # enveloppe de bruit gamma(t). options: sin (sigma sin(pi t)), sqrt (sigma sqrt(t(1-t)))
+  gamma: sin2             # enveloppe de bruit gamma(t). options: sin2 (dgamma=0 aux bords), sin, sqrt (pont brownien)
   sigma_bridge: 0.1       # sigma : facteur d'echelle du bruit z du pont
-  t_dist: logit_normal    # distribution du temps d'entrainement. options: logit_normal, uniform, beta
+  per_channel_noise: true # echelle le bruit du pont par canal (residu HR-IDW ~30x entre u et v)
+  t_dist: uniform         # distribution du temps d'entrainement. options: uniform, logit_normal, beta
   sigma_t: 1.2            # ecart-type du temps si t_dist = logit_normal
-  use_residual: true      # residu type DAM : sortie = IDW + delta (pas de res_scale)
+  use_residual: true      # residu type DAM : sortie = IDW + delta
   cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement (0 = desactive)
   cfg_scale: 1.0          # echelle de guidance a l'inference (1 = desactive)
   # Echantillonnage stochastique (interpolant SDE) : PF-ODE deterministe par defaut.
@@ -57,7 +58,7 @@ datasets:
     train_fraction: [1.0,  1.0, 1.0]   # fraction des donnees utilisee par branche
 
 training:
-  epochs: 250
+  epochs: 200
   lr: 5.0e-4
   weight_decay: 5.0e-4
   val_every: 20
@@ -67,7 +68,7 @@ training:
   lambda_enthalpy: 0.0           # physique a l'entrainement (ponderee par t) ; 0 = desactive
   schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
-  grad_clip: 4.0                 # clipping de la norme du gradient (0 = desactive)
+  grad_clip: 5.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
   batch_size: 16
   ema_decay: 0.9995

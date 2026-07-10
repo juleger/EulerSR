@@ -11,7 +11,7 @@ pont direct entre le champ basse resolution et le champ haute resolution :
     x_t = alpha(t)*x0 + beta(t)*x1 + gamma(t)*z ,   z ~ N(0, I)
 Les coefficients de l'interpolant (cf. Albergo et al.) sont modulables :
     alpha, beta : le "chemin" LR IDW -> HR   (schema 'linear' ou 'trig')
-    gamma       : l'"enveloppe de bruit" (variable latente, schema 'sin'/'sqrt')
+    gamma       : l'"enveloppe de bruit" (variable latente, schema 'sin2'/'sin'/'sqrt')
 avec pour conditions aux bords alpha(0)=beta(1)=1, alpha(1)=beta(0)=0 et
 gamma(0)=gamma(1)=0 : les deux extremites du pont sont epinglees (x0 et x1
 exacts), le bruit ne gonfle qu'au milieu. Le facteur d'echelle du bruit est
@@ -183,12 +183,15 @@ class SIAM(SRModel):
             alpha, dalpha = 1.0 - t, -one
             beta,  dbeta  = t, one
 
-        # variable latente du pont 
+        # variable latente du pont
         s = self.sigma_bridge
         if self._gamma_env == 'sqrt':                  # gamma = sigma sqrt(t(1-t)) (pont brownien)
             tc = jnp.clip(t, 1e-4, 1.0 - 1e-4)
             root = jnp.sqrt(tc * (1.0 - tc))
             gamma, dgamma = s * root, s * (0.5 - tc) / root
+        elif self._gamma_env == 'sin2':                # gamma = sigma sin(pi t)^2 : dgamma=0 aux bords
+            sin = jnp.sin(jnp.pi * t)
+            gamma, dgamma = s * sin * sin, s * jnp.pi * jnp.sin(2.0 * jnp.pi * t)
         else:                                          # 'sin' : gamma = sigma sin(pi t)
             gamma, dgamma = s * jnp.sin(jnp.pi * t), s * jnp.pi * jnp.cos(jnp.pi * t)
         return alpha, dalpha, beta, dbeta, gamma, dgamma
