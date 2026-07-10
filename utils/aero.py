@@ -104,7 +104,8 @@ def aero_coeffs(prim: np.ndarray, wc: WallCache, mach_in: float) -> dict:
     )
 
 
-_MACH_MID, _MACH_SCALE, _AOA_SCALE = 2.35, 1.65, 5.0
+# Doit rester synchronisé avec preprocessing.dataset : plage Mach [0.70, 3.00].
+_MACH_MID, _MACH_SCALE, _AOA_SCALE = 1.85, 1.15, 5.0
 
 
 def compute_aero_scalars(d: dict, path: str, wc_lr: WallCache | None = None) -> np.ndarray:

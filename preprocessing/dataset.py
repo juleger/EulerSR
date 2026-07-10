@@ -8,8 +8,8 @@ import numpy as np
 from utils.refs import _PROC_RE
 from utils.layout import DataLayout, load_sample
 
-_MACH_MID = (0.7 + 4.0) / 2
-_MACH_SCALE = (4.0 - 0.7) / 2
+_MACH_MID = (0.7 + 3.0) / 2
+_MACH_SCALE = (3.0 - 0.7) / 2
 _AOA_SCALE = 5.0
 
 

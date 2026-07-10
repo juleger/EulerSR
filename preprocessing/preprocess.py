@@ -76,7 +76,12 @@ def _stratified_split(
     return {'test': test_keys, 'val': val_keys, 'train': train_keys}
 
 
-def _index_raw(res_dir: Path) -> dict[tuple, Path]:
+def _index_raw(res_dir: Path, mach_min: float = 0.70,
+               mach_max: float = 3.00) -> dict[tuple, Path]:
+    """Indexe les raw d'une résolution, restreint à la plage Mach [mach_min, mach_max].
+
+    Pour un même (AoA, Mach), on garde le plus grand temps d'intégration disponible.
+    """
     by_key: dict[tuple, dict[float, Path]] = {}
     for aoa_dir in sorted(res_dir.iterdir()):
         if not aoa_dir.is_dir():
@@ -84,6 +89,8 @@ def _index_raw(res_dir: Path) -> dict[tuple, Path]:
         for f in sorted(aoa_dir.iterdir()):
             m = _FNAME_RE.search(f.name)
             if not m:
+                continue
+            if not (mach_min <= float(m.group(2)) <= mach_max):
                 continue
             key = (m.group(1), m.group(2))
             by_key.setdefault(key, {})[float(m.group(3))] = f
@@ -142,7 +149,7 @@ def _save_lr(out: Path, src: Path) -> None:
 
 
 def build_processed(layout: DataLayout, hr_res='h0.025', lr_res='h0.1', force=False,
-                    test_only=False):
+                    test_only=False, mach_min=0.70, mach_max=3.00):
     """Construction des stores traités, HR et LR séparés
 
     - Store HR partagé  : processed/{geom}_hr/{split}/        (écrit une fois par géométrie)
@@ -150,9 +157,10 @@ def build_processed(layout: DataLayout, hr_res='h0.025', lr_res='h0.1', force=Fa
 
     Split déterministe 80/10/10 calculé sur l'ensemble des cas HR.
     test_only=True : tous les cas dans le split 'test' (géométrie OOD d'évaluation).
+    Seuls les cas de Mach dans [mach_min, mach_max] sont retenus.
     """
-    hr_files = _index_raw(layout.raw_dir / hr_res)
-    lr_files = _index_raw(layout.raw_dir / lr_res)
+    hr_files = _index_raw(layout.raw_dir / hr_res, mach_min, mach_max)
+    lr_files = _index_raw(layout.raw_dir / lr_res, mach_min, mach_max)
 
     if test_only:
         key2split = {k: 'test' for k in hr_files}
@@ -170,9 +178,10 @@ def build_processed(layout: DataLayout, hr_res='h0.025', lr_res='h0.1', force=Fa
     _write_store(layout.proc_dir(), paired, key2split, _save_lr, force, kind='LR')
 
 
-def build_hr_only(layout: DataLayout, hr_res='h0.025', force=False):
+def build_hr_only(layout: DataLayout, hr_res='h0.025', force=False,
+                  mach_min=0.70, mach_max=3.00):
     """Store HR seul, tous les cas dans le split 'test' (si aucun LR dispo)"""
-    hr_files = _index_raw(layout.raw_dir / hr_res)
+    hr_files = _index_raw(layout.raw_dir / hr_res, mach_min, mach_max)
     key2split = {k: 'test' for k in hr_files}
     _write_store(layout.hr_proc_dir, hr_files, key2split, _save_hr, force,
                  kind='HR (test-only)')
@@ -194,6 +203,10 @@ def main():
                         help="Géométrie sans LR : construit uniquement le store HR (split test).")
     parser.add_argument('--test_only', action='store_true',
                         help="Géométrie OOD : HR+LR avec tous les cas dans le split test (pas de train/val).")
+    parser.add_argument('--mach_min', type=float, default=0.70,
+                        help="Borne inférieure de la plage Mach retenue (défaut 0.70).")
+    parser.add_argument('--mach_max', type=float, default=3.00,
+                        help="Borne supérieure de la plage Mach retenue (défaut 3.00).")
     args = parser.parse_args()
 
     # Layout global pour la géométrie et les résolutions
@@ -210,7 +223,8 @@ def main():
     if args.hr_only:
         print(f"  HR={hr_str}  (mode HR-only, pas de LR)\n")
         print("Construction du store HR (test-only)...")
-        build_hr_only(layout, hr_res=hr_str, force=args.force)
+        build_hr_only(layout, hr_res=hr_str, force=args.force,
+                      mach_min=args.mach_min, mach_max=args.mach_max)
         # Graphe HR seul (utile pour viz / recompute de gradients)
         mesh_hr = load_mesh(layout.mesh_path(args.hr_res))
         layout.graphs_dir.mkdir(parents=True, exist_ok=True)
@@ -226,9 +240,11 @@ def main():
     mode = "  (test-only OOD)" if args.test_only else ""
     print(f"  HR={hr_str}  LR={lr_str}{mode}\n")
 
+    print(f"  Plage Mach retenue : [{args.mach_min}, {args.mach_max}]")
     print("Construction du dataset traité...")
     build_processed(layout, hr_res=hr_str, lr_res=lr_str, force=args.force,
-                    test_only=args.test_only)
+                    test_only=args.test_only,
+                    mach_min=args.mach_min, mach_max=args.mach_max)
 
     mesh_hr = load_mesh(layout.mesh_path(args.hr_res))
     mesh_lr = load_mesh(layout.mesh_path(args.lr_res))
