@@ -89,6 +89,13 @@ class SIAM(SRModel):
         self._path = flow.get('path', 'linear')
         self._gamma_env = flow.get('gamma', 'sin')
 
+        # Echelle du bruit du pont PAR CANAL
+        #   ODE (learn_score=False) : echelle estimee EN LIGNE sur le residu du batch
+        #   SDE (learn_score=True)  : buffer global fige une fois dans _pre_fit, pour
+        #     la coherence entrainement / echantillonnage du score.
+        self.per_channel_noise = bool(flow.get('per_channel_noise', True))
+        self.noise_scale = Buffer(jnp.ones((4,), jnp.float32))
+
         # Distribution d'echantillonnage de t a l'entrainement
         self._t_dist = flow.get('t_dist', 'uniform')
         self._sigma_t = float(flow.get('sigma_t', 1.0))
@@ -161,7 +168,8 @@ class SIAM(SRModel):
             b_uncond = self.velocity(x_t, t, ctx, knn, scal=jnp.zeros_like(ctx['scal']))
             b = b_uncond + self.cfg_scale * (b_cond - b_uncond)
         _, _, _, _, gamma, _ = self._interp_coeffs(t)
-        s = -eta / jnp.clip(gamma, 1e-4, None)
+        ns = self._noise_scale()                 # buffer global (echelle de bruit par canal)
+        s = -eta / jnp.clip(gamma * ns, 1e-4, None)
         return b, s
 
     def _interp_coeffs(self, t: jax.Array) -> tuple[jax.Array, ...]:
@@ -193,6 +201,14 @@ class SIAM(SRModel):
             return jax.random.beta(key, self._t_alpha, self._t_beta)
         return jax.random.uniform(key)
     
+    def _noise_scale(self, x1: jax.Array | None = None) -> jax.Array:
+        """Echelle du bruit du pont par canal, en row vector [1, 4]."""
+        if not self.per_channel_noise:
+            return jnp.ones((1, 4), jnp.float32)
+        if self.learn_score or x1 is None:
+            return self.noise_scale.value[None, :]
+        return jax.lax.stop_gradient(jnp.std(x1, axis=0, keepdims=True) + 1e-6)
+
     def _project(self, field: jax.Array) -> jax.Array:
         """Projection dure de positivite (rho, p >= eps) en unites physiques."""
         prim = field * self.sig_train.value + self.mu_train.value
@@ -227,7 +243,7 @@ class SIAM(SRModel):
             t1 = k * dt
             b, s = self._drift_score(x, t1, ctx, knn)
             _, _, _, _, gamma, _ = self._interp_coeffs(t1)
-            eps = self._eps(t1, gamma)
+            eps = self._eps(t1, gamma * self._noise_scale())  # coeff diffusion par canal
             xi = jax.random.normal(ksub, x.shape)
             x = x + dt * (b + eps * s) + jnp.sqrt(2.0 * eps) * sqrt_dt * xi
             return key, x
@@ -262,14 +278,40 @@ class SIAM(SRModel):
     def load_knn(cls, layout: DataLayout, cfg: dict | None = None) -> dict:
         return load_hierarchical_knn(layout, cls.DEFAULT_LEVELS, cfg, tag='FM')
 
+    def _branch_res_std(self, ds_b, knn_b) -> np.ndarray:
+        """Std par canal du residu HR - IDW(LR) sur un sous-echantillon de la branche."""
+        w0 = np.asarray(knn_b['fm']['cond'][0]['w'])
+        i0 = np.asarray(knn_b['fm']['cond'][0]['idx'])
+        n = len(ds_b)
+        sub = np.unique(np.linspace(0, n - 1, min(256, n)).astype(int))
+        acc = []
+        for i in sub:
+            _, lr, tg, *_ = ds_b[int(i)]
+            lr, tg = np.asarray(lr), np.asarray(tg)
+            baseline = (w0[:, :, None] * lr[:, :4][i0]).sum(axis=1)
+            acc.append(tg - baseline if self.use_residual else tg)
+        return np.maximum(np.concatenate(acc, 0).std(0), 1e-6)
+
     def _pre_fit(self, branch_pairs: list, cfg) -> None:
-        """Memorise les stats de la geometrie primaire (denorm pour la positivite)."""
-        ds0, _ = branch_pairs[0]
+        """Memorise les stats de la geometrie primaire (denorm pour la positivite).
+        En mode SDE (learn_score), calibre aussi une fois l'echelle de bruit par canal."""
+        ds0, knn0 = branch_pairs[0]
         self.mu_train.value = jnp.array(ds0.mu, jnp.float32)
         self.sig_train.value = jnp.array(ds0.sig, jnp.float32)
+
+        # Buffer global d'echelle de bruit : requis seulement par l'echantillonnage SDE
+        if self.per_channel_noise and self.learn_score:
+            res_std = self._branch_res_std(ds0, knn0)
+            self.noise_scale.value = jnp.array(res_std, jnp.float32)
+            print("  noise_scale (SDE, std residuel par canal) : "
+                  + "  ".join(f"{v}={res_std[i]:.4f}"
+                              for i, v in enumerate(('rho', 'u', 'v', 'p'))))
+
         mode = "residu IDW + delta" if self.use_residual else "champ"
+        ns_mode = ("off" if not self.per_channel_noise
+                   else ("buffer/SDE" if self.learn_score else "en ligne/ODE"))
         print(f"  SIAM pont LR IDW -> HR  (path={self._path}, gamma={self._gamma_env}, "
-              f"sigma={self.sigma_bridge}, mode={mode})")
+              f"sigma={self.sigma_bridge}, noise_scale={ns_mode}, mode={mode})")
 
     def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array, wt: jax.Array,
                      gp: jax.Array, knn_g: dict, key: jax.Array, aux: dict) -> jax.Array:
@@ -284,9 +326,10 @@ class SIAM(SRModel):
         kt, kz, kcfg = jax.random.split(key, 3)
         t = self._sample_t(kt)
         z = jax.random.normal(kz, x1.shape)
+        ns = self._noise_scale(x1)               # [1, 4] : echelle du bruit par canal
         alpha, dalpha, beta, dbeta, gamma, dgamma = self._interp_coeffs(t)
-        x_t = alpha * x0 + beta * x1 + gamma * z
-        drift_target = dalpha * x0 + dbeta * x1 + dgamma * z
+        x_t = alpha * x0 + beta * x1 + gamma * (ns * z)
+        drift_target = dalpha * x0 + dbeta * x1 + dgamma * (ns * z)
 
         # Dropout de conditionnement (classifier-free guidance), branche compilee une fois
         if self.cfg_prob > 0:
