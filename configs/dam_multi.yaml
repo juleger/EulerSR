@@ -20,19 +20,30 @@ architecture:
   use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
   use_geom_cond: false    # embedding de geometrie ; false pour le zero-shot sur geometrie inconnue
-  n_geoms: 2              # nombre de geometries distinctes
+  n_geoms: 4              # nombre de geometries distinctes
 
 # Entrainement multi-branche : une branche = (geometrie, resolution LR).
 # weight = proportion d'echantillonnage de la branche (somme normalisee).
+# rae2822 et oneraD exclus (reserves a l'evaluation OOD geometrique).
 datasets:
   - name: diamond
-    lr_res:         [0.05, 0.1, 0.2]   # resolutions LR d'entree
-    weight:         [2,    2,   2]     # proportion d'echantillonnage par resolution
-    train_fraction: [1.0,  1.0, 1.0]   # fraction des donnees utilisee par branche
+    lr_res:         [0.05, 0.1, 0.2]
+    weight:         [1,    2,   2]
+    train_fraction: [1.0,  1.0, 1.0]
 
   - name: naca0012
     lr_res:         [0.1, 0.2]
-    weight:         [3,   3]
+    weight:         [2,   2]
+    train_fraction: [1.0, 1.0]
+
+  - name: naca2412
+    lr_res:         [0.1, 0.2]
+    weight:         [2,   2]
+    train_fraction: [1.0, 1.0]
+
+  - name: oa209
+    lr_res:         [0.1, 0.2]
+    weight:         [2,   2]
     train_fraction: [1.0, 1.0]
 
 training:
@@ -48,7 +59,7 @@ training:
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 16
+  batch_size: 32
   ema_decay: 0.999
   train_fraction: 1.0
   preload: true

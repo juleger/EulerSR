@@ -9,7 +9,7 @@ resolution:
 architecture:
   levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
   embed_dim: 96
-  cond_dim: 128           # dimension du vecteur de conditionnement
+  cond_dim: 96            # dimension du vecteur de conditionnement
   t_dim: 64               # dimension de l'embedding du temps de pont
   n_heads: 3
   n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
@@ -37,6 +37,16 @@ flow:
   use_residual: true      # residu type DAM : sortie = IDW + delta
   cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement (0 = desactive)
   cfg_scale: 1.0          # echelle de guidance a l'inference (1 = desactive)
+  # Echantillonnage SDE (interpolant stochastique) : PF-ODE deterministe ('ode') par defaut.
+  # 'sde' genere un ensemble de champs HR (moyenne + incertitude) via le score
+  # s = -eta/(gamma*noise_scale), appris par une tete denoiser. Requiert learn_score + sigma_bridge>0.
+  sampler: ode            # ode (deterministe) | sde (ensemble score-based, Euler-Maruyama)
+  learn_score: false      # tete denoiser eta=E[z|x_t] (canaux 4:8) ; requis pour sde
+  lambda_score: 1.0       # poids de la perte de denoising ||eta - z||^2
+  eps_schedule: gamma     # coeff de diffusion eps(t) : gamma (eps0*gamma) | const | linear
+  eps0: 1.0               # echelle de eps(t)
+  n_sde_steps: 32         # pas d'integration Euler-Maruyama
+  # Preset SDE : sampler=sde, learn_score=true, sigma_bridge>=0.1, n_samples=16 (taille d'ensemble)
 
 training:
   epochs: 200
@@ -51,7 +61,7 @@ training:
   warmup_epochs: 20
   grad_clip: 5.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 16
+  batch_size: 32
   ema_decay: 0.9995
   train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
   preload: true

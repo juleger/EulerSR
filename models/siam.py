@@ -37,7 +37,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from models.base import SRModel, Buffer
 from utils.layout import DataLayout
-from models.dam import AMNet, build_context, load_hierarchical_knn
+from models.dam import AMNet, build_context, load_hierarchical_knn, _LR_REF
 
 
 class SIAM(SRModel):
@@ -93,8 +93,10 @@ class SIAM(SRModel):
         #   ODE (learn_score=False) : echelle estimee EN LIGNE sur le residu du batch
         #   SDE (learn_score=True)  : buffer global fige une fois dans _pre_fit, pour
         #     la coherence entrainement / echantillonnage du score.
+
         self.per_channel_noise = bool(flow.get('per_channel_noise', True))
         self.noise_scale = Buffer(jnp.ones((4,), jnp.float32))
+        self._nominal_lr = float((cfg.get('resolution') or {}).get('lr', _LR_REF))
 
         # Distribution d'echantillonnage de t a l'entrainement
         self._t_dist = flow.get('t_dist', 'uniform')
@@ -168,8 +170,8 @@ class SIAM(SRModel):
             b_uncond = self.velocity(x_t, t, ctx, knn, scal=jnp.zeros_like(ctx['scal']))
             b = b_uncond + self.cfg_scale * (b_cond - b_uncond)
         _, _, _, _, gamma, _ = self._interp_coeffs(t)
-        ns = self._noise_scale()                 # buffer global (echelle de bruit par canal)
-        s = -eta / jnp.clip(gamma * ns, 1e-4, None)
+        # residu normalise : bruit du pont unitaire -> score s = -eta/gamma
+        s = -eta / jnp.clip(gamma, 1e-4, None)
         return b, s
 
     def _interp_coeffs(self, t: jax.Array) -> tuple[jax.Array, ...]:
@@ -204,13 +206,21 @@ class SIAM(SRModel):
             return jax.random.beta(key, self._t_alpha, self._t_beta)
         return jax.random.uniform(key)
     
-    def _noise_scale(self, x1: jax.Array | None = None) -> jax.Array:
-        """Echelle du bruit du pont par canal, en row vector [1, 4]."""
-        if not self.per_channel_noise:
-            return jnp.ones((1, 4), jnp.float32)
-        if self.learn_score or x1 is None:
-            return self.noise_scale.value[None, :]
-        return jax.lax.stop_gradient(jnp.std(x1, axis=0, keepdims=True) + 1e-6)
+    def _res_scale(self, knn: dict | None = None) -> jax.Array:
+        """Echelle par canal du residu HR-IDW (std), qui normalise le pont"""
+        if knn is not None:
+            rs = knn.get('res_scale')
+            if rs is not None:
+                return jnp.asarray(rs)[None, :]
+        return self.noise_scale.value[None, :]
+
+    @staticmethod
+    def _branch_lr(knn_b) -> float:
+        """Resolution LR d'une branche, retrouvee depuis res_scalar = log(lr/_LR_REF)."""
+        rsc = knn_b.get('res_scalar')
+        if rsc is None:
+            return _LR_REF
+        return float(_LR_REF * np.exp(float(np.asarray(rsc).reshape(-1)[0])))
 
     def _project(self, field: jax.Array) -> jax.Array:
         """Projection dure de positivite (rho, p >= eps) en unites physiques."""
@@ -220,18 +230,20 @@ class SIAM(SRModel):
         return (prim - self.mu_train.value) / self.sig_train.value
 
     def _integrate(self, ctx: dict, knn: dict) -> jax.Array:
-        """Integre le pont (t=0) -> (t=1) par la PF-ODE (Heun)."""
+        """Integre le pont (t=0) -> (t=1) par la PF-ODE (Heun)"""
         dt = 1.0 / self.n_steps
+        rs = self._res_scale(knn)
+        vscale = 1.0 if self.use_residual else rs
 
         def body(k, x):
             t1 = k * dt
-            v1 = self._guided_velocity(x, t1, ctx, knn)
-            v2 = self._guided_velocity(x + dt * v1, t1 + dt, ctx, knn)
+            v1 = self._guided_velocity(x, t1, ctx, knn) * vscale
+            v2 = self._guided_velocity(x + dt * v1, t1 + dt, ctx, knn) * vscale
             return x + 0.5 * dt * (v1 + v2)
 
         x0 = jnp.zeros_like(ctx['baseline']) if self.use_residual else ctx['baseline']
         x1 = jax.lax.fori_loop(0, self.n_steps, body, x0)
-        field = ctx['baseline'] + x1 if self.use_residual else x1
+        field = ctx['baseline'] + x1 * rs if self.use_residual else x1
         return self._project(field)
 
     def _integrate_sde(self, ctx: dict, knn: dict, key: jax.Array) -> jax.Array:
@@ -240,20 +252,25 @@ class SIAM(SRModel):
         dt = 1.0 / self.n_sde_steps
         sqrt_dt = jnp.sqrt(dt)
 
+        rs = self._res_scale(knn)
+        vscale = 1.0 if self.use_residual else rs   # increment normalise -> unites champ
+
         def body(k, carry):
             key, x = carry
             key, ksub = jax.random.split(key)
             t1 = k * dt
-            b, s = self._drift_score(x, t1, ctx, knn)
+            b, s = self._drift_score(x, t1, ctx, knn)   # normalise par canal
             _, _, _, _, gamma, _ = self._interp_coeffs(t1)
-            eps = self._eps(t1, gamma * self._noise_scale())  # coeff diffusion par canal
+            eps = self._eps(t1, gamma)             # residu normalise : diffusion unitaire
             xi = jax.random.normal(ksub, x.shape)
-            x = x + dt * (b + eps * s) + jnp.sqrt(2.0 * eps) * sqrt_dt * xi
+            dx = dt * (b + eps * s) + jnp.sqrt(2.0 * eps) * sqrt_dt * xi
+            x = x + dx * vscale
             return key, x
 
         x0 = jnp.zeros_like(ctx['baseline']) if self.use_residual else ctx['baseline']
         _, x1 = jax.lax.fori_loop(0, self.n_sde_steps, body, (key, x0))
-        field = ctx['baseline'] + x1 if self.use_residual else x1
+        # mode residu : denormalisation finale ; mode champ : x1 est deja le champ HR
+        field = ctx['baseline'] + x1 * rs if self.use_residual else x1
         return self._project(field)
 
     def sample(self, hr_feat: jax.Array, lr_feat: jax.Array, knn: dict,
@@ -296,43 +313,56 @@ class SIAM(SRModel):
         return np.maximum(np.concatenate(acc, 0).std(0), 1e-6)
 
     def _pre_fit(self, branch_pairs: list, cfg) -> None:
-        """Memorise les stats de la geometrie primaire (denorm pour la positivite).
-        En mode SDE (learn_score), calibre aussi une fois l'echelle de bruit par canal."""
+        """Memorise les stats de la geometrie primaire (denorm pour la positivite) et calibre
+        l'echelle par canal du residu (res_scale)"""
         ds0, knn0 = branch_pairs[0]
         self.mu_train.value = jnp.array(ds0.mu, jnp.float32)
         self.sig_train.value = jnp.array(ds0.sig, jnp.float32)
 
-        # Buffer global d'echelle de bruit : requis seulement par l'echantillonnage SDE
-        if self.per_channel_noise and self.learn_score:
-            res_std = self._branch_res_std(ds0, knn0)
-            self.noise_scale.value = jnp.array(res_std, jnp.float32)
-            print("  noise_scale (SDE, std residuel par canal) : "
+        multi = len(branch_pairs) > 1
+        best_i, best_gap = 0, float('inf')
+        for bi, (ds_b, knn_b) in enumerate(branch_pairs):
+            res_std = self._branch_res_std(ds_b, knn_b)
+            knn_b['res_scale'] = jnp.array(res_std, jnp.float32)
+            lr_b = self._branch_lr(knn_b)
+            gap = abs(lr_b - self._nominal_lr)
+            if gap < best_gap:
+                best_gap, best_i = gap, bi
+            tag = f" [lr={lr_b:g}]" if multi else ""
+            print(f"  res_scale{tag} (std residuel par canal) : "
                   + "  ".join(f"{v}={res_std[i]:.4f}"
                               for i, v in enumerate(('rho', 'u', 'v', 'p'))))
+        # Buffer global (fallback hors branche connue) = branche a la resolution nominale
+        self.noise_scale.value = jnp.array(branch_pairs[best_i][1]['res_scale'])
+        if multi:
+            print(f"  buffer res_scale : branche lr={self._branch_lr(branch_pairs[best_i][1]):g}"
+                  f"  (resolution nominale {self._nominal_lr:g})")
 
         mode = "residu IDW + delta" if self.use_residual else "champ"
-        ns_mode = ("off" if not self.per_channel_noise
-                   else ("buffer/SDE" if self.learn_score else "en ligne/ODE"))
-        print(f"  SIAM pont LR IDW -> HR  (path={self._path}, gamma={self._gamma_env}, "
-              f"sigma={self.sigma_bridge}, noise_scale={ns_mode}, mode={mode})")
+        print(f"  SIAM pont LR IDW -> HR normalise  (path={self._path}, gamma={self._gamma_env}, "
+              f"sigma={self.sigma_bridge}, mode={mode})")
 
     def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array, wt: jax.Array,
                      gp: jax.Array, knn_g: dict, key: jax.Array, aux: dict) -> jax.Array:
         """Loss du pont : b(x_t, t | cond) doit matcher la derive x1 - x0 (+ bruit)."""
         ctx = build_context(self, hr, lr, knn_g)
-        if self.use_residual:                    # coords residu (type DAM) : x0=0 -> x1=HR-IDW
-            x0 = jnp.zeros_like(ctx['baseline'])
-            x1 = tg - ctx['baseline']
-        else:                                    # coords champ : x0=IDW -> x1=HR
-            x0 = ctx['baseline']
-            x1 = tg
+        rs = self._res_scale(knn_g)              # [1, 4] : std residuel par canal (fixe)
         kt, kz, kcfg = jax.random.split(key, 3)
         t = self._sample_t(kt)
-        z = jax.random.normal(kz, x1.shape)
-        ns = self._noise_scale(x1)               # [1, 4] : echelle du bruit par canal
         alpha, dalpha, beta, dbeta, gamma, dgamma = self._interp_coeffs(t)
-        x_t = alpha * x0 + beta * x1 + gamma * (ns * z)
-        drift_target = dalpha * x0 + dbeta * x1 + dgamma * (ns * z)
+        z = jax.random.normal(kz, ctx['baseline'].shape)   # bruit unitaire
+        if self.use_residual:
+            # Pont en coords residu NORMALISE : x0=0 -> x1=(HR-IDW)/rs ; entree ET sortie O(1)
+            x0 = jnp.zeros_like(ctx['baseline'])
+            x1 = (tg - ctx['baseline']) / rs
+            x_t = alpha * x0 + beta * x1 + gamma * z
+            drift_target = dalpha * x0 + dbeta * x1 + dgamma * z    # deja normalise
+        else:
+            # Vrai pont en espace-CHAMP (IDW -> HR) : x0=IDW, x1=HR, entree O(1), sortie O(1)
+            x0 = ctx['baseline']
+            x1 = tg
+            x_t = alpha * x0 + beta * x1 + gamma * (rs * z)
+            drift_target = (dalpha * x0 + dbeta * x1 + dgamma * (rs * z)) / rs
 
         # Dropout de conditionnement (classifier-free guidance), branche compilee une fois
         if self.cfg_prob > 0:
@@ -352,7 +382,11 @@ class SIAM(SRModel):
         # Termes physiques : conservation de la masse et de l'energie (enthalpie)
         if aux['lambda_phys'] > 0 or aux['lambda_enthalpy'] > 0:
             det = alpha * dbeta - beta * dalpha
-            x1_hat = (alpha * v - dalpha * x_t) / det
-            field = ctx['baseline'] + x1_hat if self.use_residual else x1_hat
+            if self.use_residual:                # v = vitesse residu normalisee
+                x1_hat = (alpha * v - dalpha * x_t) / det
+                field = ctx['baseline'] + x1_hat * rs
+            else:                                # v normalisee -> vitesse champ = v*rs
+                x1_hat = (alpha * (v * rs) - dalpha * x_t) / det
+                field = x1_hat
             loss = loss + t * self._phys_terms(field, hr, gp, knn_g, aux)
         return loss

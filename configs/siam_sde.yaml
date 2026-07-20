@@ -1,5 +1,6 @@
 model: siam
 data_root: data/
+geometry: diamond
 
 resolution:
   hr: 0.025
@@ -20,8 +21,6 @@ architecture:
   k_cond: 6               # voisins kNN pour le conditionnement
   use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
-  use_geom_cond: false    # embedding de geometrie
-  n_geoms: 1              # nombre de geometries distinctes
 
 flow:
   n_steps: 16              # pas d'integration PF-ODE (pont court : peu de pas suffisent)
@@ -49,28 +48,20 @@ flow:
   n_sde_steps: 32         # pas d'integration Euler-Maruyama
   # Preset SDE : sampler=sde, learn_score=true, sigma_bridge>=0.1, n_samples=16 (taille d'ensemble)
 
-# Entrainement multi-branche : une branche = (geometrie, resolution LR).
-# weight = proportion d'echantillonnage de la branche (somme normalisee).
-datasets:
-  - name: diamond
-    lr_res:         [0.05, 0.1, 0.2]   # resolutions LR d'entree
-    weight:         [1,    1,   1]     # proportion d'echantillonnage par resolution
-    train_fraction: [1.0,  1.0, 1.0]   # fraction des donnees utilisee par branche
-
 training:
   epochs: 200
   lr: 5.0e-4
   weight_decay: 5.0e-4
-  val_every: 20
+  val_every: 10
   seed: 42
   loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, sliced_wasserstein
   shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
-  lambda_enthalpy: 0.0           # physique a l'entrainement (ponderee par t) ; 0 = desactive
+  lambda_enthalpy: 0.00           # physique a l'entrainement (ponderee par t) ; 0 = desactive
   schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
   grad_clip: 5.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
   batch_size: 32
   ema_decay: 0.9995
-  train_fraction: 1.0
+  train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
   preload: true

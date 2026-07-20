@@ -46,7 +46,7 @@ training:
   warmup_epochs: 20
   grad_clip: 4.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 16
+  batch_size: 32
   ema_decay: 0.9995
   train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
   preload: true
