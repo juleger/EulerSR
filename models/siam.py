@@ -309,7 +309,7 @@ class SIAM(SRModel):
             _, lr, tg, *_ = ds_b[int(i)]
             lr, tg = np.asarray(lr), np.asarray(tg)
             baseline = (w0[:, :, None] * lr[:, :4][i0]).sum(axis=1)
-            acc.append(tg - baseline if self.use_residual else tg)
+            acc.append(tg - baseline)
         return np.maximum(np.concatenate(acc, 0).std(0), 1e-6)
 
     def _pre_fit(self, branch_pairs: list, cfg) -> None:
