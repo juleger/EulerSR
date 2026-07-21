@@ -1,5 +1,6 @@
 """TestSet : géométrie + résolution + cas d'évaluation, avec KNN adaptatif."""
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,16 @@ _OOD_LABELS = {
     'geo_ood': 'OOD géométrique',
     'full_ood': 'OOD géo+résolution',
 }
+
+# Un tag de test peut dériver d'une géométrie d'entraînement avec un maillage
+# HR/LR différent (ex. 'diamond_sr175' HR fin 0.0175, 'diamond_lr3' LR grossier
+# 0.3). On compare sur la géométrie de BASE pour classer l'OOD en 'résolution' et
+# non en 'géométrique'. Suffixe = _<marqueur><chiffres> (sr/lr/hr/fine/coarse).
+_DERIVED_TAG_RE = re.compile(r'_(?:fine|coarse|sr|lr|hr|h)\d*$')
+
+
+def _base_geometry(geometry: str) -> str:
+    return _DERIVED_TAG_RE.sub('', geometry)
 
 def _find_ref_cases(layout: DataLayout, specs: list[tuple]) -> list[dict]:
     for split in ('test', 'val', 'train'):
@@ -55,14 +66,20 @@ def _find_test_cases(layout: DataLayout) -> list[dict]:
     return cases
 
 
-def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: dict) -> dict:
-    """KNN hiérarchique pour FAM/DAM sur une géométrie quelconque."""
+def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: dict,
+                            hr_res: float | None = None) -> dict:
+    """KNN hiérarchique pour FAM/DAM sur une géométrie quelconque.
+
+    hr_res : résolution HR cible de l'évaluation (peut différer de celle de
+    l'entraînement, ex. super-résolution vers un maillage plus fin en OOD).
+    """
     from utils.aero import wall_feature_array as _wfa
     from preprocessing.knn import build_hierarchy as _bh
 
     arch = (cfg or {}).get('architecture', {})
     res = (cfg or {}).get('resolution', {})
-    hr_res = res.get('hr', 0.025)
+    if hr_res is None:
+        hr_res = res.get('hr', 0.025)
     levels = list(arch.get('levels', [0.05, 0.1]))
     k_pool = arch.get('k_pool', 9)
     k_up = arch.get('k_up', 4)
@@ -132,8 +149,9 @@ class TestSet:
     def geom_id_for(self, entry: ModelEntry) -> int:
         """Indice de cette géométrie dans les datasets d'entraînement du modèle"""
         datasets = (entry.cfg or {}).get('datasets', [])
+        target = _base_geometry(self.geometry)
         for i, d in enumerate(datasets):
-            if d.get('name', '') == self.geometry:
+            if d.get('name', '') == target:
                 return i
         return 0
 
@@ -149,8 +167,13 @@ class TestSet:
             single = cfg.get('geometry', '')
             trained_geoms = {single} if single else set()
         trained_lr = cfg.get('resolution', {}).get('lr', 0.1)
-        same_geom = not trained_geoms or self.geometry in trained_geoms
-        same_res = abs(trained_lr - self.lr_res) < 1e-6
+        trained_hr = cfg.get('resolution', {}).get('hr', 0.025)
+        # Compare sur la géométrie de base : 'diamond_fine' dérive de 'diamond'.
+        same_geom = not trained_geoms or _base_geometry(self.geometry) in trained_geoms
+        # OOD résolution : soit la résolution LR d'entrée, soit la résolution HR
+        # cible (ex. super-résolution vers un maillage plus fin que l'entraînement).
+        same_res = (abs(trained_lr - self.lr_res) < 1e-6
+                    and abs(trained_hr - self.hr_res) < 1e-6)
         if same_geom and same_res: return 'indistrib'
         if same_geom: return 'res_ood'
         if same_res: return 'geo_ood'
@@ -238,18 +261,21 @@ class TestSet:
         arch = (entry.cfg or {}).get('architecture', {})
         res = (entry.cfg or {}).get('resolution', {})
         levels = list(arch.get('levels', type(entry.model).DEFAULT_LEVELS))
-        hr_res = res.get('hr', 0.025)
+        trained_hr = res.get('hr', 0.025)
+        same_hr = abs(trained_hr - self.hr_res) < 1e-6
 
-        # Même géométrie, lr_res différent → reconstruire uniquement la partie cond
-        if entry.layout is not None and entry.layout.geometry == self.geometry:
+        # Même géométrie ET même HR cible, seul le LR change → reconstruire
+        # uniquement la partie cond (la hiérarchie HR self/down/up est inchangée).
+        if entry.layout is not None and entry.layout.geometry == self.geometry and same_hr:
             mesh_lr = np.load(self.layout.mesh_path(self.lr_res), allow_pickle=True).item()
             lr_pos = np.asarray(mesh_lr.barycenter, dtype=np.float64)
             return rebuild_fm_cond(entry.knn, lr_pos, self.layout, entry.cfg)
 
-        # Géométrie différente → reconstruction hiérarchique complète
-        needed = levels + [hr_res, self.lr_res]
+        # Géométrie différente OU HR cible différente (ex. maillage plus fin) →
+        # reconstruction hiérarchique complète sur le maillage HR d'évaluation.
+        needed = levels + [self.hr_res, self.lr_res]
         mesh_paths = {r: self.layout.mesh_path(r) for r in needed}
-        return _build_hierarchical_knn(mesh_paths, self.lr_res, entry.cfg)
+        return _build_hierarchical_knn(mesh_paths, self.lr_res, entry.cfg, hr_res=self.hr_res)
 
     @classmethod
     def from_dir(cls, data_root: str | Path, geometry: str,

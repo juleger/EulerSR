@@ -17,8 +17,8 @@ from eval.core import (mesh_geom_from_case, build_hr_feat, build_lr_feat, build_
 from utils.refs import to_mach
 from utils.metrics import (compute_field_errors, l2_rel, aero_metrics,
                             enthalpy_rms, entropy_violation, fvm_euler_rms,
-                            idw_weights)
-from utils.aero import aero_coeffs
+                            fvm_euler_step_rms, idw_weights)
+from utils.aero import aero_coeffs, cp_field
 from utils.gt_cache import load_or_build_gt_cache
 from utils.layout import load_sample
 
@@ -110,7 +110,8 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
         mu_gt = ts.stats['mu'].astype(np.float64)
         gt_cache = load_or_build_gt_cache(ts.layout, cases, ts.wc,
                                           mesh=mesh_hr, mu=mu_gt)
-        sweep_results = _run_sweep(models, ts, knn_map, cases, gt_cache, batch_size, idw_knn)
+        sweep_results = _run_sweep(models, ts, knn_map, cases, gt_cache, batch_size,
+                                   idw_knn, mesh_hr=mesh_hr)
         sweep_results['_ts_label'] = ts_label
         _plot_sweep(sweep_results, cases, ts, out)
         _save_summary_csv(ref_results, sweep_results, out / 'summary.csv')
@@ -235,7 +236,7 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
 def _run_sweep(models: list[ModelEntry], ts: TestSet,
                knn_map: dict[str, dict], cases: list[dict],
                gt_cache: dict | None, batch_size: int,
-               idw_knn: dict | None = None) -> dict:
+               idw_knn: dict | None = None, mesh_hr=None) -> dict:
     """Inférence batch + métriques sur le test set complet."""
     wc = ts.wc
     mu = ts.stats['mu'].astype(np.float32)
@@ -249,18 +250,19 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         nm: {'times': [], 'CL': [], 'CD': [], 'grad_p_max': [],
              'mach_max': [], 'mach_min': [], 'l2_mach': [], 'linf_mach': [],
              'l2w_mach': [], 'sw2_mach': [], 'l2_prims': [], 'linf_prims': [],
-             'wall_mach': [], 'has_ref': [], 'enthalpy': [], 'entropy': [],
-             'euler_fvm': []}
+             'wall_mach': [], 'wall_cp': [], 'has_ref': [], 'enthalpy': [],
+             'entropy': [], 'euler_fvm': [], 'euler_step': []}
         for nm in method_names
     }
     results['HR'] = {'CL': [], 'CD': [], 'grad_p_max': [],
-                     'mach_max': [], 'mach_min': [], 'wall_mach': [],
-                     'enthalpy_hr': [], 'entropy_hr': [], 'euler_fvm_hr': []}
+                     'mach_max': [], 'mach_min': [], 'wall_mach': [], 'wall_cp': [],
+                     'enthalpy_hr': [], 'entropy_hr': [], 'euler_fvm_hr': [],
+                     'euler_step_hr': []}
 
-    _knn_mesh = next((knn_map[m.name] for m in det_models
-                      if knn_map.get(m.name) and 'mesh' in knn_map[m.name]), None)
-    _has_mesh = _knn_mesh is not None
-    _mesh_obj = _knn_mesh['mesh'] if _has_mesh else None
+    # Mesh HR pour le résidu Euler FVM exact (opérateur du solveur). Fourni par
+    # evaluate() ; sans lui le résidu PDE n'est pas calculable (NaN).
+    _mesh_obj = mesh_hr
+    _has_mesh = mesh_hr is not None
 
     print(f"  Chargement parallèle de {n} fichiers...")
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -334,10 +336,13 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         r['grad_p_max'].append(ac['grad_p_max'])
         r['mach_max'].append(ac['mach_max']); r['mach_min'].append(ac['mach_min'])
         r['wall_mach'].append(ac['wall_mach'])
+        r['wall_cp'].append(ac['wall_cp'])
         r['enthalpy'].append(enthalpy_rms(prim, mach_in))
         r['entropy'].append(entropy_violation(prim))
         r['euler_fvm'].append(fvm_euler_rms(prim, _mesh_obj, mach_in, aoa_in, mu)
                               if _has_mesh else np.nan)
+        r['euler_step'].append(fvm_euler_step_rms(prim, _mesh_obj, mach_in, aoa_in)
+                               if _has_mesh else np.nan)
         if has_ref:
             er = compute_field_errors(prim, hr_prim, wc.cell_adj_edges, wc.bary, dxy_edges)
             r['l2_mach'].append(er['l2_mach'])
@@ -381,15 +386,31 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
                 gt['wall_mach'].append(ac['wall_mach'])
                 gt['enthalpy_hr'].append(enthalpy_rms(hr_prim, c['mach_in']))
                 gt['entropy_hr'].append(entropy_violation(hr_prim))
-            gt['euler_fvm_hr'].append(fvm_euler_rms(hr_prim, _mesh_obj, c['mach_in'], aoa_in, mu)
+            # Cp paroi GT (recalculé du champ HR : non sérialisé dans le cache)
+            gt['wall_cp'].append(
+                cp_field(hr_prim, c['mach_in'])[wc.unique_wall_cell_ids])
+            # Résidu Euler FVM du HR : priorité au cache (fvm_residual_hr), sinon live
+            fr = gc.get('fvm_residual_hr') if gc is not None else None
+            if fr is not None and np.isfinite(fr[i]):
+                gt['euler_fvm_hr'].append(float(fr[i]))
+            elif _has_mesh:
+                gt['euler_fvm_hr'].append(
+                    fvm_euler_rms(hr_prim, _mesh_obj, c['mach_in'], aoa_in, mu))
+            else:
+                gt['euler_fvm_hr'].append(np.nan)
+            # Résidu de stationnarité (incrément relatif d'un pas) : toujours live.
+            gt['euler_step_hr'].append(
+                fvm_euler_step_rms(hr_prim, _mesh_obj, c['mach_in'], aoa_in)
                 if _has_mesh else np.nan)
         else:
             for k2 in ('CL', 'CD', 'grad_p_max', 'mach_max', 'mach_min'):
                 gt[k2].append(None)
             gt['wall_mach'].append(np.array([], dtype=np.float32))
+            gt['wall_cp'].append(np.array([], dtype=np.float32))
             gt['enthalpy_hr'].append(np.nan)
             gt['entropy_hr'].append(np.nan)
             gt['euler_fvm_hr'].append(np.nan)
+            gt['euler_step_hr'].append(np.nan)
 
         if idw_knn is not None:
             _fill('LR IDW', idw_preds[i], idw_t_ms_per_case,
@@ -404,25 +425,26 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         if not isinstance(r, dict):
             continue
         for k2 in list(r.keys()):
-            if isinstance(r[k2], list) and k2 not in ('l2_prims', 'linf_prims', 'wall_mach'):
+            if isinstance(r[k2], list) and k2 not in ('l2_prims', 'linf_prims', 'wall_mach', 'wall_cp'):
                 r[k2] = np.array([v if v is not None else np.nan for v in r[k2]], dtype=float)
 
     # Erreurs aéro vs GT
     gt_CL = results['HR']['CL']
     gt_CD = results['HR']['CD']
-    gt_wall_mach = results['HR']['wall_mach']
+    gt_wall_cp = results['HR']['wall_cp']
     for nm in method_names:
         r = results[nm]
         r['CL_err'] = np.abs(r['CL'] - gt_CL)
         r['CD_err'] = np.abs(r['CD'] - gt_CD)
-        wall_mach_l2 = []
-        for wm_p, wm_r in zip(r['wall_mach'], gt_wall_mach):
-            if len(wm_p) > 0 and len(wm_r) > 0:
-                wall_mach_l2.append(float(
-                    np.linalg.norm(wm_p - wm_r) / (np.linalg.norm(wm_r) + 1e-8)))
+        # Erreur L2 relative du profil de Cp en paroi (remplace le Mach paroi)
+        wall_cp_l2 = []
+        for cp_p, cp_r in zip(r['wall_cp'], gt_wall_cp):
+            if len(cp_p) > 0 and len(cp_r) > 0:
+                wall_cp_l2.append(float(
+                    np.linalg.norm(cp_p - cp_r) / (np.linalg.norm(cp_r) + 1e-8)))
             else:
-                wall_mach_l2.append(np.nan)
-        r['wall_mach_l2'] = np.array(wall_mach_l2, dtype=float)
+                wall_cp_l2.append(np.nan)
+        r['wall_cp_l2'] = np.array(wall_cp_l2, dtype=float)
 
     results['_cases'] = cases
     results['_name_map'] = {'LR IDW': 'LR IDW'}
@@ -474,6 +496,7 @@ def _print_phys_table(results: dict, method_names: list[str], has_mesh: bool):
     _cols = []
     if has_mesh:
         _cols.append(('Euler FVM (RMS)', 'euler_fvm', 'euler_fvm_hr'))
+        _cols.append(('Résidu Δt (rel)', 'euler_step', 'euler_step_hr'))
     _cols += [('Enthalpie (RMS)', 'enthalpy', 'enthalpy_hr'),
               ('Entropie (RMS)', 'entropy', 'entropy_hr')]
     print("\n  ── Résidus physiques (test set) " + "─" * 28)

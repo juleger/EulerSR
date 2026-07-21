@@ -164,6 +164,34 @@ def fvm_euler_rms(prim_phys: np.ndarray, mesh, mach_in: float, aoa_deg: float,
     return float(np.sqrt((resn ** 2).mean()))
 
 
+def fvm_euler_step_rms(prim_phys: np.ndarray, mesh, mach_in: float, aoa_deg: float,
+                       gamma: float = 1.4, cfl: float = 0.5,
+                       reconstruction: str = 'muscl', flux: str = 'hllc') -> float:
+    """Résidu de stationnarité = incrément relatif d'UN pas de solveur explicite."""
+    import sys
+    from pathlib import Path
+    _root = str(Path(__file__).resolve().parents[1])
+    for d in (_root + '/euler', _root):
+        if d not in sys.path:
+            sys.path.insert(0, d)
+    import jax.numpy as jnp
+    from jax_fvm.src.helper import getConserved, get_dt
+    from jax_fvm.src.euler_solver import time_step_Euler
+
+    W = getConserved(jnp.array(prim_phys, dtype=jnp.float32), gamma=gamma, M=1.0)
+    c_inf = float(np.sqrt(gamma))
+    aoa_rad = float(np.deg2rad(aoa_deg))
+    prim_inf = jnp.array([1.0, mach_in * c_inf * np.cos(aoa_rad),
+                           mach_in * c_inf * np.sin(aoa_rad), 1.0])
+    inlet = getConserved(prim_inf[None], gamma=gamma, M=1.0)[0]
+
+    dt = get_dt(W, mesh, CFL=cfl, gamma=gamma, M=1.0)
+    W1 = time_step_Euler(W, mesh, dt, gamma=gamma, M=1.0,
+                         reconstruction=reconstruction, flux=flux,
+                         value=inlet, entropy=False)
+    return float(jnp.linalg.norm(W1 - W) / (jnp.linalg.norm(W) + 1e-16))
+
+
 def entropy_violation(prim: np.ndarray, gamma: float = 1.4) -> float:
     # RMS de s < s_inf
     s = prim[:, 3] / np.maximum(prim[:, 0], 1e-12) ** gamma

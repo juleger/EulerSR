@@ -258,7 +258,7 @@ def _wall_profile_eval(vals_at_cells, wc, n_pts=150):
 
 
 def plot_wall_profiles_eval(results: dict, wc, out_dir):
-    from utils.refs import to_mach as _to_mach
+    from utils.aero import cp_field as _cp_field
 
     cases = results['cases']
     n_cases = len(cases)
@@ -280,32 +280,31 @@ def plot_wall_profiles_eval(results: dict, wc, out_dir):
 
     for ri, c in enumerate(cases):
         ax = axes[ri]
+        mach_in = c['mach_in']
         hp = c.get('hr_prim')
         if hp is not None:
-            xu_m, mu = _wall_profile_eval(_to_mach(hp), wc)
-            ax.plot(xu_m, mu, _HR_LS, lw=_HR_LW, color=_HR_COLOR, label='HR',
+            xu_m, cpu = _wall_profile_eval(_cp_field(hp, mach_in), wc)
+            ax.plot(xu_m, cpu, _HR_LS, lw=_HR_LW, color=_HR_COLOR, label='HR',
                     alpha=_HR_ALPHA, zorder=1)
 
         for ci, row in enumerate(all_rows):
             pp = row.get('prim_preds', [])
             if ri >= len(pp) or pp[ri] is None:
                 continue
-            xu_m, mu = _wall_profile_eval(_to_mach(pp[ri]), wc)
-            ax.plot(xu_m, mu, '-', lw=1.8, zorder=2,
+            xu_m, cpu = _wall_profile_eval(_cp_field(pp[ri], mach_in), wc)
+            ax.plot(xu_m, cpu, '-', lw=1.8, zorder=2,
                     color=_METHOD_COLORS[ci % len(_METHOD_COLORS)],
                     label=_display_name(row['name']))
 
-        ylim = ax.get_ylim()
-        if ylim[0] <= 1.0 <= ylim[1]:
-            ax.axhline(1.0, color='gray', lw=0.8, ls=':', alpha=0.6)
-            ax.set_ylim(ylim)
-        ax.set_ylabel('Mach'); ax.grid(True, alpha=0.25)
+        ax.axhline(0.0, color='gray', lw=0.8, ls=':', alpha=0.6)
+        ax.invert_yaxis()  # convention aéro : -Cp vers le haut
+        ax.set_ylabel(r'$C_p$'); ax.grid(True, alpha=0.25)
         ax.legend(fontsize=9, loc='best', framealpha=0.9)
         ax.set_title(f"M = {c['mach_in']:.2f}    AoA = {c['aoa_in']:+.0f}°",
                      fontsize=10, fontweight='bold')
 
     axes[-1].set_xlabel('x')
-    fig.suptitle(_ts_suptitle('Mach local en paroi — face supérieure', results),
+    fig.suptitle(_ts_suptitle('Coefficient de pression $C_p$ en paroi — face supérieure', results),
                  fontsize=13, fontweight='bold')
     out_path = Path(out_dir) / 'wall_profiles.png'
     plt.savefig(out_path, dpi=_DPI, bbox_inches='tight')
@@ -667,14 +666,19 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
 
     has_aero = (dataset_results is not None and
                  any('CL_err' in dataset_results.get(nm, {}) for nm in methods))
-    has_mwall = (dataset_results is not None and
-                 any('wall_mach_l2' in dataset_results.get(nm, {}) for nm in methods))
+    has_cp = (dataset_results is not None and
+                 any('wall_cp_l2' in dataset_results.get(nm, {}) for nm in methods))
+    has_euler = (dataset_results is not None and
+                 any(np.isfinite(np.asarray(dataset_results.get(nm, {}).get('euler_fvm', [np.nan]),
+                                            dtype=float)).any() for nm in methods))
 
     col_labels = ['Méthode', r'$L_{2w}$', r'$SW_2$']
     if has_aero:
         col_labels += [r'$\Delta C_L$', r'$\Delta C_D$']
-    if has_mwall:
-        col_labels += [r'$M_{wall}$ L2']
+    if has_cp:
+        col_labels += [r'$C_p$ L2']
+    if has_euler:
+        col_labels += [r'Résidu Euler']
     col_labels += ['Temps/cas']
 
     rows = []
@@ -682,8 +686,10 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
         row = [nm, _get(nm, 'l2w_mach'), _get(nm, 'sw2_mach')]
         if has_aero:
             row += [_get(nm, 'CL_err'), _get(nm, 'CD_err')]
-        if has_mwall:
-            row += [_get(nm, 'wall_mach_l2')]
+        if has_cp:
+            row += [_get(nm, 'wall_cp_l2')]
+        if has_euler:
+            row += [_get(nm, 'euler_fvm')]
         row += [_get_time(nm)]
         rows.append(row)
 

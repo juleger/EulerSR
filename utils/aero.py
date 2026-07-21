@@ -77,8 +77,13 @@ def q_inf(mach_in: float) -> float:
     return 0.5 * _RHO_INF * (mach_in * c_inf) ** 2
 
 
+def cp_field(prim: np.ndarray, mach_in: float) -> np.ndarray:
+    """Coefficient de pression Cp = (p - p_inf) / q_inf, par cellule."""
+    return ((prim[:, 3] - _P_INF) / q_inf(mach_in)).astype(np.float32)
+
+
 def aero_coeffs(prim: np.ndarray, wc: WallCache, mach_in: float) -> dict:
-    # CL, CD, grad_p_max, Mach paroi depuis prim
+    # CL, CD, grad_p_max, Mach paroi, Cp paroi depuis prim
     qi = q_inf(mach_in)
 
     p_wall = prim[wc.wall_cell_ids, 3]
@@ -93,6 +98,7 @@ def aero_coeffs(prim: np.ndarray, wc: WallCache, mach_in: float) -> dict:
 
     mach = to_mach(prim)
     wall_mach = mach[wc.unique_wall_cell_ids]
+    wall_cp = ((prim[wc.unique_wall_cell_ids, 3] - _P_INF) / qi).astype(np.float32)
 
     return dict(
         CL=CL, CD=CD,
@@ -101,6 +107,7 @@ def aero_coeffs(prim: np.ndarray, wc: WallCache, mach_in: float) -> dict:
         mach_min=float(mach.min()),
         mach_mean=float(mach.mean()),
         wall_mach=wall_mach.astype(np.float32),
+        wall_cp=wall_cp,
     )
 
 
