@@ -1,4 +1,3 @@
-import os
 import jax
 import numpy as np
 import jax.numpy as jnp
@@ -9,9 +8,11 @@ import time
 
 try:
     from config import build_config_from_cli, load_default_config, load_mesh, print_config, setup_dirs
+    from config import _AOA_CASES_LC, _KNOWN_CASES_LC
     from utils import build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
 except ModuleNotFoundError:
     from euler.config import build_config_from_cli, load_default_config, load_mesh, print_config, setup_dirs
+    from euler.config import _AOA_CASES_LC, _KNOWN_CASES_LC
     from euler.utils import build_run_summary, export_snapshot, export_run_summary, format_snapshot_name
 
 """
@@ -29,7 +30,7 @@ def initialize(mesh, cfg):
     rho_inf, p_inf = cfg["rho_inf"], cfg["p_inf"]
     gamma, Mach = cfg["gamma"], cfg["Mach"]
     c_inf = (gamma * p_inf / rho_inf) ** 0.5
-    aoa_deg = float(cfg.get("aoa", 0.0)) if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "naca2412", "rae2822", "onerad", "oa209") else 0.0
+    aoa_deg = float(cfg.get("aoa", 0.0)) if str(cfg.get("case", "")).lower() in _AOA_CASES_LC else 0.0
     aoa_rad = jnp.deg2rad(jnp.asarray(aoa_deg))
     u_inf = Mach * c_inf * jnp.cos(aoa_rad)
     v_inf = Mach * c_inf * jnp.sin(aoa_rad)
@@ -140,7 +141,7 @@ def run(W, mesh, inlet, cfg, out_dirs):
         W_snapshots = {round(final_time, 6): np.array(W)}
         export_graph(mesh, W_snapshots, inlet, save_path=str(out_dirs["res"] / "graph.npz"))
     summary = None
-    if str(cfg["case"]).lower() in ("diamond", "bump", "naca0012", "naca2412", "rae2822", "onerad", "oa209") and (exp.get("summary", True)):
+    if str(cfg["case"]).lower() in _KNOWN_CASES_LC and (exp.get("summary", True)):
         U_inf = cfg["Mach"] * np.sqrt(cfg["gamma"] * cfg["p_inf"] / cfg["rho_inf"])
         C_D = helper.get_drag_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])
         C_L = helper.get_lift_coefficient(W=W, mesh=mesh, rho_inf=cfg["rho_inf"], U_inf=U_inf, L_ref=mesh.metadata["obstacle_length"])

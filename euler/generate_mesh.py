@@ -36,6 +36,39 @@ GEOMS["bump"] = (
     [0.05, 0.02],
 )
 
+# Variantes OOD du diamond (translation / demi-angle) et du rae2822
+# (translation) — cf. plan "Nouveaux cas test géométriques OOD" :
+# évaluation de la robustesse géométrique des modèles SR.
+GEOMS["diamond_tx"] = (
+    lambda h, out_dir: diamond.build_mesh(Lx=4.0, Ly=4.0, h=h, chord=1.0,
+                                          height=tan(radians(5)), cx=2.0, cy=2.0,
+                                          case="diamond_tx", out_dir=out_dir),
+    _DEFAULT_H,
+)
+GEOMS["diamond_txy"] = (
+    lambda h, out_dir: diamond.build_mesh(Lx=4.0, Ly=4.0, h=h, chord=1.0,
+                                          height=tan(radians(5)), cx=2.0, cy=2.5,
+                                          case="diamond_txy", out_dir=out_dir),
+    _DEFAULT_H,
+)
+GEOMS["diamond_alpha10"] = (
+    lambda h, out_dir: diamond.build_mesh(Lx=4.0, Ly=4.0, h=h, chord=1.0,
+                                          height=tan(radians(10)), cx=1.5, cy=2.0,
+                                          case="diamond_alpha10", out_dir=out_dir),
+    _DEFAULT_H,
+)
+GEOMS["diamond_sym"] = (
+    lambda h, out_dir: diamond.build_mesh(Lx=4.0, Ly=4.0, h=h, chord=1.0,
+                                          height=tan(radians(5)), cx=1.5, cy=2.0,
+                                          case="diamond_sym", symmetric=True, out_dir=out_dir),
+    _DEFAULT_H,
+)
+GEOMS["rae2822_txy"] = (
+    lambda h, out_dir: airfoils.build_mesh("rae2822_txy", h=h, out_dir=out_dir,
+                                           Lx=4.0, Ly=4.0, chord=1.0, cx=2.0, cy=2.5),
+    _DEFAULT_H,
+)
+
 
 def main():
     parser = argparse.ArgumentParser(add_help=False, description=__doc__)
