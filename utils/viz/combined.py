@@ -14,25 +14,24 @@ import matplotlib.gridspec as _mgs
 from matplotlib.colors import LogNorm
 
 from utils.viz._style import _DPI, CMAP_FIELD as _CMAP_FIELD
-from utils.viz.eval import (_METHOD_COLORS, _build_palette, _display_name,
-                            _kde_or_hist)
+from utils.viz.eval import _build_palette, _display_name, _kde_or_hist
 
 # Tableau global : les métriques essentielles (erreurs aéro/paroi + distributionnelle + coût)
 _TABLE_METRICS = [
-    ('sw2_mach', r'$SW_2$ Mach'),
+    ('w2_mach', r'$W_2$ Mach'),
     ('CL_err', r'$\Delta C_L$'),
     ('CD_err', r'$\Delta C_D$'),
     ('wall_mach_l2', r'$M_{wall}$ L2'),
     ('times', 't (ms/cas)'),
 ]
-# Barres + distributions : erreurs de champ (L2w, SW2) + erreur paroi
+# Barres + distributions : erreurs de champ (L2w, W2) + erreur paroi
 _ERR_METRICS = [
     ('l2w_mach', r'$L_{2w}$ Mach'),
-    ('sw2_mach', r'$SW_2$ Mach'),
+    ('w2_mach', r'$W_2$ Mach'),
     ('wall_mach_l2', r'$M_{wall}$ L2'),
 ]
 # Colonnes du CSV (superset, pour garder aussi L2w/Linf sous la main)
-_CSV_KEYS = ['sw2_mach', 'l2w_mach', 'linf_mach', 'CL_err', 'CD_err',
+_CSV_KEYS = ['w2_mach', 'l2w_mach', 'linf_mach', 'CL_err', 'CD_err',
              'wall_mach_l2', 'times', 'enthalpy', 'entropy']
 
 
@@ -103,11 +102,11 @@ def _suptitle(fig, title: str, C: dict):
              fontsize=8, color='#555555', style='italic')
 
 
-def combined_global_table(ts_results: dict, out_dir: Path):
+def combined_global_table(ts_results: dict, out_dir: Path, min_groups: int = 2):
     """Matrices modèle × testset (une par métrique) : le tableau global visuel."""
     C = collect(ts_results)
     tags, models = C['tags'], C['models']
-    if len(tags) < 2 or not models:
+    if len(tags) < min_groups or not models:
         return
 
     metrics = _TABLE_METRICS
@@ -165,11 +164,11 @@ def combined_global_table(ts_results: dict, out_dir: Path):
     print(f"  > {out_path.name}")
 
 
-def combined_metric_bars(ts_results: dict, out_dir: Path):
+def combined_metric_bars(ts_results: dict, out_dir: Path, min_groups: int = 2):
     """Barres groupées : par testset (groupes X), une barre par modèle. Erreurs."""
     C = collect(ts_results)
     tags, models = C['tags'], C['models']
-    if len(tags) < 2 or not models:
+    if len(tags) < min_groups or not models:
         return
     palette = _build_palette(models)
 
@@ -203,11 +202,11 @@ def combined_metric_bars(ts_results: dict, out_dir: Path):
     print(f"  > {out_path.name}")
 
 
-def combined_error_distributions(ts_results: dict, out_dir: Path):
+def combined_error_distributions(ts_results: dict, out_dir: Path, min_groups: int = 2):
     """Grille KDE : lignes = métriques d'erreur, colonnes = testsets."""
     C = collect(ts_results)
     tags, models = C['tags'], C['models']
-    if len(tags) < 2 or not models:
+    if len(tags) < min_groups or not models:
         return
     palette = _build_palette(models)
 
@@ -346,8 +345,18 @@ def plot_all_combined(ts_results: dict, out_dir: Path):
     combined_summary_csv(ts_results, out_dir)
 
 
+def plot_by_geometry(by_geom: dict, out_dir: Path):
+    """Mêmes figures essentielles que plot_all_combined, mais ventilées par
+    géométrie seule"""
+    
+    combined_global_table(by_geom, out_dir, min_groups=1)
+    combined_metric_bars(by_geom, out_dir, min_groups=1)
+    combined_error_distributions(by_geom, out_dir, min_groups=1)
+    combined_summary_csv(by_geom, out_dir)
+
+
 __all__ = [
     'collect', 'combined_global_table', 'combined_metric_bars',
     'combined_error_distributions', 'combined_reference_fields',
-    'combined_summary_csv', 'plot_all_combined',
+    'combined_summary_csv', 'plot_all_combined', 'plot_by_geometry',
 ]

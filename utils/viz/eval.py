@@ -189,7 +189,6 @@ def plot_reference_grid(results: dict, triang, out_path: Path):
     axes = np.array([[fig.add_subplot(gs[ri, ci]) for ci in range(n_ecols)]
                        for ri in range(n_cases)])
     cb_col = fig.add_subplot(gs[:, n_ecols])
-    if n_cases == 1: axes = axes[np.newaxis, :]
     fig.suptitle(_ts_suptitle('Erreur relative Mach', results),
                  fontsize=11, fontweight='bold')
 
@@ -313,11 +312,58 @@ def plot_wall_profiles_eval(results: dict, wc, out_dir):
     print(f'  > {out_path.name}')
 
 
-_REGIMES = [
-    ('0.7 ≤ M ≤ 1.3', lambda m: (m >= 0.7) & (m <= 1.3)),  # Transsonique
-    ('M > 1.3', lambda m: m > 1.3),  # Supersonique
-    ('M < 0.7', lambda m: m < 0.7),  # Subsonique
-]
+def plot_cp_profile_eval(results: dict, wc, out_dir):
+    """Profil de Cp en paroi (face supérieure) — pendant de plot_wall_profiles_eval."""
+    from utils.aero import cp_field as _cp_field
+
+    cases = results['cases']
+    n_cases = len(cases)
+    all_rows = []
+    if results.get('idw') and results['idw'].get('prim_preds'):
+        all_rows.append(results['idw'])
+    for row in results.get('rows', []):
+        if row.get('prim_preds'):
+            all_rows.append(row)
+
+    if not all_rows:
+        print('  [SKIP] plot_cp_profile_eval : pas de prim_preds dans results')
+        return
+
+    fig, axes = plt.subplots(n_cases, 1, figsize=(7, 3.5 * n_cases),
+                             dpi=_DPI, constrained_layout=True)
+    if n_cases == 1:
+        axes = [axes]
+
+    for ri, c in enumerate(cases):
+        ax = axes[ri]
+        hp = c.get('hr_prim')
+        if hp is not None:
+            xu_c, cpu = _wall_profile_eval(_cp_field(hp, c['mach_in']), wc)
+            ax.plot(xu_c, cpu, _HR_LS, lw=_HR_LW, color=_HR_COLOR, label='HR',
+                    alpha=_HR_ALPHA, zorder=1)
+
+        for ci, row in enumerate(all_rows):
+            pp = row.get('prim_preds', [])
+            if ri >= len(pp) or pp[ri] is None:
+                continue
+            xu_c, cpu = _wall_profile_eval(_cp_field(pp[ri], c['mach_in']), wc)
+            ax.plot(xu_c, cpu, '-', lw=1.8, zorder=2,
+                    color=_METHOD_COLORS[ci % len(_METHOD_COLORS)],
+                    label=_display_name(row['name']))
+
+        ax.invert_yaxis()  # convention aéro : Cp décroissant vers le haut
+        ax.set_ylabel(r'$C_p$'); ax.grid(True, alpha=0.25)
+        ax.legend(fontsize=9, loc='best', framealpha=0.9)
+        ax.set_title(f"M = {c['mach_in']:.2f}    AoA = {c['aoa_in']:+.0f}°",
+                     fontsize=10, fontweight='bold')
+
+    axes[-1].set_xlabel('x')
+    fig.suptitle(_ts_suptitle(r'Coefficient de pression $C_p$ en paroi — face supérieure', results),
+                 fontsize=13, fontweight='bold')
+    out_path = Path(out_dir) / 'cp_profile.png'
+    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight')
+    plt.close(fig)
+    print(f'  > {out_path.name}')
 
 
 def plot_distributions(dataset_results: dict, out_dir: Path):
@@ -352,42 +398,6 @@ def plot_distributions(dataset_results: dict, out_dir: Path):
         ax.legend(fontsize=9); ax.grid(True, alpha=0.25, linestyle='--')
 
     out_path = out_dir / 'dist_mach_grad.png'
-    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
-    print(f"  > {out_path.name}")
-
-
-def plot_aero_distributions(dataset_results: dict, out_dir: Path):
-    method_names = [nm for nm in dataset_results if not nm.startswith('_')]
-    palette = _build_palette(method_names)
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), dpi=_DPI, constrained_layout=True)
-    fig.suptitle(_ts_suptitle('Distributions aérodynamiques', dataset_results),
-                 fontsize=12, fontweight='bold')
-
-    for ax, key, xlabel, title in zip(
-        axes,
-        ['CL', 'CD'],
-        [r'$C_L$', r'$C_D$'],
-        [r'Portance $C_L$', r'Traînée $C_D$'],
-    ):
-        for nm in method_names:
-            r = dataset_results.get(nm, {})
-            vals = np.array(r.get(key, []), dtype=float)
-            vals = vals[np.isfinite(vals)]
-            if len(vals) < 5:
-                continue
-            is_hr = nm in ('GT', 'HR')
-            _kde_or_hist(ax, vals, palette[nm], _display_name(nm),
-                         lw=_HR_LW if is_hr else 1.4,
-                         ls=_HR_LS if is_hr else '-',
-                         fill_alpha=0.0 if is_hr else 0.10,
-                         zorder=3 if is_hr else 2,
-                         alpha=_HR_ALPHA if is_hr else 1.0)
-        ax.set_xlabel(xlabel, fontsize=10); ax.set_ylabel('Densité', fontsize=9)
-        ax.set_title(title, fontweight='bold', fontsize=10)
-        ax.legend(fontsize=9); ax.grid(True, alpha=0.25, linestyle='--')
-
-    out_path = out_dir / 'dist_aero.png'
     plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
     print(f"  > {out_path.name}")
 
@@ -432,12 +442,12 @@ def plot_error_kde(dataset_results: dict, out_dir: Path):
     methods = [nm for nm in dataset_results
                if not nm.startswith('_') and nm not in ('GT', 'HR')
                and any(k in dataset_results.get(nm, {})
-                       for k in ('l2_mach', 'l2w_mach', 'sw2_mach'))]
+                       for k in ('l2_mach', 'l2w_mach', 'w2_mach'))]
     if not methods:
         return
 
     palette = _build_palette(methods)
-    metrics = [('l2w_mach', r'$L_{2w}$ Mach'), ('sw2_mach', r'$SW_2$ Mach')]
+    metrics = [('l2w_mach', r'$L_{2w}$ Mach'), ('w2_mach', r'$W_2$ Mach')]
     valid_metrics = [(k, lb) for k, lb in metrics
                      if any(len(dataset_results.get(nm, {}).get(k, [])) > 5
                             for nm in methods)]
@@ -466,49 +476,6 @@ def plot_error_kde(dataset_results: dict, out_dir: Path):
         ax.set_xlim(left=0)
 
     out_path = Path(out_dir) / 'error_kde.png'
-    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
-    print(f"  > {out_path.name}")
-
-
-def plot_error_scatter(dataset_results: dict, all_cases: list[dict], out_dir: Path,
-                       metric_key: str = 'l2w_mach',
-                       metric_label: str = r'$L_{2w}$',
-                       fname: str = 'error_vs_mach.png'):
-    methods = [nm for nm in dataset_results
-               if not nm.startswith('_') and nm not in ('GT', 'HR')
-               and metric_key in dataset_results.get(nm, {})]
-    if not methods:
-        return
-
-    machs = np.array([c['mach_in'] for c in all_cases])
-    aoas = np.array([c['aoa_in'] for c in all_cases])
-
-    n_m = len(methods)
-    fig, axes = plt.subplots(1, n_m, figsize=(4 * n_m, 4),
-                             dpi=_DPI, constrained_layout=True, sharey=True)
-    fig.set_constrained_layout_pads(h_pad=0.02, w_pad=0.02, hspace=0.02, wspace=0.03)
-    if n_m == 1:
-        axes = [axes]
-    fig.suptitle(_ts_suptitle(f'Erreur {metric_label} Mach vs Mach (couleur = AoA)',
-                              dataset_results),
-                 fontsize=11, fontweight='bold')
-
-    from scipy.ndimage import uniform_filter1d
-    for ax, nm in zip(axes, methods):
-        vals = np.array(dataset_results[nm][metric_key], dtype=float)
-        valid = np.isfinite(vals)
-        sc = ax.scatter(machs[valid], vals[valid], c=aoas[valid],
-                        cmap='coolwarm', s=18, alpha=0.7,
-                        vmin=aoas.min(), vmax=aoas.max(), linewidths=0)
-        order = np.argsort(machs[valid])
-        smooth = uniform_filter1d(vals[valid][order], size=max(1, valid.sum() // 30))
-        ax.plot(machs[valid][order], smooth, 'k-', lw=1.5, alpha=0.6, label='tendance')
-        ax.set_xlabel('Mach'); ax.set_title(nm, fontweight='bold')
-        ax.grid(True, alpha=0.25, linestyle='--')
-        plt.colorbar(sc, ax=ax, label='AoA (°)', shrink=0.8)
-
-    axes[0].set_ylabel(f'{metric_label} — Mach')
-    out_path = Path(out_dir) / fname
     plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
     print(f"  > {out_path.name}")
 
@@ -563,61 +530,8 @@ def plot_error_heatmap(dataset_results: dict, all_cases: list[dict], out_dir: Pa
     _heatmap_metric(dataset_results, all_cases, out_dir,
                     'l2w_mach', r'$L_{2w}$ Mach', 'error_heatmap_l2w.png')
     _heatmap_metric(dataset_results, all_cases, out_dir,
-                    'sw2_mach', r'$SW_2$ Mach', 'error_heatmap_sw2.png')
+                    'w2_mach', r'$W_2$ Mach', 'error_heatmap_w2.png')
 
-
-def _regime_bars_metric(dataset_results: dict, all_cases: list[dict], out_dir: Path,
-                        metric_key: str, ylabel: str, fname: str):
-    methods = [nm for nm in dataset_results
-               if not nm.startswith('_') and nm not in ('GT', 'HR')
-               and metric_key in dataset_results.get(nm, {})]
-    if not methods:
-        return
-
-    palette = _build_palette(methods)
-    machs = np.array([c['mach_in'] for c in all_cases])
-
-    data: dict[str, list[float]] = {nm: [] for nm in methods}
-    counts: list[int] = []
-    for _, mask_fn in _REGIMES:
-        idx = np.where(mask_fn(machs))[0]
-        counts.append(len(idx))
-        for nm in methods:
-            vals_arr = np.array(dataset_results[nm][metric_key], dtype=float)
-            v_reg = vals_arr[idx]
-            data[nm].append(float(np.nanmean(v_reg)) if np.any(np.isfinite(v_reg)) else np.nan)
-
-    n_reg, n_met = len(_REGIMES), len(methods)
-    x, bw = np.arange(n_reg), 0.75 / n_met
-
-    fig, ax = plt.subplots(figsize=(max(6, n_reg * 2.5), 4.5),
-                           dpi=_DPI, constrained_layout=True)
-    for mi, nm in enumerate(methods):
-        color = palette[nm]
-        offset = (mi - (n_met - 1) / 2) * bw
-        bars = ax.bar(x + offset, data[nm], width=bw * 0.9,
-                        color=color, label=nm, edgecolor='white')
-        for bar, v in zip(bars, data[nm]):
-            if np.isfinite(v):
-                ax.text(bar.get_x() + bar.get_width() / 2, v + 0.0005,
-                        f'{v:.4f}', ha='center', va='bottom', fontsize=7)
-
-    tick_labels = [f'{lbl}\n(N={c})' for (lbl, _), c in zip(_REGIMES, counts)]
-    ax.set_xticks(x); ax.set_xticklabels(tick_labels, fontsize=9)
-    ax.set_ylabel(ylabel)
-    ax.set_title(f'Erreur {ylabel} par régime d\'écoulement', fontweight='bold')
-    ax.legend(fontsize=9); ax.grid(True, axis='y', alpha=0.3, linestyle='--')
-
-    out_path = Path(out_dir) / fname
-    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
-    print(f"  > {out_path.name}")
-
-
-def plot_regime_bars(dataset_results: dict, all_cases: list[dict], out_dir: Path):
-    _regime_bars_metric(dataset_results, all_cases, out_dir,
-                        'l2w_mach', r'$L_{2w}$ Mach (moyenne)', 'error_by_regime_l2w.png')
-    _regime_bars_metric(dataset_results, all_cases, out_dir,
-                        'sw2_mach', r'$SW_2$ Mach (moyenne)', 'error_by_regime_sw2.png')
 
 def _fmt_metric(v: float) -> str:
     if not np.isfinite(v):
@@ -636,6 +550,9 @@ def _fmt_time(v: float) -> str:
 
 
 def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
+    """Retourne (methods, col_labels, rows, raw). `raw` a la même forme que `rows`
+    hors colonne 'Méthode' : valeurs numériques (nan si N/A), pour déterminer le
+    meilleur/pire modèle par colonne sans reparser les chaînes formatées."""
     methods = []
     if results_ref.get('idw'):
         methods.append('LR IDW')
@@ -645,92 +562,52 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
         methods = [nm for nm in dataset_results
                    if not nm.startswith('_') and nm not in ('GT', 'HR')]
     if not methods:
-        return methods, [], []
+        return methods, [], [], []
 
-    def _get(nm, key):
+    def _raw(nm, key):
         if dataset_results and nm in dataset_results:
             arr = np.array(dataset_results[nm].get(key, [np.nan]), dtype=float)
-            return _fmt_metric(float(np.nanmean(arr)))
-        return 'N/A'
+            return float(np.nanmean(arr))
+        return float('nan')
 
-    def _get_time(nm):
+    def _raw_time(nm):
         if dataset_results and nm in dataset_results:
             t = np.array(dataset_results[nm].get('times', [np.nan]), dtype=float)
             v = float(np.nanmean(t))
             if np.isfinite(v) and v > 0:
-                return _fmt_time(v)
+                return v
         src = results_ref.get('idw') if nm == 'LR IDW' else next(
             (r for r in results_ref.get('rows', []) if r['name'] == nm), None)
         if src:
-            return _fmt_time(float(np.nanmean(src.get('time_ms', [np.nan]))))
-        return 'N/A'
+            return float(np.nanmean(src.get('time_ms', [np.nan])))
+        return float('nan')
 
     has_aero = (dataset_results is not None and
                  any('CL_err' in dataset_results.get(nm, {}) for nm in methods))
     has_mwall = (dataset_results is not None and
                  any('wall_mach_l2' in dataset_results.get(nm, {}) for nm in methods))
 
-    col_labels = ['Méthode', r'$L_{2w}$', r'$SW_2$']
+    col_labels = ['Méthode', r'$W_2$']
     if has_aero:
         col_labels += [r'$\Delta C_L$', r'$\Delta C_D$']
     if has_mwall:
         col_labels += [r'$M_{wall}$ L2']
     col_labels += ['Temps/cas']
 
-    rows = []
+    rows, raw = [], []
     for nm in methods:
-        row = [nm, _get(nm, 'l2w_mach'), _get(nm, 'sw2_mach')]
+        raw_vals = [_raw(nm, 'w2_mach')]
         if has_aero:
-            row += [_get(nm, 'CL_err'), _get(nm, 'CD_err')]
+            raw_vals += [_raw(nm, 'CL_err'), _raw(nm, 'CD_err')]
         if has_mwall:
-            row += [_get(nm, 'wall_mach_l2')]
-        row += [_get_time(nm)]
+            raw_vals += [_raw(nm, 'wall_mach_l2')]
+        raw_vals += [_raw_time(nm)]
+
+        row = [nm] + [_fmt_metric(v) for v in raw_vals[:-1]] + [_fmt_time(raw_vals[-1])]
         rows.append(row)
+        raw.append(raw_vals)
 
-    return methods, col_labels, rows
-
-
-def plot_timing(results_ref: dict, dataset_results: dict | None,
-                euler_times: dict, out_path: Path):
-    labels, values, colors = [], [], []
-
-    if results_ref['idw']:
-        nm_idw = 'LR IDW'
-        t_idw = (float(np.nanmean(dataset_results[nm_idw]['times']))
-                  if dataset_results and nm_idw in dataset_results
-                  else float(np.nanmean(results_ref['idw']['time_ms'])))
-        labels.append('LR IDW'); values.append(t_idw); colors.append(_METHOD_COLORS[0])
-
-    for i, row in enumerate(results_ref['rows']):
-        nm_sr = row['name']
-        t_sr = (float(np.nanmean(dataset_results[nm_sr]['times']))
-                 if dataset_results and nm_sr in dataset_results
-                 else float(np.nanmean(row['time_ms'])))
-        labels.append(nm_sr); values.append(t_sr)
-        colors.append(_METHOD_COLORS[(i + 1) % len(_METHOD_COLORS)])
-
-    if euler_times:
-        t_fvm_ms = float(np.median(list(euler_times.values()))) * 1e3
-        labels.append('FVM (solveur)'); values.append(t_fvm_ms)
-        colors.append('dimgray')
-
-    fig, ax = plt.subplots(figsize=(max(6, len(labels) * 1.4), 4.5), dpi=_DPI)
-    x = np.arange(len(labels))
-    bars = ax.bar(x, values, color=colors, width=0.55, edgecolor='white', linewidth=0.5)
-    ax.set_yscale('log')
-    ax.set_xticks(x); ax.set_xticklabels(labels, rotation=15, ha='right')
-    ax.set_ylabel("Temps d'inférence moyen (ms/cas, échelle log)")
-    ax.set_title("Comparaison des temps de calcul : SR vs solveur FVM", fontweight='bold')
-    ax.grid(True, axis='y', alpha=0.3, linestyle='--')
-
-    for bar, v in zip(bars, values):
-        s = f'{v/1e3:.1f}s' if v >= 1e3 else (f'{v:.0f}ms' if v >= 1 else f'{v*1e3:.1f}µs')
-        ax.text(bar.get_x() + bar.get_width() / 2, v * 1.3, s,
-                ha='center', va='bottom', fontsize=9, fontweight='bold')
-
-    fig.tight_layout()
-    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
-    print(f"  > {out_path.name}")
+    return methods, col_labels, rows, raw
 
 
 def plot_global_errors(dataset_results: dict, out_dir: Path):
@@ -743,7 +620,7 @@ def plot_global_errors(dataset_results: dict, out_dir: Path):
     colors = [palette[nm] for nm in methods]
 
     fig1, ax1 = plt.subplots(figsize=(6, 4.5), dpi=_DPI, constrained_layout=True)
-    metrics = [('l2w_mach', r'$L_{2w}$'), ('sw2_mach', r'$SW_2$')]
+    metrics = [('l2w_mach', r'$L_{2w}$'), ('w2_mach', r'$W_2$')]
     x = np.arange(len(metrics))
     bw = 0.8 / len(methods)
     for mi, (nm, color) in enumerate(zip(methods, colors)):
@@ -788,8 +665,62 @@ def plot_global_errors(dataset_results: dict, out_dir: Path):
     print(f"  > {out2.name}")
 
 
-def plot_summary_table(results_ref: dict, dataset_results: dict | None, out_dir: Path):
-    _, col_labels, rows = _summary_methods_rows(results_ref, dataset_results)
+_FVM_TIMES_PATH = Path('data/fvm_times.json')
+
+
+def _load_fvm_times(path: Path = _FVM_TIMES_PATH) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        import json
+        return json.load(open(path))
+    except Exception:
+        return None
+
+
+def _fvm_time_at(fvm: dict, geometry: str, res: float) -> float | None:
+    """Temps FVM moyen (s/cas) pour (géométrie, résolution) exacte ; à défaut,
+    repli silencieux sur la moyenne globale de la géométrie (toutes
+    résolutions confondues)."""
+    geo = fvm.get('by_geometry_resolution', {}).get(geometry, {})
+    key = next((k for k in geo if abs(float(k) - res) < 1e-6), None)
+    if key is not None:
+        return geo[key]['time_mean_s']
+    geo_stats = fvm.get('by_geometry', {}).get(geometry)
+    return geo_stats['time_mean_s'] if geo_stats else None
+
+
+def _fvm_avg_time_text(geometry: str | None, hr_res: float | None,
+                       lr_res: float | None = None,
+                       fvm_times_path: Path = _FVM_TIMES_PATH) -> str | None:
+    """Texte simple 'temps solveur FVM' (LR + HR) pour le jeu de test évalué,
+    lu dans data/fvm_times.json (construit par utils/build_fvm_times.py à
+    partir des logs bruts logs/euler/)."""
+    if geometry is None:
+        return None
+    fvm = _load_fvm_times(fvm_times_path)
+    if fvm is None:
+        return None
+
+    parts = []
+    if lr_res is not None:
+        t = _fvm_time_at(fvm, geometry, lr_res)
+        if t is not None:
+            parts.append(f"LR h={lr_res:g} : {t:.1f} s/cas")
+    if hr_res is not None:
+        t = _fvm_time_at(fvm, geometry, hr_res)
+        if t is not None:
+            parts.append(f"HR h={hr_res:g} : {t:.1f} s/cas")
+
+    if not parts:
+        return None
+    return "Temps solveur FVM (GPU) — " + '   '.join(parts)
+
+
+def plot_summary_table(results_ref: dict, dataset_results: dict | None, out_dir: Path,
+                       hr_res: float | None = None, lr_res: float | None = None,
+                       geometry: str | None = None):
+    methods, col_labels, rows, raw = _summary_methods_rows(results_ref, dataset_results)
     if not rows:
         return
 
@@ -802,13 +733,193 @@ def plot_summary_table(results_ref: dict, dataset_results: dict | None, out_dir:
     for j in range(len(col_labels)):
         tbl[0, j].set_facecolor('#2c3e50')
         tbl[0, j].set_text_props(color='white', fontweight='bold')
+
+    # Meilleur (vert) / pire (rouge) par colonne, uniquement parmi les modèles
+    # (LR IDW exclu de la comparaison mais toujours grisé).
+    _GRAY, _GREEN, _RED = '#c9c9c9', '#a5d6a7', '#ef9a9a'
+    n_metric_cols = len(col_labels) - 1
+    model_idx = [i for i, nm in enumerate(methods) if nm != 'LR IDW']
+    best_i: list[int | None] = [None] * n_metric_cols
+    worst_i: list[int | None] = [None] * n_metric_cols
+    for j in range(n_metric_cols):
+        vals = [(i, raw[i][j]) for i in model_idx if np.isfinite(raw[i][j])]
+        if vals:
+            best_i[j] = min(vals, key=lambda t: t[1])[0]
+            worst_i[j] = max(vals, key=lambda t: t[1])[0]
+
     for i in range(1, len(rows) + 1):
+        ri = i - 1
+        is_idw = methods[ri] == 'LR IDW'
         for j in range(len(col_labels)):
-            tbl[i, j].set_facecolor('#eaf0f6' if i % 2 == 0 else 'white')
+            cell = tbl[i, j]
+            if is_idw:
+                cell.set_facecolor(_GRAY)
+            elif j > 0 and best_i[j - 1] is not None and best_i[j - 1] != worst_i[j - 1] and ri == best_i[j - 1]:
+                cell.set_facecolor(_GREEN)
+            elif j > 0 and worst_i[j - 1] is not None and best_i[j - 1] != worst_i[j - 1] and ri == worst_i[j - 1]:
+                cell.set_facecolor(_RED)
+            else:
+                cell.set_facecolor('#eaf0f6' if i % 2 == 0 else 'white')
+
+    fvm_text = _fvm_avg_time_text(geometry, hr_res, lr_res)
+    if fvm_text:
+        fig.text(0.5, 0.01, fvm_text, ha='center', va='bottom',
+                 fontsize=8, style='italic', color='#555555')
 
     out_path = Path(out_dir) / 'summary_table.png'
     plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
     print(f"  > {out_path.name}")
+
+
+def _fvm_live_time_text(fvm_live: dict | None) -> str | None:
+    """Texte 'temps solveur FVM (mesure live, cas exact)' pour le pied de page
+    du tableau single-case — distinct de _fvm_avg_time_text (agrégat
+    data/fvm_times.json) pour ne jamais confondre un temps mesuré à l'instant
+    sur CE cas précis avec une moyenne historique sur d'autres cas."""
+    if not fvm_live:
+        return None
+    parts = []
+    for key, label in (('lr', 'LR'), ('hr', 'HR')):
+        entry = fvm_live.get(key)
+        if entry is None:
+            continue
+        cached = ' (cache)' if entry.get('from_cache') else ''
+        parts.append(f"{label} h={entry['h']:g} : {entry['wall_time_s']:.1f} s{cached}")
+    if not parts:
+        return None
+    return "Temps solveur FVM (GPU, mesure live sur ce cas) — " + '   '.join(parts)
+
+
+def build_single_case_table(results: dict):
+    """Retourne (col_labels, rows, raw) pour le tableau récapitulatif d'un cas
+    unique, à partir des métriques déjà calculées par
+    eval.single_case.run_single_case sur results['idw']/results['rows']
+    (listes par cas : 'l2', 'w2', 'time_ms', 'aero' — dict aero_metrics).
+
+    Contrairement à _summary_methods_rows (qui exige un sweep complet pour
+    afficher ΔCL/ΔCD/M_wall L2), ce tableau lit directement les métriques du
+    (ou des) cas de référence passés — c'est le chaînon manquant pour un
+    résumé sur un cas unique.
+    """
+    methods_rows = []
+    if results.get('idw'):
+        methods_rows.append(results['idw'])
+    methods_rows.extend(results.get('rows', []))
+    if not methods_rows:
+        return [], [], []
+
+    def _mean(vals):
+        vals = [float(v) for v in vals if v is not None and np.isfinite(v)]
+        return float(np.mean(vals)) if vals else float('nan')
+
+    has_w2 = any(row.get('w2') for row in methods_rows)
+    has_aero = any(row.get('aero') and any(a is not None for a in row['aero'])
+                   for row in methods_rows)
+
+    col_labels = ['Méthode', 'L2 Mach']
+    if has_w2:
+        col_labels.append(r'$W_2$ Mach')
+    if has_aero:
+        col_labels += [r'$\Delta C_L$', r'$\Delta C_D$', r'$C_p$ paroi L2', r'$M_{wall}$ L2']
+    col_labels.append('Temps/cas')
+
+    rows, raw = [], []
+    for row in methods_rows:
+        raw_vals = [_mean(row.get('l2', []))]
+        if has_w2:
+            raw_vals.append(_mean(row.get('w2', [])))
+        if has_aero:
+            aeros = [a for a in row.get('aero', []) if a is not None]
+            raw_vals += [
+                _mean([a['CL_err_abs'] for a in aeros]),
+                _mean([a['CD_err_abs'] for a in aeros]),
+                _mean([a['wall_cp_l2'] for a in aeros]),
+                _mean([a['wall_mach_l2'] for a in aeros]),
+            ]
+        raw_vals.append(_mean(row.get('time_ms', [])))
+
+        label = _display_name(row['name'])
+        if row.get('step_info'):
+            label = f"{label} ({row['step_info']})"
+        rows.append([label] + [_fmt_metric(v) for v in raw_vals[:-1]] + [_fmt_time(raw_vals[-1])])
+        raw.append(raw_vals)
+
+    return col_labels, rows, raw
+
+
+def plot_single_case_table(results: dict, out_dir: Path, fvm_live: dict | None = None):
+    col_labels, rows, raw = build_single_case_table(results)
+    if not rows:
+        return
+
+    methods = (['LR IDW'] if results.get('idw') else []) + \
+              [row['name'] for row in results.get('rows', [])]
+
+    # La 1ère colonne (méthode) peut porter le détail d'échantillonnage
+    # (ex. "FAM_dia (16 pas ODE, 4 éch.)") : élargir la figure en conséquence
+    # pour ne pas la voir tronquée hors du tableau.
+    max_label_len = max((len(r[0]) for r in rows), default=6)
+    fig_w = max(6, 1.5 * len(col_labels), 0.13 * max_label_len + 1.2 * (len(col_labels) - 1))
+    fig, ax = plt.subplots(figsize=(fig_w, 0.5 + 0.45 * len(rows)),
+                           dpi=_DPI)
+    ax.axis('off')
+    tbl = ax.table(cellText=rows, colLabels=col_labels, loc='center', cellLoc='center')
+    tbl.auto_set_font_size(False); tbl.set_fontsize(10); tbl.scale(1, 1.5)
+    # Colonne 0 (méthode) potentiellement longue (step_info FAM/SIAM) : sans
+    # ceci les largeurs par défaut (équiréparties) la tronquent.
+    tbl.auto_set_column_width(col=list(range(len(col_labels))))
+
+    for j in range(len(col_labels)):
+        tbl[0, j].set_facecolor('#2c3e50')
+        tbl[0, j].set_text_props(color='white', fontweight='bold')
+
+    _GRAY, _GREEN, _RED = '#c9c9c9', '#a5d6a7', '#ef9a9a'
+    n_metric_cols = len(col_labels) - 1
+    model_idx = [i for i, nm in enumerate(methods) if nm != 'LR IDW']
+    best_i: list[int | None] = [None] * n_metric_cols
+    worst_i: list[int | None] = [None] * n_metric_cols
+    for j in range(n_metric_cols):
+        vals = [(i, raw[i][j]) for i in model_idx if np.isfinite(raw[i][j])]
+        if vals:
+            best_i[j] = min(vals, key=lambda t: t[1])[0]
+            worst_i[j] = max(vals, key=lambda t: t[1])[0]
+
+    for i in range(1, len(rows) + 1):
+        ri = i - 1
+        is_idw = methods[ri] == 'LR IDW'
+        for j in range(len(col_labels)):
+            cell = tbl[i, j]
+            if is_idw:
+                cell.set_facecolor(_GRAY)
+            elif j > 0 and best_i[j - 1] is not None and best_i[j - 1] != worst_i[j - 1] and ri == best_i[j - 1]:
+                cell.set_facecolor(_GREEN)
+            elif j > 0 and worst_i[j - 1] is not None and best_i[j - 1] != worst_i[j - 1] and ri == worst_i[j - 1]:
+                cell.set_facecolor(_RED)
+            else:
+                cell.set_facecolor('#eaf0f6' if i % 2 == 0 else 'white')
+
+    footer = _fvm_live_time_text(fvm_live)
+    if footer:
+        fig.text(0.5, 0.01, footer, ha='center', va='bottom',
+                 fontsize=8, style='italic', color='#555555')
+
+    out_path = Path(out_dir) / 'summary_table.png'
+    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
+    print(f"  > {out_path.name}")
+
+
+def save_single_case_csv(results: dict, out_path: Path):
+    col_labels, rows, _ = build_single_case_table(results)
+    if not rows:
+        return
+    clean = [c.replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
+             for c in col_labels]
+    with open(out_path, 'w', newline='') as fh:
+        w = csv.writer(fh)
+        w.writerow(clean)
+        w.writerows(rows)
+    _print_summary_table(clean, rows)
+    print(f"  > {Path(out_path).name}")
 
 
 def _print_summary_table(clean: list, rows: list):
@@ -826,7 +937,7 @@ def _print_summary_table(clean: list, rows: list):
 
 
 def save_summary_csv(results_ref: dict, dataset_results: dict | None, out_path: Path):
-    _, col_labels, rows = _summary_methods_rows(results_ref, dataset_results)
+    _, col_labels, rows, _ = _summary_methods_rows(results_ref, dataset_results)
     if not rows:
         return
     clean = [c.replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
@@ -842,15 +953,15 @@ def save_summary_csv(results_ref: dict, dataset_results: dict | None, out_path: 
 __all__ = [
     'plot_reference_grid',
     'plot_wall_profiles_eval',
+    'plot_cp_profile_eval',
     'plot_distributions',
-    'plot_aero_distributions',
     'plot_cl_cd_distributions',
     'plot_error_kde',
-    'plot_error_scatter',
     'plot_error_heatmap',
-    'plot_regime_bars',
-    'plot_timing',
     'plot_global_errors',
     'plot_summary_table',
     'save_summary_csv',
+    'build_single_case_table',
+    'plot_single_case_table',
+    'save_single_case_csv',
 ]

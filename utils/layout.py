@@ -75,31 +75,20 @@ class DataLayout:
 
     @property
     def gt_cache_path(self) -> Path:
-        return self.root / 'gt_cache' / f'{self.geometry}.npz'
+        if abs(self.hr_res - 0.025) < 1e-6:
+            return self.root / 'gt_cache' / f'{self.geometry}.npz'
+        return self.root / 'gt_cache' / f'{self.geometry}_{_res_tag(self.hr_res)}.npz'
 
     @property
     def fvm_times_path(self) -> Path:
         """Fichier FVM timing global partagé entre toutes les géométries."""
         return self.root / 'fvm_times.json'
 
-    @property
-    def figures_dir(self) -> Path:
-        return self.root / 'figures'
-
     @classmethod
     def from_root(cls, root: str | Path, geometry: str,
                   lr_res: float = 0.1, hr_res: float = 0.025) -> 'DataLayout':
         return cls(root=Path(root), geometry=geometry,
                    lr_res=lr_res, hr_res=hr_res)
-
-    @classmethod
-    def from_cfg(cls, cfg: dict, data_root: str | Path | None = None) -> 'DataLayout':
-        """Construit un DataLayout depuis un YAML config (mode single-géométrie)."""
-        root = Path(data_root or cfg['data_root'])
-        geom = cfg['geometry']
-        res = cfg.get('resolution', {})
-        return cls(root=root, geometry=geom,
-                   lr_res=res.get('lr', 0.1), hr_res=res.get('hr', 0.025))
 
 
 """ Chargement des samples processed (fusion HR et LR) pour l'éval et le training. """
@@ -115,10 +104,15 @@ def hr_store_path(lr_path) -> Path:
     return set_dir.parent / hr_set / split / lr_path.name
 
 
-def load_sample(path) -> dict:
-    """Charge un sample processed en fusionnant la HR partagée et le LR"""
+def load_sample(path, raw_hr_override: str | Path | None = None) -> dict:
+    """Charge un sample processed en fusionnant la HR partagée et le LR."""
     d = dict(np.load(path))
-    if 'hr_primitives' not in d:
+    if raw_hr_override is not None:
+        raw = np.load(raw_hr_override, allow_pickle=True)
+        d['hr_node_pos'] = raw['node_pos']
+        d['hr_primitives'] = raw['primitives']
+        d['hr_grad_p'] = raw['primitives_grad'][:, 3, :]
+    elif 'hr_primitives' not in d:
         hp = hr_store_path(path)
         if hp.exists():
             for k, v in np.load(hp).items():

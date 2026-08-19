@@ -10,8 +10,8 @@ from scipy.stats import gaussian_kde
 
 import utils.viz._style  # noqa: F401
 from utils.viz._style import _DPI, CMAP_FIELD, CMAP_ERR, CMAP_GRAD
-from utils.refs import to_mach, REFERENCE_CASES, find_ref_file, _PROC_RE
-from utils.metrics import sliced_wasserstein
+from utils.refs import to_mach, REFERENCE_CASES, _PROC_RE
+from utils.metrics import w2
 from utils.layout import DataLayout
 from utils.layout import load_sample
 
@@ -278,7 +278,7 @@ def plot_reference_errors(ref_paths, mesh_hr, mesh_lr, out_dir):
         mach_hr = to_mach(hr['prim'])
         mach_idw = _idw(lr['pos'], hr['pos'], to_mach(lr['prim']))
         err_rel = np.abs(mach_idw - mach_hr) / (np.abs(mach_hr) + 1e-6)
-        sw2 = sliced_wasserstein(mach_idw, mach_hr) / (np.mean(np.abs(mach_hr)) + 1e-8)
+        w2_val = w2(mach_idw, mach_hr) / (np.mean(np.abs(mach_hr)) + 1e-8)
         if hr['grad_p'] is not None:
             w = np.linalg.norm(hr['grad_p'].astype(np.float32), axis=-1)
             # Annule le poids des cellules de frontière (artefact LSQ aux BC)
@@ -291,7 +291,7 @@ def plot_reference_errors(ref_paths, mesh_hr, mesh_lr, out_dir):
             l2w = float(np.sqrt(num / den))
         else:
             l2w = None
-        cases.append(dict(aoa=aoa, mach_in=mach_in, err_rel=err_rel, l2w=l2w, sw2=sw2))
+        cases.append(dict(aoa=aoa, mach_in=mach_in, err_rel=err_rel, l2w=l2w, w2=w2_val))
 
     err_vmax = float(np.percentile(
         np.concatenate([c['err_rel'] for c in cases]), 95))
@@ -316,7 +316,7 @@ def plot_reference_errors(ref_paths, mesh_hr, mesh_lr, out_dir):
         parts = []
         if c['l2w'] is not None:
             parts.append(f"L₂w={c['l2w']*100:.3f}%")
-        parts.append(f"SW₂={c['sw2']*100:.3f}%")
+        parts.append(f"W₂={c['w2']*100:.3f}%")
         axes[ci].text(0.5, 0.03, '  ·  '.join(parts),
                       transform=axes[ci].transAxes,
                       ha='center', va='bottom', fontsize=8, fontweight='bold',

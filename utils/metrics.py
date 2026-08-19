@@ -28,8 +28,8 @@ def l2w_rel(pred: np.ndarray, ref: np.ndarray, w: np.ndarray) -> float:
     return float(np.sqrt(np.sum(w * (pred - ref) ** 2) / (np.sum(w * ref ** 2) + 1e-8)))
 
 
-def sliced_wasserstein(pred: np.ndarray, ref: np.ndarray, n_proj: int = 50, seed: int = 0) -> float:
-    # SW2 sliced Wasserstein entre deux champs scalaires (sort-based, O(N log N))
+def w2(pred: np.ndarray, ref: np.ndarray, seed: int = 0) -> float:
+    # W2 Wasserstein entre deux champs scalaires (sort-based, O(N log N))
     rng = np.random.default_rng(seed)
     p = pred.ravel().astype(np.float64)
     r = ref.ravel().astype(np.float64)
@@ -42,7 +42,7 @@ def sliced_wasserstein(pred: np.ndarray, ref: np.ndarray, n_proj: int = 50, seed
 
 def compute_field_errors(prim_pred: np.ndarray, prim_ref: np.ndarray, cell_adj_edges: np.ndarray,
             bary: np.ndarray, dxy: np.ndarray | None = None) -> dict[str, float]:
-    # L2, Linf, L2w (pondérée |grad p|) et SW2 sur Mach et les 4 primitives.
+    # L2, Linf, L2w (pondérée |grad p|) et W2 sur Mach et les 4 primitives.
     mach_p = to_mach(prim_pred)
     mach_r = to_mach(prim_ref)
 
@@ -60,7 +60,7 @@ def compute_field_errors(prim_pred: np.ndarray, prim_ref: np.ndarray, cell_adj_e
         'l2_mach': l2_rel(mach_p, mach_r),
         'linf_mach': linf_rel(mach_p, mach_r),
         'l2w_mach': l2w_rel(mach_p, mach_r, w),
-        'sw2_mach': sliced_wasserstein(mach_p, mach_r),
+        'w2_mach': w2(mach_p, mach_r),
     }
     for i, nm in enumerate(_PRIM_NAMES):
         res[f'l2_{nm}'] = l2_rel(prim_pred[:, i], prim_ref[:, i])
@@ -76,6 +76,8 @@ def aero_metrics(prim_pred: np.ndarray, prim_ref: np.ndarray, wc, mach_in: float
     ac_r = aero_coeffs(prim_ref, wc, mach_in)
     wall_mach_l2 = float(np.linalg.norm(ac_p['wall_mach'] - ac_r['wall_mach']) /
                          (np.linalg.norm(ac_r['wall_mach']) + 1e-8))
+    wall_cp_l2 = float(np.linalg.norm(ac_p['wall_cp'] - ac_r['wall_cp']) /
+                       (np.linalg.norm(ac_r['wall_cp']) + 1e-8))
     return {
         'CL_pred': float(ac_p['CL']),
         'CL_ref': float(ac_r['CL']),
@@ -86,6 +88,9 @@ def aero_metrics(prim_pred: np.ndarray, prim_ref: np.ndarray, wc, mach_in: float
         'wall_mach_l2': wall_mach_l2,
         'wall_mach_pred': ac_p['wall_mach'],
         'wall_mach_ref': ac_r['wall_mach'],
+        'wall_cp_l2': wall_cp_l2,
+        'wall_cp_pred': ac_p['wall_cp'],
+        'wall_cp_ref': ac_r['wall_cp'],
     }
 
 

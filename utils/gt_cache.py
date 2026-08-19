@@ -49,7 +49,7 @@ def build_gt_cache(all_cases: list[dict], wc,
     for i, c in enumerate(all_cases):
         if (i + 1) % 100 == 0:
             print(f"    {i+1}/{n}...")
-        d = load_sample(c['path'])
+        d = load_sample(c['path'], c.get('raw_hr_path'))
         if 'hr_primitives' not in d:
             wall_mach_lens.append(0)
             hr_prim_list.append(None)
