@@ -23,8 +23,8 @@ def shock_weighted_rel_mse(pred: jax.Array, target: jax.Array, weights: jax.Arra
     return (per_var / ref).mean()
 
 
-def sliced_wasserstein_loss(pred: jax.Array, ref: jax.Array, weights: jax.Array) -> jax.Array:
-    """Sliced Wasserstein SW2 (trié par variable) sur champ normalisé."""
+def w2_loss(pred: jax.Array, ref: jax.Array, weights: jax.Array) -> jax.Array:
+    """Wasserstein W2 (trié par variable) sur champ normalisé."""
     p = jnp.sort(pred, axis=0)
     r = jnp.sort(ref, axis=0)
     return jnp.mean((p - r) ** 2)
@@ -35,7 +35,7 @@ LOSS_FNS = {
     'rel_mse': rel_mse,
     'shock_weighted_mse': shock_weighted_mse,
     'shock_weighted_rel_mse': shock_weighted_rel_mse,
-    'sliced_wasserstein': sliced_wasserstein_loss,
+    'w2': w2_loss,
 }
 
 # Constantes physiques
@@ -61,9 +61,3 @@ def grad_p_lsq(pred: jax.Array, knn: dict) -> jax.Array:
     """Gradient de pression LSQ sur le maillage HR"""
     p = pred[:, 3]
     return jnp.einsum('ndk,nk->nd', knn['grad_op'], p[knn['hr_idx']] - p[:, None])
-
-
-def grad_all_lsq(pred: jax.Array, knn: dict) -> jax.Array:
-    """Gradient LSQ de toutes les variables → (N, 2, 4)"""
-    diff = pred[knn['hr_idx']] - pred[:, None, :]  # (N, k, 4)
-    return jnp.einsum('ndk,nkv->ndv', knn['grad_op'], diff)

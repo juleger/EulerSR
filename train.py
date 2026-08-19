@@ -1,15 +1,8 @@
 """
-Module d'entrainement des modèles de super-résolution sur les données CFD. Utilise JAX/Flax pour
-l'entrainement et la validation.
-
-- Parser d'arguments pour configurer l'entrainement (config YAML, hyperparamètres, géométrie, plage Mach/AoA, etc.)
-- Chargement des datasets (single ou multi-géométrie) avec normalisation des primitives LR/HR
-- Construction du modèle à partir de la configuration (DAM, FAM, etc.)
-- Entrainement du modèle avec fit(), sauvegarde du meilleur modèle, et callback pour visualiser les prédictions sur les cas de référence
-- Logger des métriques d'entrainement et de validation (loss, erreurs, etc.) dans le répertoire results/checkpoints/<run_name>
-- Plots de validation périodiques sur les cas de référence, avec possibilité de visualiser les champs HR/LR, les erreurs, les gradients, etc.
-- Support multi-géométrie : entrainement sur plusieurs datasets simultanément.
-
+Entraînement des modèles de super-résolution CFD (JAX/Flax) : parsing de la
+config/CLI, chargement des datasets (single ou multi-géométrie), construction
+du modèle (DAM/FAM/SIAM), fit() avec logging CSV et plots de validation
+périodiques sur les cas de référence.
 """
 
 
@@ -61,7 +54,7 @@ def _per_branch(val, n, default):
 
 
 def build_branches(datasets_cfg, data_root, hr_res, lr_res,
-                   mach_range, aoa_range, default_train_fraction):
+                   mach_range, aoa_range, default_train_fraction, aoa_step=None):
     """Construit les branches du mode multi-dataset.
 
     Une branche = un couple (géométrie, résolution_LR).
@@ -77,6 +70,7 @@ def build_branches(datasets_cfg, data_root, hr_res, lr_res,
             lr_list = [lr_list]
         mr = tuple(ds_cfg['mach_range']) if ds_cfg.get('mach_range') else mach_range
         ar = tuple(ds_cfg['aoa_range']) if ds_cfg.get('aoa_range') else aoa_range
+        as_ = ds_cfg['aoa_step'] if ds_cfg.get('aoa_step') is not None else aoa_step
         w_list = _per_branch(ds_cfg.get('weight'), len(lr_list), 1.0)
         tf_list = _per_branch(ds_cfg.get('train_fraction'), len(lr_list), default_train_fraction)
         for r, w, tf in zip(lr_list, w_list, tf_list):
@@ -84,7 +78,7 @@ def build_branches(datasets_cfg, data_root, hr_res, lr_res,
             branches.append({
                 'name': name, 'geom': geom, 'geom_id': gid, 'lr_res': r,
                 'layout': DataLayout.from_root(data_root, geom, r, hr_res),
-                'weight': float(w), 'mach_range': mr, 'aoa_range': ar,
+                'weight': float(w), 'mach_range': mr, 'aoa_range': ar, 'aoa_step': as_,
                 'train_fraction': float(tf),
             })
     return branches
@@ -99,12 +93,13 @@ def main():
     parser.add_argument('--wd', type=float, default=None)
     parser.add_argument('--val_every', type=int, default=None)
     parser.add_argument('--seed', type=int, default=None)
-    parser.add_argument('--loss', default=None, choices=['mse', 'rel_mse', 'shock_weighted_mse', 'shock_weighted_rel_mse', 'sliced_wasserstein'])
+    parser.add_argument('--loss', default=None, choices=['mse', 'rel_mse', 'shock_weighted_mse', 'shock_weighted_rel_mse', 'w2'])
     parser.add_argument('--schedule', default=None, choices=['cosine', 'constant'])
     parser.add_argument('--warmup_epochs', type=int, default=None)
     parser.add_argument('--grad_clip', type=float, default=None)
     parser.add_argument('--batch_size', type=int, default=None)
     parser.add_argument('--run_name', default=None)
+    parser.add_argument('--init_from', default=None, help='Checkpoint .pkl pour fine-tuning')
     parser.add_argument('--no_save_best', action='store_true')
     parser.add_argument('--data', default='data/', help='Racine des données (ex: data/)')
     parser.add_argument('--geometry', default=None, help='Géométrie pour mode single-dataset (ex: diamond)')
@@ -112,11 +107,13 @@ def main():
     parser.add_argument('--aoa', default=None, help='start:stop')
     parser.add_argument('--train_fraction', type=float, default=None,
                         help='Fraction du train set à utiliser (ex: 0.25). Seed fixé pour reproductibilité.')
+    parser.add_argument('--aoa_step', type=float, default=None, help='Pas AoA pour le train set (ex: 1.0)')
     args = parser.parse_args()
 
     cfg = load_cfg(args.config) if args.config else {}
     model_name = cfg.get('model', args.model)
     args.train_fraction = args.train_fraction if args.train_fraction is not None else cfg.get('training', {}).get('train_fraction', 1.0)
+    args.aoa_step = args.aoa_step if args.aoa_step is not None else cfg.get('training', {}).get('aoa_step')
 
     if model_name not in _MODELS:
         raise ValueError(f"Unknown model: {model_name!r}. Options: {list(_MODELS)}")
@@ -137,6 +134,7 @@ def main():
         loss = _get(args.loss, 'loss', 'rel_mse'),
         lambda_phys = tr.get('lambda_phys', 0.0),
         lambda_enthalpy = tr.get('lambda_enthalpy', 0.0),
+        lambda_endpoint = tr.get('lambda_endpoint', 0.0),
         schedule = _get(args.schedule, 'schedule', 'cosine'),
         warmup_epochs = _get(args.warmup_epochs, 'warmup_epochs', 0),
         grad_clip = _get(args.grad_clip, 'grad_clip', 0.0),
@@ -151,6 +149,7 @@ def main():
     mach_range = _parse_range(args.mach)
     aoa_range = _parse_range(args.aoa)
     use_lr_grad = cfg.get('architecture', {}).get('use_lr_grad', False)
+    coord_norm = cfg.get('architecture', {}).get('coord_norm', 'domain')
     preload = tr.get('preload', True)
     sw_factor = tr.get('shock_weight_factor', 1.0)
 
@@ -159,7 +158,7 @@ def main():
     # Dataset multi geometrie ou single dataset
     if 'datasets' in cfg:
         branches = build_branches(cfg['datasets'], data_root, hr_res, lr_res,
-                                  mach_range, aoa_range, args.train_fraction)
+                                  mach_range, aoa_range, args.train_fraction, args.aoa_step)
         # n_geoms = nombre de géométries distinctes (taille de l'embedding)
         cfg.setdefault('architecture', {})['n_geoms'] = len({b['geom_id'] for b in branches})
         print(f"  Branches ({len(branches)}) :")
@@ -170,11 +169,12 @@ def main():
         train_list, val_list, names, weights, knns = [], [], [], [], {}
         for b in branches:
             train_list.append(SRDataset(b['layout'], 'train', use_lr_grad=use_lr_grad,
-                mach_range=b['mach_range'], aoa_range=b['aoa_range'], preload=preload,
-                shock_weight_factor=sw_factor, geom_id=b['geom_id'], train_fraction=b['train_fraction']))
+                mach_range=b['mach_range'], aoa_range=b['aoa_range'], aoa_step=b['aoa_step'], preload=preload,
+                shock_weight_factor=sw_factor, geom_id=b['geom_id'], train_fraction=b['train_fraction'],
+                coord_norm=coord_norm))
             val_list.append(SRDataset(b['layout'], 'val', use_lr_grad=use_lr_grad,
                 mach_range=b['mach_range'], aoa_range=b['aoa_range'], preload=preload,
-                shock_weight_factor=sw_factor, geom_id=b['geom_id']))
+                shock_weight_factor=sw_factor, geom_id=b['geom_id'], coord_norm=coord_norm))
             names.append(b['name'])
             weights.append(b['weight'])
             knns[b['name']] = cls.load_knn(b['layout'], cfg)
@@ -230,14 +230,16 @@ def main():
         primary_layout = DataLayout.from_root(data_root, geom, lr_res, hr_res)
         knn = cls.load_knn(primary_layout, cfg)
         train_ds = SRDataset(primary_layout, 'train', use_lr_grad=use_lr_grad, mach_range=mach_range,
-            aoa_range=aoa_range, preload=preload, shock_weight_factor=sw_factor, train_fraction=args.train_fraction)
+            aoa_range=aoa_range, aoa_step=args.aoa_step, preload=preload, shock_weight_factor=sw_factor,
+            train_fraction=args.train_fraction, coord_norm=coord_norm)
         val_ds = SRDataset(primary_layout, 'val', use_lr_grad=use_lr_grad, mach_range=mach_range,
-            aoa_range=aoa_range, preload=preload, shock_weight_factor=sw_factor)
+            aoa_range=aoa_range, preload=preload, shock_weight_factor=sw_factor, coord_norm=coord_norm)
         stats = np.load(primary_layout.stats_path)
 
     cfg.setdefault('architecture', {})['use_lr_grad'] = (
         train_ds.datasets[0]._has_lr_grad if isinstance(train_ds, MultiSRDataset)
         else train_ds._has_lr_grad)
+    cfg.setdefault('architecture', {})['coord_norm'] = coord_norm
 
     mesh_hr = np.load(primary_layout.mesh_path(hr_res), allow_pickle=True).item()
     mesh_lr = np.load(primary_layout.mesh_path(primary_layout.lr_res), allow_pickle=True).item()
@@ -268,13 +270,14 @@ def main():
         try:
             plot_val_panels(m, knn_, ref_cases, stats, mesh_hr, mesh_lr,
                             pred_dir / f'ep{epoch:04d}.png',
-                            title=f'{run_label} — epoch {epoch}')
+                            title=f'{run_label} — epoch {epoch}', coord_norm=coord_norm)
             # Plots par géométrie secondaire
             for sec in secondary_plot_data:
                 if not sec['ref_cases']:
                     continue
                 plot_val_panels(m, sec['knn'], sec['ref_cases'], sec['stats'], sec['mesh_hr'], sec['mesh_lr'],
-                    pred_dir / f'ep{epoch:04d}_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — epoch {epoch}')
+                    pred_dir / f'ep{epoch:04d}_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — epoch {epoch}',
+                    coord_norm=coord_norm)
         except Exception as e:
             print(f"  pred_callback epoch {epoch} : {e}")
 
@@ -283,15 +286,22 @@ def main():
                    all(isinstance(v, dict) for v in knn.values()) else knn)
 
     model = cls(nnx.Rngs(train_cfg.seed), cfg)
+    if args.init_from:
+        print(f"\n── Initialisation depuis {args.init_from} (fine-tuning) ──────────")
+        pretrained = cls.load(args.init_from)
+        nnx.update(model, nnx.state(pretrained))
+        print("  Params + buffers (res_scale, mu_train/sig_train, ...) repris du checkpoint.")
+
     trained = model.fit(train_ds, val_ds, knn, train_cfg, out_dir='results/checkpoints',
         model_cfg=cfg, run_name=run_label, pred_callback=pred_callback)
 
     plot_val_panels(trained, primary_knn, ref_cases, stats, mesh_hr, mesh_lr,
-                    pred_dir / 'best.png', title=f'{run_label} — best')
+                    pred_dir / 'best.png', title=f'{run_label} — best', coord_norm=coord_norm)
     for sec in secondary_plot_data:
         if sec['ref_cases']:
             plot_val_panels(trained, sec['knn'], sec['ref_cases'], sec['stats'], sec['mesh_hr'], sec['mesh_lr'],
-                    pred_dir / f'best_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — best')
+                    pred_dir / f'best_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — best',
+                    coord_norm=coord_norm)
     print(f"Prediction plots: {pred_dir}/")
 
 

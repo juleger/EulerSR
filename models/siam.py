@@ -37,7 +37,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from models.base import SRModel, Buffer
 from utils.layout import DataLayout
-from models.dam import AMNet, build_context, load_hierarchical_knn, _LR_REF
+from models.dam import (AMNet, build_context, load_hierarchical_knn, _LR_REF,
+                        cfg_drop_geom_id)
 
 
 class SIAM(SRModel):
@@ -128,6 +129,9 @@ class SIAM(SRModel):
         # Dropout de conditionnement (classifier-free guidance) : regularise + guidance
         self.cfg_prob = float(flow.get('cfg_prob', 0.0))   # proba de dropout a l'entrainement
         self.cfg_scale = float(flow.get('cfg_scale', 1.0))  # echelle de guidance a l'inference
+        # Dropout CFG du conditionnement geometrique (entrainement uniquement)
+        self.geom_cfg_prob = float(arch.get('geom_cfg_prob', 0.0))
+        self._n_geoms = arch.get('n_geoms', 8)
 
         # Stats d'entrainement (denormalisation pour la projection de positivite)
         self.mu_train = Buffer(jnp.zeros((4,), jnp.float32))
@@ -309,7 +313,8 @@ class SIAM(SRModel):
             _, lr, tg, *_ = ds_b[int(i)]
             lr, tg = np.asarray(lr), np.asarray(tg)
             baseline = (w0[:, :, None] * lr[:, :4][i0]).sum(axis=1)
-            acc.append(tg - baseline if self.use_residual else tg)
+            # TOUJOURS le std du residu HR-IDW
+            acc.append(tg - baseline)
         return np.maximum(np.concatenate(acc, 0).std(0), 1e-6)
 
     def _pre_fit(self, branch_pairs: list, cfg) -> None:
@@ -347,7 +352,7 @@ class SIAM(SRModel):
         """Loss du pont : b(x_t, t | cond) doit matcher la derive x1 - x0 (+ bruit)."""
         ctx = build_context(self, hr, lr, knn_g)
         rs = self._res_scale(knn_g)              # [1, 4] : std residuel par canal (fixe)
-        kt, kz, kcfg = jax.random.split(key, 3)
+        kt, kz, kcfg, kgeom = jax.random.split(key, 4)
         t = self._sample_t(kt)
         alpha, dalpha, beta, dbeta, gamma, dgamma = self._interp_coeffs(t)
         z = jax.random.normal(kz, ctx['baseline'].shape)   # bruit unitaire
@@ -370,6 +375,11 @@ class SIAM(SRModel):
             scal_used = jnp.where(drop, jnp.zeros_like(ctx['scal']), ctx['scal'])
         else:
             scal_used = ctx['scal']
+        # Dropout CFG du geom_id (conditionnement géométrique), indépendant du précédent
+        if self.geom_cfg_prob > 0:
+            ctx = dict(ctx)
+            ctx['geom_id'] = cfg_drop_geom_id(ctx['geom_id'], self._n_geoms,
+                                              self.geom_cfg_prob, kgeom)
         out = self._net_out(x_t, t, ctx, knn_g, scal=scal_used)
         v = out[..., :4]
         loss = aux['loss_fn'](v, drift_target, wt)

@@ -7,6 +7,7 @@ import numpy as np
 
 from utils.refs import _PROC_RE
 from utils.layout import DataLayout, load_sample
+from utils.coords import center_scale
 
 _MACH_MID = (0.7 + 3.0) / 2
 _MACH_SCALE = (3.0 - 0.7) / 2
@@ -28,11 +29,12 @@ class SRDataset:
                  use_lr_grad: bool = True,
                  mach_range: tuple | None = None,
                  aoa_range: tuple | None = None,
+                 aoa_step: float | None = None,
                  preload: bool = True,
                  shock_weight_factor: float = 1.0,
                  geom_id: int = 0,
                  train_fraction: float = 1.0,
-                 seed: int = 42):
+                 coord_norm: str = 'domain'):
         split_dir = layout.proc_dir() / split
         d = np.load(layout.stats_path)
         self.mu = d['mu'].astype(np.float32)
@@ -41,7 +43,8 @@ class SRDataset:
 
         self.entries: list[tuple] = []
 
-        # Filtrage des snapshots par plage de Mach/AoA
+        # Filtrage des snapshots par plage de Mach/AoA (+ grille d'AoA : aoa_step=1.0
+        # ne garde que les AoA entiers, ex: exclut les demi-AoA -3.5, -2.5, ...)
         for f in sorted(split_dir.glob('aoa*.npz')):
             m = _PROC_RE.match(f.stem)
             if not m:
@@ -50,6 +53,8 @@ class SRDataset:
             if mach_range is not None and not (mach_range[0] <= mach <= mach_range[1]):
                 continue
             if aoa_range is not None and not (aoa_range[0] <= aoa <= aoa_range[1]):
+                continue
+            if aoa_step is not None and abs(aoa / aoa_step - round(aoa / aoa_step)) > 1e-6:
                 continue
             self.entries.append((f, mach, aoa))
 
@@ -71,13 +76,20 @@ class SRDataset:
         self._has_lr_grad = False
         self._pos_center = np.zeros(2, np.float32)
         self._pos_scale = 1.0
+        self.coord_norm = coord_norm
         if self.entries:
             probe = load_sample(self.entries[0][0])
             if use_lr_grad:
                 self._has_lr_grad = 'lr_primitives_grad' in probe
-            pts = np.concatenate([probe['hr_node_pos'], probe['lr_node_pos']], axis=0).astype(np.float64)
-            self._pos_center = ((pts.max(0) + pts.min(0)) / 2).astype(np.float32)
-            self._pos_scale = float((pts.max(0) - pts.min(0)).max() / 2)
+            mesh_meta = None
+            if coord_norm == 'object':
+                import euler.jax_fvm.src.mesh  # noqa: requis pour unpickle
+                mesh_hr = np.load(layout.mesh_path(layout.hr_res), allow_pickle=True).item()
+                mesh_meta = mesh_hr.metadata
+            ctr, scl = center_scale(probe['hr_node_pos'], probe['lr_node_pos'],
+                                    coord_norm, mesh_meta)
+            self._pos_center = ctr.astype(np.float32)
+            self._pos_scale = scl
 
         # Preload : charge tous les samples en RAM numpy une seule fois
         # Evite les I/O répétitifs mais demande d'allouer bcp de RAM sur slurm (> 10 Go pour train)
@@ -89,10 +101,6 @@ class SRDataset:
             self._cache = [self._load(i) for i in range(len(self.entries))]
             _mb = sum(sum(a.nbytes for a in item) for item in self._cache) / 1e6
             print(f" {_mb:.0f} Mo  ({time.time()-_t0:.1f}s)")
-
-    @property
-    def lr_feat_dim(self) -> int:
-        return 9 if self._has_lr_grad else 6  # prim(4)+pos(2)[+grad_p(2)+div_u(1)]
 
     def __len__(self):
         return len(self.entries)
@@ -153,17 +161,10 @@ class SRDataset:
 
 
 class MultiSRDataset:
-    """Dataset global multi-géométrie pour entraîner sur plusieurs datasets simultanément.
-
-    Même approche que SRDataset, gère les deux datasets simultanément et fournit des batches mono-géométrie
-    via iter_batches(), et ont leurs propres stats mu/sig pour normaliser les primitives LR et HR.
-    Split train/val/test déterministe par AoA et Mach trié pour chaque dataset.
-
-    Cette approche permet un modèle unique plus scalable, tout en empêchant un Catastrophic Forgetting entre géométries
-    Car chaque batch ne contient qu'une seule géométrie, le modèle ne peut pas "oublier" l'autre géométrie.
-    Ce n'est pas du fine tuning, car les poids sont partagés entre géométries, mais chaque batch est mono-géométrie.
-
-    Geometric embedding : chaque géométrie est identifiée par un entier unique (0, 1, ...)
+    """Dataset multi-géométrie : agrège plusieurs SRDataset, chacun avec ses
+    propres stats mu/sig, et fournit des batches mono-géométrie via
+    iter_batches() — évite le catastrophic forgetting entre géométries tout
+    en partageant les poids du modèle. Geometric embedding : un entier par géométrie.
     """
 
     def __init__(self, datasets: list, names: list[str],

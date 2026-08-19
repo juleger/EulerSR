@@ -1,32 +1,19 @@
 """
-FAM : Flow-based Attention Mesh (Model) :
-Flow matching conditionnel en espace complet pour la super-résolution CFD.
+FAM : Flow-based Attention Mesh (Model) : flow matching conditionnel en
+espace complet pour la super-résolution CFD.
 
-Au lieu de prédire directement HR (déterministe) ou de diffuser en latent,
-on apprend un champ de vitesse v(x_t, t | cond) qui transporte du bruit
-gaussien vers le résidu r = HR - IDW(LR) (normalisé par canal).
+On apprend v(x_t, t | cond) qui transporte du bruit gaussien vers le
+résidu r = HR - IDW(LR) (normalisé par canal) :
     x_t = (1-t)*x0 + t*r,  v* = r - x0,  x0 ~ N(0, I)
 L'échantillonnage intègre l'ODE dx/dt = v par schéma de Heun (n_steps pas).
-La prédiction finale est baseline IDW + r_hat * res_scale.
+La prédiction finale est baseline IDW + r_hat * res_scale. Plus rapide et
+plus stable que la diffusion pour ce problème (trajectoire résiduelle courte).
 
-Avantage sur la diffusion pour ce genre de problèmes :
-- Moins de pas d'intégration (typiquement 1000 pour DDPM a 50/100 pour DDIM) : inférence plus rapide
-- L'approche résiduelle rend la trajectoire très courte et plus stable
-- Plus naturel pour conditionner la super-résolution
-
-La diffusion modélise la distribution en prédisant le bruit ajouté, ou bien le score
-Sans conditionnement, elle est efficace pour générer des images réalistes, mais pour la super-résolution CFD,
-Le flow apprend directement les trajectoires de transport vers la distribution cible, plus efficace pour la SR conditionnelle
-
-Backbone U multi-échelles sur hiérarchie de maillages :
-- niveau 0 (HR)       : encodage par noeud + self-attention locale kNN
-- descente l -> l+1   : cross-attention locale (requêtes = noeuds grossiers)
-- bottleneck          : self-attention complète (champ réceptif global)
-- remontée l+1 -> l   : cross-attention locale résiduelle + skip
-- décodeur            : LayerNorm + Linear -> vitesse (4 canaux), init à zéro
-Conditionnement : FiLM (t, Mach, AoA) dans chaque bloc ; champ LR interpolé
-IDW (+ gradients) injecté à chaque niveau
-Même architecture que DAM, mais avec variable de temps t et intégration ODE pour l'échantillonnage.
+Backbone U multi-échelles sur hiérarchie de maillages (identique à DAM, avec
+temps t + intégration ODE) : self-attention locale HR -> cross-attention
+descendante -> self-attention globale au bottleneck -> cross-attention
+remontante -> décodeur linéaire (init à zéro). Conditionnement FiLM
+(t, Mach, AoA) à chaque bloc ; champ LR IDW (+ gradients) injecté à chaque niveau.
 """
 
 import sys
@@ -42,7 +29,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from models.base import SRModel, Buffer
 from utils.layout import DataLayout
-from models.dam import AMNet, build_context, load_hierarchical_knn, _LR_REF
+from models.dam import (AMNet, build_context, load_hierarchical_knn, _LR_REF,
+                        cfg_drop_geom_id)
 from utils.viz._style import VAR_LABELS
 
 
@@ -88,7 +76,15 @@ class FAM(SRModel):
         self.n_val_gen = flow.get('n_val_gen', 16)
         self.sample_seed = flow.get('sample_seed', 0)
         self.cfg_prob = float(flow.get('cfg_prob', 0.0))  # prob. dropout cond. (training)
-        self.cfg_scale = float(flow.get('cfg_scale', 1.0))  # guidance scale (inference)
+        self.cfg_scale = float(flow.get('cfg_scale', 1.0))  # guidance scale Mach/AoA (inference)
+        # Guidance CFG sur la geometrie (inference) : null geom_id -> token n_geoms,
+        # meme mecanisme que cfg_scale mais sur le conditionnement geometrique.
+        # 1.0 = desactive (comportement inchange). Necessite geom_cfg_prob > 0 a
+        # l'entrainement pour que le token nul soit reellement entraine.
+        self.geom_cfg_scale = float(flow.get('geom_cfg_scale', 1.0))
+        # Dropout CFG du conditionnement géométrique (entraînement uniquement)
+        self.geom_cfg_prob = float(arch.get('geom_cfg_prob', 0.0))
+        self._n_geoms = arch.get('n_geoms', 8)
         # Distribution d'échantillonnage de t à l'entraînement (flow matching)
         self._t_dist = flow.get('t_dist', 'uniform')
         self._sigma_t = float(flow.get('sigma_t', 1.0))
@@ -105,10 +101,10 @@ class FAM(SRModel):
         self.sig_train = Buffer(jnp.ones((4,), jnp.float32))
 
     def velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict,
-                 scal: jax.Array | None = None) -> jax.Array:
+                 scal: jax.Array | None = None, geom_id: jax.Array | None = None) -> jax.Array:
         s = ctx['scal'] if scal is None else scal
-        return self.net(ctx['c'], s, knn['fm'], ctx['wall'], ctx['geom_id'],
-                        x_t=x_t, t=t)
+        g = ctx['geom_id'] if geom_id is None else geom_id
+        return self.net(ctx['c'], s, knn['fm'], ctx['wall'], g, x_t=x_t, t=t)
 
     def _res_scale(self, knn: dict) -> jax.Array:
         """Échelle du résiduel pour cette branche de résolution LR (pour l'inférence)."""
@@ -123,12 +119,19 @@ class FAM(SRModel):
         return (prim - self.mu_train.value) / self.sig_train.value
 
     def _guided_velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict) -> jax.Array:
+        if self.cfg_scale == 1.0 and self.geom_cfg_scale == 1.0:
+            return self.velocity(x_t, t, ctx, knn)
         v_cond = self.velocity(x_t, t, ctx, knn)
-        if self.cfg_scale == 1.0:
-            return v_cond
-        scal_null = jnp.zeros_like(ctx['scal'])
-        v_uncond = self.velocity(x_t, t, ctx, knn, scal=scal_null)
-        return v_uncond + self.cfg_scale * (v_cond - v_uncond)
+        v = v_cond
+        if self.cfg_scale != 1.0:
+            scal_null = jnp.zeros_like(ctx['scal'])
+            v_uncond = self.velocity(x_t, t, ctx, knn, scal=scal_null)
+            v = v + (self.cfg_scale - 1.0) * (v_cond - v_uncond)
+        if self.geom_cfg_scale != 1.0:
+            geom_null = jnp.full_like(ctx['geom_id'], self._n_geoms)
+            v_uncond_geom = self.velocity(x_t, t, ctx, knn, geom_id=geom_null)
+            v = v + (self.geom_cfg_scale - 1.0) * (v_cond - v_uncond_geom)
+        return v
 
     def _integrate(self, x0: jax.Array, ctx: dict, knn: dict) -> jax.Array:
         dt = 1.0 / self.n_steps
@@ -249,7 +252,7 @@ class FAM(SRModel):
         ctx = build_context(self, hr, lr, knn_g)
         rs = self._res_scale(knn_g)
         r = ((tg - ctx['baseline']) / rs if self.use_residual else tg / rs)
-        kt, kx, kcfg = jax.random.split(key, 3)
+        kt, kx, kcfg, kgeom = jax.random.split(key, 4)
         t = self._sample_t(kt)
         x0 = jax.random.normal(kx, r.shape)
         x_t = (1.0 - t) * x0 + t * r
@@ -259,12 +262,26 @@ class FAM(SRModel):
             scal_used = jnp.where(drop, jnp.zeros_like(ctx['scal']), ctx['scal'])
         else:
             scal_used = ctx['scal']
+        # Dropout CFG du geom_id (conditionnement géométrique), indépendant du précédent
+        if self.geom_cfg_prob > 0:
+            ctx = dict(ctx)
+            ctx['geom_id'] = cfg_drop_geom_id(ctx['geom_id'], self._n_geoms,
+                                              self.geom_cfg_prob, kgeom)
         v = self.velocity(x_t, t, ctx, knn_g, scal=scal_used)
         loss = aux['loss_fn'](v, r - x0, wt)
-        # Soft-loss physique sur l'endpoint prédit en un pas : r_hat = x_t + (1-t)*v
-        if aux['lambda_phys'] > 0 or aux['lambda_enthalpy'] > 0:
+        # r_hat = x_t + (1-t)*v : extrapolation Euler un pas vers t=1 (endpoint prédit).
+        # Si v == v* = r - x0 exactement, r_hat == r quel que soit t -- sert de base à la
+        # fois au soft-loss physique et à la loss d'endpoint direct ci-dessous.
+        if aux['lambda_phys'] > 0 or aux['lambda_enthalpy'] > 0 or aux.get('lambda_endpoint', 0.0) > 0:
             r_hat = x_t + (1.0 - t) * v
-            field = (ctx['baseline'] + r_hat * rs if self.use_residual
-                     else r_hat * rs)
-            loss = loss + self._phys_terms(field, hr, gp, knn_g, aux)
+            # Loss d'endpoint : supervise directement r_hat contre la vraie cible r, à
+            # n'importe quel t échantillonné (contrairement à la loss de vitesse qui ne
+            # contraint que la direction locale). Compense le manque de signal proche de
+            # t=1 sans toucher à la distribution d'échantillonnage de t elle-même.
+            if aux.get('lambda_endpoint', 0.0) > 0:
+                loss = loss + aux['lambda_endpoint'] * aux['loss_fn'](r_hat, r, wt)
+            if aux['lambda_phys'] > 0 or aux['lambda_enthalpy'] > 0:
+                field = (ctx['baseline'] + r_hat * rs if self.use_residual
+                         else r_hat * rs)
+                loss = loss + self._phys_terms(field, hr, gp, knn_g, aux)
         return loss

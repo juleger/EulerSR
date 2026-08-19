@@ -1,17 +1,11 @@
 """
-Module de base pour les réseaux de neurones de super-résolution de champs CFD (prédiction directe de HR à partir de LR)
+Modèles de base pour la super-résolution de champs CFD (prédiction HR à partir de LR).
 
-SRModel : classe de base abstraite pour les modèles de super-résolution. Définit l'interface commune pour la prédiction, le chargement des kNN, l'entraînement et l'évaluation.
-MLP : classe utilitaire pour un perceptron multi-couches simple, utilisé dans les modèles de super-résolution.
+SRModel : classe abstraite définissant l'interface commune (predict, load_knn, fit).
+MLP : perceptron multi-couches utilitaire.
 
-Hyperparamètres :
-- resolution : résolution LR et HR du maillage (ex: 0.1 et 0.025)
-- architecture : dict contenant les détails de l'architecture du modèle (ex: dimensions des couches, utilisation des gradients CFD LR, échelles de kNN, etc.)
-- training : dict contenant les détails de l'entraînement (ex: nombre d'époques, taux d'apprentissage, poids de la loss physique, etc.)
-- datasets : si multi-géométrie, liste des datasets à utiliser pour l'entraînement et la validation, avec leurs propres stats mu/sig pour normaliser les primitives LR et HR.
-
-Entraînement :
-- fit() : méthode d'entraînement du modèle sur un dataset de train et de validation, avec évaluation périodique sur la validation, sauvegarde du meilleur modèle, et possibilité de callback pour visualiser les prédictions pendant l'entraînement.
+Config via dict (architecture/training/datasets) ; fit() gère l'entraînement,
+la validation périodique, le meilleur checkpoint et un callback de visualisation.
 """
 
 import csv
@@ -115,6 +109,7 @@ class TrainConfig:
     batch_size: int = 1
     lambda_phys: float = 0.0
     lambda_enthalpy: float = 0.0
+    lambda_endpoint: float = 0.0
     warmup_epochs: int = 0
     ema_decay: float = 0.0
 
@@ -398,6 +393,17 @@ class SRModel(nnx.Module):
             self.mu_train.value = jnp.array(_primary_ds.mu, jnp.float32)
             self.sig_train.value = jnp.array(_primary_ds.sig, jnp.float32)
 
+        # Stats de dénormalisation par branche + calibration
+        _name_to_ds = {nm: (train_ds.datasets[i] if _is_multi else train_ds)
+                       for i, nm in enumerate(_all_names)}
+        for nm in _all_names:
+            ds_b = _name_to_ds[nm]
+            _all_knns[nm]['mu'] = jnp.array(ds_b.mu, jnp.float32)
+            _all_knns[nm]['sig'] = jnp.array(ds_b.sig, jnp.float32)
+        _branch_pairs = [(_name_to_ds[nm], _all_knns[nm]) for nm in _all_names]
+
+        self._pre_fit(_branch_pairs, cfg)
+
         _steps_per_epoch = math.ceil(len(train_ds) / max(cfg.batch_size, 1))
         n_steps = cfg.epochs * _steps_per_epoch
         warmup_steps = cfg.warmup_epochs * _steps_per_epoch
@@ -426,21 +432,11 @@ class SRModel(nnx.Module):
         batch_size = cfg.batch_size
         lambda_phys = cfg.lambda_phys
         lambda_enth = cfg.lambda_enthalpy
-
-        # Stats de dénormalisation par branche
-        _name_to_ds = {nm: (train_ds.datasets[i] if _is_multi else train_ds)
-                       for i, nm in enumerate(_all_names)}
-        for nm in _all_names:
-            ds_b = _name_to_ds[nm]
-            _all_knns[nm]['mu'] = jnp.array(ds_b.mu, jnp.float32)
-            _all_knns[nm]['sig'] = jnp.array(ds_b.sig, jnp.float32)
-        _branch_pairs = [(_name_to_ds[nm], _all_knns[nm]) for nm in _all_names]
-
-        self._pre_fit(_branch_pairs, cfg)
+        lambda_endpoint = cfg.lambda_endpoint
 
         # aux statique capturé par les closures jit (loss + poids physiques)
         _aux = {'loss_fn': _loss_fn, 'lambda_phys': lambda_phys,
-                'lambda_enthalpy': lambda_enth}
+                'lambda_enthalpy': lambda_enth, 'lambda_endpoint': lambda_endpoint}
         use_phys_loss = lambda_phys > 0 and 'grad_op' in _primary_knn
 
         def _make_step_fns(knn_g):
