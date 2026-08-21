@@ -135,6 +135,7 @@ def main():
         lambda_phys = tr.get('lambda_phys', 0.0),
         lambda_enthalpy = tr.get('lambda_enthalpy', 0.0),
         lambda_endpoint = tr.get('lambda_endpoint', 0.0),
+        lambda_endpoint_warmup_epochs = tr.get('lambda_endpoint_warmup_epochs', 0),
         schedule = _get(args.schedule, 'schedule', 'cosine'),
         warmup_epochs = _get(args.warmup_epochs, 'warmup_epochs', 0),
         grad_clip = _get(args.grad_clip, 'grad_clip', 0.0),

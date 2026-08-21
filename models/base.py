@@ -110,6 +110,7 @@ class TrainConfig:
     lambda_phys: float = 0.0
     lambda_enthalpy: float = 0.0
     lambda_endpoint: float = 0.0
+    lambda_endpoint_warmup_epochs: int = 0  # rampe lineaire 0 -> lambda_endpoint (0 = pas de warmup)
     warmup_epochs: int = 0
     ema_decay: float = 0.0
 
@@ -435,15 +436,22 @@ class SRModel(nnx.Module):
         lambda_endpoint = cfg.lambda_endpoint
 
         # aux statique capturé par les closures jit (loss + poids physiques)
+        # use_endpoint : flag STATIQUE (python bool, connu a la compilation) qui decide
+        # si le terme d'endpoint est calcule ; independant de sa ponderation courante
+        # (lambda_endpoint ci-dessous, traceee/dynamique pour le warmup). Ne jamais
+        # brancher un `if` python sur aux['lambda_endpoint'] dans le modele : sa valeur
+        # est un jnp scalaire trace, pas un float -- cf. TracerBoolConversionError.
         _aux = {'loss_fn': _loss_fn, 'lambda_phys': lambda_phys,
-                'lambda_enthalpy': lambda_enth, 'lambda_endpoint': lambda_endpoint}
+                'lambda_enthalpy': lambda_enth, 'lambda_endpoint': lambda_endpoint,
+                'use_endpoint': lambda_endpoint > 0}
         use_phys_loss = lambda_phys > 0 and 'grad_op' in _primary_knn
 
         def _make_step_fns(knn_g):
             @nnx.jit
-            def _ss(opt, hr, lr, tg, wt, gp_tg, key):
+            def _ss(opt, hr, lr, tg, wt, gp_tg, key, lam_ep):
                 def lf(m):
-                    return m._sample_loss(hr, lr, tg, wt, gp_tg, knn_g, key, _aux)
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
+                    return m._sample_loss(hr, lr, tg, wt, gp_tg, knn_g, key, aux_ep)
                 loss, grads = nnx.value_and_grad(lf)(opt.model)
                 leaves = jax.tree_util.tree_leaves(grads)
                 grad_norm = jnp.sqrt(sum(jnp.sum(g ** 2) for g in leaves if hasattr(g, 'shape')))
@@ -451,11 +459,12 @@ class SRModel(nnx.Module):
                 return loss, grad_norm
 
             @nnx.jit
-            def _sb(opt, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b, keys):
+            def _sb(opt, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b, keys, lam_ep):
                 def lf(m):
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
                     losses = jax.vmap(
                         lambda hr, lr, tg, wt, gp, k:
-                            m._sample_loss(hr, lr, tg, wt, gp, knn_g, k, _aux)
+                            m._sample_loss(hr, lr, tg, wt, gp, knn_g, k, aux_ep)
                     )(hr_b, lr_b, tg_b, wt_b, gp_b, keys)
                     return (losses * valid_b).sum() / valid_b.sum()
                 loss, grads = nnx.value_and_grad(lf)(opt.model)
@@ -475,7 +484,7 @@ class SRModel(nnx.Module):
 
         _has_flow = hasattr(_all_val[0], 'entries')
 
-        def _do_one_batch(raw, sfns, step_key):
+        def _do_one_batch(raw, sfns, step_key, lam_ep):
             _ss, _sb, _ = sfns
             B = len(raw)
             if batch_size > 1:
@@ -489,12 +498,12 @@ class SRModel(nnx.Module):
                 wt_b = jnp.array(np.stack([s[3] for s in samples]))
                 gp_b = jnp.array(np.stack([s[4] for s in samples]))
                 keys = jax.random.split(step_key, batch_size)
-                loss, gnorm = _sb(optimizer, hr_b, lr_b, tg_b, wt_b, jnp.array(valid), gp_b, keys)
+                loss, gnorm = _sb(optimizer, hr_b, lr_b, tg_b, wt_b, jnp.array(valid), gp_b, keys, lam_ep)
                 return float(loss) * B_real, B_real, float(gnorm)
             else:
                 hr, lr, tg, wt, gp = raw[0]
                 loss, gnorm = _ss(optimizer, jnp.array(hr), jnp.array(lr),
-                                  jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key)
+                                  jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key, lam_ep)
                 return float(loss), 1, float(gnorm)
 
         rng = np.random.default_rng(cfg.seed)
@@ -517,6 +526,10 @@ class SRModel(nnx.Module):
         extra_loss = ""
         if use_phys_loss:
             extra_loss += f"  lambda_phys={lambda_phys}"
+        if lambda_endpoint > 0:
+            ep_warm = (f" (warmup {cfg.lambda_endpoint_warmup_epochs}ep)"
+                      if cfg.lambda_endpoint_warmup_epochs > 0 else "")
+            extra_loss += f"  lambda_endpoint={lambda_endpoint}{ep_warm}"
         warmup_str = f"  warmup={cfg.warmup_epochs}ep" if cfg.warmup_epochs > 0 else ""
         _ema_str = f"  ema={decay}" if decay > 0 else ""
         _multi_str = f"  datasets={_all_names}" if _is_multi else ""
@@ -545,12 +558,18 @@ class SRModel(nnx.Module):
             ep_loss, n = 0.0, 0
             _ep_gnorm_sum, _ep_gnorm_n, _ep_n_clipped = 0.0, 0, 0
 
+            if cfg.lambda_endpoint_warmup_epochs > 0:
+                lam_ep_val = lambda_endpoint * min(1.0, epoch / cfg.lambda_endpoint_warmup_epochs)
+            else:
+                lam_ep_val = lambda_endpoint
+            lam_ep = jnp.asarray(lam_ep_val, jnp.float32)
+
             if _is_multi:
                 # Mode multi-dataset : batches mono-géométrie routés vers le bon knn
                 for raw, geom_idx in train_ds.iter_batches(batch_size, rng):
                     sfns = _all_step_fns[_all_names[geom_idx]]
                     step_key = jax.random.fold_in(base_key, _n_grad_steps)
-                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key)
+                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key, lam_ep)
                     ep_loss += loss_c; n += B_r; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:
@@ -563,7 +582,7 @@ class SRModel(nnx.Module):
                 for bi in range(0, len(idx), batch_size):
                     raw = [train_ds[int(i)] for i in idx[bi:bi + batch_size]]
                     step_key = jax.random.fold_in(base_key, _n_grad_steps)
-                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key)
+                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key, lam_ep)
                     ep_loss += loss_c; n += B_r; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:
