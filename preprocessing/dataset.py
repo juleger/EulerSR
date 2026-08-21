@@ -7,11 +7,28 @@ import numpy as np
 
 from utils.refs import _PROC_RE
 from utils.layout import DataLayout, load_sample
-from utils.coords import center_scale
+from utils.coords import center_scale, object_center_scale
 
 _MACH_MID = (0.7 + 3.0) / 2
 _MACH_SCALE = (3.0 - 0.7) / 2
 _AOA_SCALE = 5.0
+_SUBSAMPLE_SEED = 0  # graine du sous-echantillonnage train_fraction (reproductible)
+
+
+def _farthest_point_subsample(coords: np.ndarray, k: int, seed: int = 0) -> np.ndarray:
+    """Selection gloutonne maximin (farthest-point) de k points parmi coords (n, d)."""
+    n = coords.shape[0]
+    if k >= n:
+        return np.arange(n)
+    rng = np.random.default_rng(seed)
+    selected = np.empty(k, dtype=np.int64)
+    selected[0] = rng.integers(n)
+    d2 = np.sum((coords - coords[selected[0]]) ** 2, axis=1)
+    for i in range(1, k):
+        nxt = int(np.argmax(d2))
+        selected[i] = nxt
+        d2 = np.minimum(d2, np.sum((coords - coords[nxt]) ** 2, axis=1))
+    return selected
 
 
 class SRDataset:
@@ -58,18 +75,13 @@ class SRDataset:
                 continue
             self.entries.append((f, mach, aoa))
 
-        # Sous-échantillonnage stratifié reproductible du train set uniforme pour ablation
+        # Sous-échantillonnage du train set pour ablation (train_fraction), reproductible
         if split == 'train' and train_fraction < 1.0:
-            by_aoa: dict[float, list] = {}
-            for e in self.entries:
-                by_aoa.setdefault(e[2], []).append(e)
-            sampled = []
-            for aoa_val in sorted(by_aoa):
-                group = sorted(by_aoa[aoa_val], key=lambda e: e[1])  # tri par Mach croissant
-                k = max(1, int(round(len(group) * train_fraction)))
-                idx = np.unique(np.linspace(0, len(group) - 1, k).astype(int))
-                sampled.extend(group[i] for i in idx)
-            self.entries = sampled
+            k = max(1, int(round(len(self.entries) * train_fraction)))
+            coords = np.array([[(mach - _MACH_MID) / _MACH_SCALE, aoa / _AOA_SCALE]
+                               for _, mach, aoa in self.entries])
+            idx = _farthest_point_subsample(coords, k, seed=_SUBSAMPLE_SEED)
+            self.entries = [self.entries[i] for i in idx]
 
         self._geom_id = geom_id
         self._sw_factor = shock_weight_factor
