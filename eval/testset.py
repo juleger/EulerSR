@@ -1,5 +1,6 @@
 """TestSet : géométrie + résolution + cas d'évaluation, avec KNN adaptatif."""
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,8 +10,9 @@ import matplotlib.tri as mtri
 
 from eval.loader import ModelEntry
 from utils.aero import WallCache, build_wall_cache
-from utils.refs import REFERENCE_CASES, NACA_REFERENCE_CASES, find_ref_file, _PROC_RE, _res_tag
+from utils.refs import REFERENCE_CASES, NACA_REFERENCE_CASES, find_ref_file, _PROC_RE
 from utils.layout import DataLayout
+from models.dam import _LR_REF
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -21,7 +23,33 @@ _OOD_LABELS = {
     'full_ood': 'OOD géo+résolution',
 }
 
+# Résolution HR canonique
+_HR_REF = 0.025
+_RAW_FNAME_RE = re.compile(r'AOA([+-]?[0-9.]+)_M([0-9.]+)_.*_t([0-9.]+)\.npz$')
+
+
+def _index_raw_hr(layout: DataLayout, hr_res: float) -> dict[tuple, Path]:
+    """Indexe les solutions FVM brutes d'une résolution par (aoa_str, mach_str),
+    en gardant le plus grand temps d'intégration dispo pour chaque cas."""
+    res_dir = layout.root / 'raw' / layout.geometry / f'h{hr_res:g}'
+    by_key: dict[tuple, dict[float, Path]] = {}
+    if not res_dir.exists():
+        return {}
+    for aoa_dir in sorted(res_dir.iterdir()):
+        if not aoa_dir.is_dir():
+            continue
+        for f in sorted(aoa_dir.iterdir()):
+            m = _RAW_FNAME_RE.search(f.name)
+            if not m:
+                continue
+            key = (m.group(1), m.group(2))
+            by_key.setdefault(key, {})[float(m.group(3))] = f
+    return {k: ts[max(ts)] for k, ts in by_key.items()}
+
+
 def _find_ref_cases(layout: DataLayout, specs: list[tuple]) -> list[dict]:
+    extrapolate = abs(layout.hr_res - _HR_REF) > 1e-6
+    raw_index = _index_raw_hr(layout, layout.hr_res) if extrapolate else None
     for split in ('test', 'val', 'train'):
         split_dir = layout.proc_dir() / split
         if not split_dir.exists():
@@ -32,42 +60,79 @@ def _find_ref_cases(layout: DataLayout, specs: list[tuple]) -> list[dict]:
         found = []
         for mach_t, aoa_t, lbl in specs:
             p = find_ref_file(files, mach_t, aoa_t)
-            if p:
-                found.append({'label': lbl, 'path': str(p),
-                              'mach_in': mach_t, 'aoa_in': aoa_t})
+            if not p:
+                continue
+            case = {'label': lbl, 'path': str(p), 'mach_in': mach_t, 'aoa_in': aoa_t}
+            if extrapolate:
+                m = _PROC_RE.match(Path(p).stem)
+                if not m:
+                    continue
+                key = (f'{float(m.group(1)):.2f}', f'{float(m.group(2)):.2f}')
+                raw_path = raw_index.get(key)
+                if raw_path is None:
+                    continue
+                case['raw_hr_path'] = str(raw_path)
+            found.append(case)
         if found:
             return found
     return []
 
 
-def _find_test_cases(layout: DataLayout) -> list[dict]:
-    split_dir = layout.proc_dir() / 'test'
+def _find_split_cases(layout: DataLayout, split: str) -> list[dict]:
+    split_dir = layout.proc_dir() / split
     if not split_dir.exists():
         return []
+    extrapolate = abs(layout.hr_res - _HR_REF) > 1e-6
+    raw_index = _index_raw_hr(layout, layout.hr_res) if extrapolate else None
+    if extrapolate and not raw_index:
+        print(f"  [WARN] pas de solutions brutes a hr={layout.hr_res:g} "
+              f"dans raw/{layout.geometry}/h{layout.hr_res:g}/ : {split} vide.")
     cases = []
     for f in sorted(split_dir.glob('aoa*.npz')):
         m = _PROC_RE.match(f.stem)
         if not m:
             continue
         aoa, mach = float(m.group(1)), float(m.group(2))
-        cases.append({'path': str(f), 'mach_in': mach, 'aoa_in': aoa,
-                      'label': f.stem, 'split': 'test'})
+        case = {'path': str(f), 'mach_in': mach, 'aoa_in': aoa,
+                'label': f.stem, 'split': split}
+        if extrapolate:
+            raw_path = raw_index.get((f'{aoa:.2f}', f'{mach:.2f}'))
+            if raw_path is None:
+                continue
+            case['raw_hr_path'] = str(raw_path)
+        cases.append(case)
     return cases
 
 
-def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: dict) -> dict:
-    """KNN hiérarchique pour FAM/DAM sur une géométrie quelconque."""
+def _find_test_cases(layout: DataLayout) -> list[dict]:
+    return _find_split_cases(layout, 'test')
+
+
+def _find_val_cases(layout: DataLayout) -> list[dict]:
+    """Cas du split 'val' -- absent pour les géométries OOD préprocessées en
+    test_only=True (cf preprocessing/preprocess.py:build_processed). Sert de
+    pool de calibration disjoint du sweep de test pour _maybe_recalibrate
+    (eval/runner.py), quand il existe."""
+    return _find_split_cases(layout, 'val')
+
+
+def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: dict,
+                            hr_res: float | None = None) -> dict:
+    """KNN hiérarchique pour FAM/DAM/SIAM sur une géométrie et/ou résolution HR quelconque.
+    Renseigne aussi res_scalar (log(lr_res/_LR_REF), cf. load_hierarchical_knn)."""
     from utils.aero import wall_feature_array as _wfa
     from preprocessing.knn import build_hierarchy as _bh
 
     arch = (cfg or {}).get('architecture', {})
     res = (cfg or {}).get('resolution', {})
-    hr_res = res.get('hr', 0.025)
+    if hr_res is None:
+        hr_res = res.get('hr', 0.025)
     levels = list(arch.get('levels', [0.05, 0.1]))
     k_pool = arch.get('k_pool', 9)
     k_up = arch.get('k_up', 4)
     k_self = arch.get('k_self', 9)
     k_cond = arch.get('k_cond', 6)
+    coord_norm = arch.get('coord_norm', 'domain')
 
     def _bary(r: float) -> np.ndarray:
         return np.asarray(
@@ -88,7 +153,7 @@ def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: d
     wall_feat = [jnp.array(_wfa(m, p, lr_res))
                  for m, p in zip(lvl_meshes, lvl_pos)]
 
-    z = _bh(lvl_pos, lr_bary, k_pool, k_up, k_self, k_cond)
+    z = _bh(lvl_pos, lr_bary, k_pool, k_up, k_self, k_cond, coord_norm, mesh_hr_obj.metadata)
     L = len(levels) + 1
     fm = {
         'pe': [jnp.array(z[f'pe{l}']) for l in range(L)],
@@ -101,14 +166,15 @@ def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: d
         'self': {'idx': jnp.array(z['self_idx']),
                  'rel': jnp.array(z['self_rel'])},
     }
-    return {'fm': fm, 'wall_feat': wall_feat}
+    return {'fm': fm, 'wall_feat': wall_feat,
+            'res_scalar': jnp.array([float(np.log(lr_res / _LR_REF))], jnp.float32)}
 
 
 @dataclass
 class TestSet:
     """Encapsule géométrie, résolution, cas et structures nécessaires à l'évaluation."""
 
-    tag: str  # 'diamond', 'naca0012', 'diamond_lrh2'
+    tag: str  # 'diamond_lr0.1', 'naca0012_lr0.2', 'diamond_lr0.05_hr0.05'
     label: str  # titre pour les figures
     layout: DataLayout
     stats: dict
@@ -116,6 +182,7 @@ class TestSet:
     triang_hr: mtri.Triangulation
     ref_cases: list[dict]  # 3–5 cas canoniques
     test_cases: list[dict]  # sweep complet du test set
+    hr_mesh_meta: dict = None  # mesh_hr.metadata (chord, center) — coord_norm='object'
 
     @property
     def geometry(self) -> str:
@@ -130,27 +197,37 @@ class TestSet:
         return self.layout.hr_res
 
     def geom_id_for(self, entry: ModelEntry) -> int:
-        """Indice de cette géométrie dans les datasets d'entraînement du modèle"""
-        datasets = (entry.cfg or {}).get('datasets', [])
+        """Indice de cette géométrie dans les datasets d'entraînement du modèle.
+        Géométrie inconnue : token nul (index n_geoms) si geom_cfg_prob > 0, sinon 0."""
+        cfg = entry.cfg or {}
+        datasets = cfg.get('datasets', [])
         for i, d in enumerate(datasets):
             if d.get('name', '') == self.geometry:
                 return i
+        arch = cfg.get('architecture', {})
+        if arch.get('use_geom_cond', False) and arch.get('geom_cfg_prob', 0.0) > 0:
+            return arch.get('n_geoms', 8)
         return 0
 
     def ood_kind(self, entry: ModelEntry) -> str:
         """'indistrib' | 'res_ood' | 'geo_ood' | 'full_ood'"""
         cfg = entry.cfg or {}
         datasets = cfg.get('datasets', [])
+        default_lr = cfg.get('resolution', {}).get('lr', 0.1)
         if datasets:
             # Modèle multi-géométrie : géométries vues à l'entraînement listées dans datasets
             trained_geoms = {d.get('name', '') for d in datasets}
+            # Résolutions LR vues pour CETTE géométrie précisément (une branche peut
+            # couvrir plusieurs lr_res, ex. diamond: [0.05, 0.1, 0.2])
+            branch = next((d for d in datasets if d.get('name', '') == self.geometry), None)
+            trained_lr_set = set(branch.get('lr_res', [default_lr])) if branch else {default_lr}
         else:
             # Modèle single-géométrie : lire la clé 'geometry'
             single = cfg.get('geometry', '')
             trained_geoms = {single} if single else set()
-        trained_lr = cfg.get('resolution', {}).get('lr', 0.1)
+            trained_lr_set = {default_lr}
         same_geom = not trained_geoms or self.geometry in trained_geoms
-        same_res = abs(trained_lr - self.lr_res) < 1e-6
+        same_res = any(abs(r - self.lr_res) < 1e-6 for r in trained_lr_set)
         if same_geom and same_res: return 'indistrib'
         if same_geom: return 'res_ood'
         if same_res: return 'geo_ood'
@@ -177,17 +254,19 @@ class TestSet:
         Sinon reconstruit à partir des maillages du layout.
         """
         trained_lr = (entry.cfg or {}).get('resolution', {}).get('lr', 0.1)
+        trained_hr = (entry.cfg or {}).get('resolution', {}).get('hr', 0.025)
         knn_matches = (
             entry.layout is not None
             and entry.layout.geometry == self.geometry
             and entry.layout.root.resolve() == self.layout.root.resolve()
             and abs(trained_lr - self.lr_res) < 1e-6
+            and abs(trained_hr - self.hr_res) < 1e-6
         )
         if knn_matches:
             return entry.knn
 
         model_cls = type(entry.model).__name__
-        if model_cls in ('FAM', 'DAM'):
+        if model_cls in ('FAM', 'DAM', 'SIAM'):
             return self._knn_hierarchical(entry)
         return self._knn_simple(entry)
 
@@ -238,18 +317,19 @@ class TestSet:
         arch = (entry.cfg or {}).get('architecture', {})
         res = (entry.cfg or {}).get('resolution', {})
         levels = list(arch.get('levels', type(entry.model).DEFAULT_LEVELS))
-        hr_res = res.get('hr', 0.025)
+        trained_hr = res.get('hr', 0.025)
+        same_hr = abs(trained_hr - self.hr_res) < 1e-6
 
-        # Même géométrie, lr_res différent → reconstruire uniquement la partie cond
-        if entry.layout is not None and entry.layout.geometry == self.geometry:
+        # Même géométrie ET même hr_res, lr_res différent
+        if same_hr and entry.layout is not None and entry.layout.geometry == self.geometry:
             mesh_lr = np.load(self.layout.mesh_path(self.lr_res), allow_pickle=True).item()
             lr_pos = np.asarray(mesh_lr.barycenter, dtype=np.float64)
             return rebuild_fm_cond(entry.knn, lr_pos, self.layout, entry.cfg)
 
-        # Géométrie différente → reconstruction hiérarchique complète
-        needed = levels + [hr_res, self.lr_res]
+        # hr_res différente (extrapolation) et/ou géométrie différente
+        needed = levels + [self.hr_res, self.lr_res]
         mesh_paths = {r: self.layout.mesh_path(r) for r in needed}
-        return _build_hierarchical_knn(mesh_paths, self.lr_res, entry.cfg)
+        return _build_hierarchical_knn(mesh_paths, self.lr_res, entry.cfg, hr_res=self.hr_res)
 
     @classmethod
     def from_dir(cls, data_root: str | Path, geometry: str,
@@ -260,21 +340,12 @@ class TestSet:
             'diamond': REFERENCE_CASES,
             'naca0012': NACA_REFERENCE_CASES,
         }.get(geometry, REFERENCE_CASES)
-        lr_tag = _res_tag(lr_res)
-        std = abs(lr_res - 0.1) < 1e-6
-        tag = geometry if std else f'{geometry}_{lr_tag}'
-        label = _geom_label(geometry) if std else f'{_geom_label(geometry)} LR h={lr_res:g}'
+        tag = f'{geometry}_lr{lr_res:g}'
+        label = f'{_geom_label(geometry)} (LR h={lr_res:g})'
+        if abs(hr_res - _HR_REF) > 1e-6:
+            tag += f'_hr{hr_res:g}'
+            label += f', HR h={hr_res:g}'
         return cls._build(tag, label, layout, ref_specs)
-
-    @classmethod
-    def from_diamond(cls, data_root: str | Path,
-                     lr_res: float = 0.1, hr_res: float = 0.025) -> 'TestSet':
-        return cls.from_dir(data_root, 'diamond', lr_res, hr_res)
-
-    @classmethod
-    def from_naca(cls, data_root: str | Path,
-                  lr_res: float = 0.1, hr_res: float = 0.025) -> 'TestSet':
-        return cls.from_dir(data_root, 'naca0012', lr_res, hr_res)
 
     @classmethod
     def _build(cls, tag: str, label: str, layout: DataLayout,
@@ -297,7 +368,8 @@ class TestSet:
 
         return cls(tag=tag, label=label, layout=layout,
                    stats=stats, wc=wc, triang_hr=triang,
-                   ref_cases=ref_cases, test_cases=test_cases)
+                   ref_cases=ref_cases, test_cases=test_cases,
+                   hr_mesh_meta=mesh_hr.metadata)
 
 _GEOM_LABELS = {
     'diamond': 'Diamond',

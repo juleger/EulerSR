@@ -13,6 +13,7 @@ import flax.nnx as nnx
 from eval.loader import ModelEntry
 from preprocessing.dataset import _MACH_MID, _MACH_SCALE, _AOA_SCALE
 from utils.metrics import idw_weights
+from utils.coords import center_scale
 
 _PRIM_NAMES = ['rho', 'u', 'v', 'p']
 _BATCH_SIZE = 16
@@ -24,12 +25,11 @@ class _MeshGeom:
     lr_n: np.ndarray  # (N_lr, 2)
 
 
-def mesh_geom_from_case(d: dict) -> _MeshGeom:
+def mesh_geom_from_case(d: dict, coord_norm: str = 'domain',
+                        mesh_meta: dict | None = None) -> _MeshGeom:
     hr_pos = d['hr_node_pos'].astype(np.float64)
     lr_pos = d['lr_node_pos'].astype(np.float64)
-    pts = np.concatenate([hr_pos, lr_pos])
-    ctr = (pts.max(0) + pts.min(0)) / 2
-    scl = (pts.max(0) - pts.min(0)).max() / 2
+    ctr, scl = center_scale(hr_pos, lr_pos, coord_norm, mesh_meta)
     return _MeshGeom(
         hr_n=((hr_pos - ctr) / scl).astype(np.float32),
         lr_n=((lr_pos - ctr) / scl).astype(np.float32),
@@ -60,10 +60,11 @@ def build_lr_feat(geom: _MeshGeom, d: dict, mu: np.ndarray, sig: np.ndarray) -> 
 
 
 def build_features(d: dict, mach_in: float, aoa_in: float,
-                   stats: dict, geom_id: int = 0) -> tuple:
+                   stats: dict, geom_id: int = 0, coord_norm: str = 'domain',
+                   mesh_meta: dict | None = None) -> tuple:
     mu = stats['mu'].astype(np.float32)
     sig = stats['sig'].astype(np.float32)
-    geom = mesh_geom_from_case(d)
+    geom = mesh_geom_from_case(d, coord_norm, mesh_meta)
     hr_feat = jnp.array(build_hr_feat(geom, mach_in, aoa_in, geom_id))
     lr_feat = jnp.array(build_lr_feat(geom, d, mu, sig))
     hr_prim = d['hr_primitives'].astype(np.float32) if 'hr_primitives' in d else None
@@ -82,8 +83,10 @@ def predict_idw(lr_prim: np.ndarray, idx: np.ndarray, dist: np.ndarray,
 
 def predict_det(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
                 stats: dict, knn: dict | None = None,
-                geom_id: int = 0) -> tuple[np.ndarray, float]:
-    hr_feat, lr_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id)
+                geom_id: int = 0, mesh_meta: dict | None = None) -> tuple[np.ndarray, float]:
+    coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+    hr_feat, lr_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
+                                                  coord_norm, mesh_meta)
     knn_used = knn if knn is not None else entry.knn
     t0 = time.perf_counter()
     pred = jax.block_until_ready(entry.model.predict(hr_feat, lr_feat, knn_used))
@@ -93,10 +96,12 @@ def predict_det(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
 
 def predict_ensemble(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
                      stats: dict, knn: dict | None = None, geom_id: int = 0,
-                     key: jax.Array | None = None,
+                     key: jax.Array | None = None, mesh_meta: dict | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, float]:
     """Ensemble stochastique (SDE) : renvoie (mean, std, t_ms) en unites physiques."""
-    hr_feat, lr_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id)
+    coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+    hr_feat, lr_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
+                                                  coord_norm, mesh_meta)
     knn_used = knn if knn is not None else entry.knn
     if key is None:
         key = jax.random.PRNGKey(int(getattr(entry.model, 'sample_seed', 0)))
