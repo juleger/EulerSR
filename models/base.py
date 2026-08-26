@@ -169,7 +169,7 @@ def _validate(eval_model, all_names, all_val, all_step_fns, train_ds, is_multi,
     per_geom: dict = {}
 
     for i_g, (g_name, val_ds_g) in enumerate(zip(all_names, all_val)):
-        _, _, ev_g = all_step_fns[g_name]
+        ev_g = all_step_fns[g_name]['ev']
         mu_g = np.asarray(train_ds.datasets[i_g].mu if is_multi else train_ds.mu)
         sig_g = np.asarray(train_ds.datasets[i_g].sig if is_multi else train_ds.sig)
         has_flow_g = hasattr(val_ds_g, 'entries')
@@ -245,6 +245,7 @@ def _log_epoch(epoch, cfg, metrics, *, train_loss, lr_now, elapsed, is_best, mem
         'enthalpy': round(float(enth_acc / n_val), 8) if has_flow else '',
         'enthalpy_gt': round(float(enth_ref_acc / n_val), 8) if has_flow else '',
         'idw_enthalpy': round(float(idw_ref.get('enthalpy', float('nan'))), 8) if has_flow else '',
+        **({f'val_{nm}': round(float(per_geom[nm]['vl']), 8) for nm in all_names} if is_multi else {}),
         'ram_gb': '' if np.isnan(ram) else round(ram, 3),
         'gpu_gb': '' if np.isnan(gpu) else round(gpu, 3),
         'gpu_peak_gb': '' if np.isnan(gpup) else round(gpup, 3),
@@ -405,7 +406,13 @@ class SRModel(nnx.Module):
 
         self._pre_fit(_branch_pairs, cfg)
 
-        _steps_per_epoch = math.ceil(len(train_ds) / max(cfg.batch_size, 1))
+        # Mode multi-branche : un meta-step = un micro-batch par branche (cf.
+        # iter_grouped_batches), donc le nombre de steps/epoque cale sur la plus grosse branche.
+        if isinstance(train_ds, MultiSRDataset):
+            _steps_per_epoch = max(math.ceil(len(ds) / max(cfg.batch_size, 1))
+                                   for ds in train_ds.datasets)
+        else:
+            _steps_per_epoch = math.ceil(len(train_ds) / max(cfg.batch_size, 1))
         n_steps = cfg.epochs * _steps_per_epoch
         warmup_steps = cfg.warmup_epochs * _steps_per_epoch
 
@@ -428,6 +435,10 @@ class SRModel(nnx.Module):
         @jax.jit
         def _ema_update(e, p):
             return jax.tree.map(lambda a, b: decay * a + (1.0 - decay) * b, e, p)
+
+        @nnx.jit
+        def _apply_update(opt, grads):
+            opt.update(grads)
 
         _loss_fn = LOSS_FNS[cfg.loss]
         batch_size = cfg.batch_size
@@ -479,14 +490,34 @@ class SRModel(nnx.Module):
                 pred = model.predict(hr, lr, knn_g)
                 return _loss_fn(pred, tg, wt), pred
 
-            return _ss, _sb, _ev
+            # Variantes "gradient seul" (pas d'opt.update interne) : accumule les
+            # gradients de toutes les branches d'un meta-step avant un update unique.
+            @nnx.jit
+            def _gs(model, hr, lr, tg, wt, gp_tg, key, lam_ep):
+                def lf(m):
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
+                    return m._sample_loss(hr, lr, tg, wt, gp_tg, knn_g, key, aux_ep)
+                return nnx.value_and_grad(lf)(model)
+
+            @nnx.jit
+            def _gb(model, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b, keys, lam_ep):
+                def lf(m):
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
+                    losses = jax.vmap(
+                        lambda hr, lr, tg, wt, gp, k:
+                            m._sample_loss(hr, lr, tg, wt, gp, knn_g, k, aux_ep)
+                    )(hr_b, lr_b, tg_b, wt_b, gp_b, keys)
+                    return (losses * valid_b).sum() / valid_b.sum()
+                return nnx.value_and_grad(lf)(model)
+
+            return {'ss': _ss, 'sb': _sb, 'ev': _ev, 'gs': _gs, 'gb': _gb}
 
         _all_step_fns = {name: _make_step_fns(_all_knns[name]) for name in _all_names}
 
         _has_flow = hasattr(_all_val[0], 'entries')
 
         def _do_one_batch(raw, sfns, step_key, lam_ep):
-            _ss, _sb, _ = sfns
+            _ss, _sb = sfns['ss'], sfns['sb']
             B = len(raw)
             if batch_size > 1:
                 B_real = B
@@ -507,6 +538,35 @@ class SRModel(nnx.Module):
                                   jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key, lam_ep)
                 return float(loss), 1, float(gnorm)
 
+        def _do_one_batch_grad(raw, sfns, step_key, lam_ep):
+            """Comme _do_one_batch, mais retourne les gradients au lieu d'appliquer
+            un update -- pour accumulation multi-branche (cf. iter_grouped_batches)."""
+            _gs, _gb = sfns['gs'], sfns['gb']
+            B = len(raw)
+            if batch_size > 1:
+                B_real = B
+                pad = [raw[-1]] * (batch_size - B_real)
+                samples = raw + pad
+                valid = np.array([1.0] * B_real + [0.0] * (batch_size - B_real), dtype=np.float32)
+                hr_b = jnp.array(np.stack([s[0] for s in samples]))
+                lr_b = jnp.array(np.stack([s[1] for s in samples]))
+                tg_b = jnp.array(np.stack([s[2] for s in samples]))
+                wt_b = jnp.array(np.stack([s[3] for s in samples]))
+                gp_b = jnp.array(np.stack([s[4] for s in samples]))
+                keys = jax.random.split(step_key, batch_size)
+                loss, grads = _gb(optimizer.model, hr_b, lr_b, tg_b, wt_b,
+                                  jnp.array(valid), gp_b, keys, lam_ep)
+                return float(loss) * B_real, B_real, grads
+            else:
+                hr, lr, tg, wt, gp = raw[0]
+                loss, grads = _gs(optimizer.model, jnp.array(hr), jnp.array(lr),
+                                  jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key, lam_ep)
+                return float(loss), 1, grads
+
+        def _tree_grad_norm(grads) -> float:
+            leaves = jax.tree_util.tree_leaves(grads)
+            return float(jnp.sqrt(sum(jnp.sum(g ** 2) for g in leaves if hasattr(g, 'shape'))))
+
         rng = np.random.default_rng(cfg.seed)
         base_key = jax.random.PRNGKey(cfg.seed)
         train_losses, val_losses, val_l2s = [], [], []
@@ -519,6 +579,7 @@ class SRModel(nnx.Module):
                        + [f'l2_{v}' for v in VAR_LABELS] + ['l2_mach']
                        + [f'idw_{v}' for v in VAR_LABELS] + ['idw_mach']
                        + ['enthalpy', 'enthalpy_gt', 'idw_enthalpy']
+                       + ([f'val_{nm}' for nm in _all_names] if _is_multi else [])  # val_loss par branche
                        + ['ram_gb', 'gpu_gb', 'gpu_peak_gb', 'is_best'])
         _csv_path = out_dir / f'{run_name}.csv'
         with open(_csv_path, 'w', newline='') as _f:
@@ -566,12 +627,27 @@ class SRModel(nnx.Module):
             lam_ep = jnp.asarray(lam_ep_val, jnp.float32)
 
             if _is_multi:
-                # Mode multi-dataset : batches mono-géométrie routés vers le bon knn
-                for raw, geom_idx in train_ds.iter_batches(batch_size, rng):
-                    sfns = _all_step_fns[_all_names[geom_idx]]
+                # Mode multi-dataset : un meta-step = un micro-batch de CHAQUE branche,
+                # gradients moyennés (pondérés) puis UN SEUL optimizer.update -- évite
+                # le tug-of-war d'un update séquentiel mono-branche par step.
+                for group in train_ds.iter_grouped_batches(batch_size, rng):
                     step_key = jax.random.fold_in(base_key, _n_grad_steps)
-                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key, lam_ep)
-                    ep_loss += loss_c; n += B_r; _n_grad_steps += 1
+                    grads_list, w_list = [], []
+                    loss_acc, B_acc = 0.0, 0
+                    for raw, geom_idx in group:
+                        sfns = _all_step_fns[_all_names[geom_idx]]
+                        b_key = jax.random.fold_in(step_key, geom_idx)
+                        loss_c, B_r, grads = _do_one_batch_grad(raw, sfns, b_key, lam_ep)
+                        grads_list.append(grads)
+                        w_list.append(train_ds.weights[geom_idx])
+                        loss_acc += loss_c; B_acc += B_r
+                    wsum = sum(w_list)
+                    w_norm = [w / wsum for w in w_list]
+                    avg_grads = jax.tree.map(
+                        lambda *gs: sum(w * g for w, g in zip(w_norm, gs)), *grads_list)
+                    gn = _tree_grad_norm(avg_grads)
+                    _apply_update(optimizer, avg_grads)
+                    ep_loss += loss_acc; n += B_acc; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:
                         _ep_n_clipped += 1

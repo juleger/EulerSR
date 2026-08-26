@@ -216,6 +216,9 @@ class MultiSRDataset:
 
         La géométrie est tirée aléatoirement selon self.weights à chaque batch,
         garantissant une proportion globale proche de weights sur l'epoch.
+
+        Non utilisé par fit() pour le mode multi-branche (cf. iter_grouped_batches) --
+        conservé pour compatibilité/usage externe éventuel.
         """
         indices = [list(rng.permutation(len(ds))) for ds in self.datasets]
         pointers = [0] * len(self.datasets)
@@ -231,6 +234,31 @@ class MultiSRDataset:
             if not chunk:
                 continue
             yield [ds[i] for i in chunk], int(g)
+
+    def iter_grouped_batches(self, batch_size: int, rng):
+        """Un meta-step = un micro-batch de CHAQUE branche, à accumuler en un
+        seul optimizer.update côté appelant (contrairement à iter_batches, une
+        branche par step) -- évite le tug-of-war d'updates séquentiels mono-branche.
+        Cale sur la plus grosse branche ; les autres sont ré-mélangées en wrap-around."""
+        n_ds = len(self.datasets)
+        perms = [list(rng.permutation(len(ds))) for ds in self.datasets]
+        pointers = [0] * n_ds
+        n_meta = max(math.ceil(len(ds) / batch_size) for ds in self.datasets)
+
+        for _ in range(n_meta):
+            group = []
+            for g in range(n_ds):
+                ds = self.datasets[g]
+                if pointers[g] >= len(perms[g]):
+                    perms[g] = list(rng.permutation(len(ds)))
+                    pointers[g] = 0
+                chunk = perms[g][pointers[g]:pointers[g] + batch_size]
+                pointers[g] += batch_size
+                if not chunk:
+                    continue
+                group.append(([ds[i] for i in chunk], g))
+            if group:
+                yield group
 
 
 def compute_stats(layout: DataLayout, save_path, split: str = 'train'):
