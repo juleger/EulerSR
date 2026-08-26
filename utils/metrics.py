@@ -68,6 +68,19 @@ def compute_field_errors(prim_pred: np.ndarray, prim_ref: np.ndarray, cell_adj_e
     return res
 
 
+def error_by_wall_distance(prim_pred: np.ndarray, prim_ref: np.ndarray, wall_dist: np.ndarray,
+                           bins: tuple = (0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 4.0)) -> dict[str, float]:
+    """L2 relative (Mach) par bande de distance au mur, diagnostic direct de
+    la portée effective de l'agrégation d'info de bord.
+    """
+    mach_p, mach_r = to_mach(prim_pred), to_mach(prim_ref)
+    out: dict[str, float] = {}
+    for lo, hi in zip(bins[:-1], bins[1:]):
+        mask = (wall_dist >= lo) & (wall_dist < hi)
+        out[f'{lo}-{hi}'] = l2_rel(mach_p[mask], mach_r[mask]) if mask.any() else float('nan')
+    return out
+
+
 def aero_metrics(prim_pred: np.ndarray, prim_ref: np.ndarray, wc, mach_in: float) -> dict:
     # Erreurs aérodynamiques prédiction vs GT (CL, CD, Mach paroi)
     # Import local pour éviter la dépendance circulaire avec utils.aero

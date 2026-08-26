@@ -36,12 +36,31 @@ def mesh_geom_from_case(d: dict, coord_norm: str = 'domain',
     )
 
 
+def _resolve_mach_norm(cfg: dict | None) -> tuple[float, float]:
+    """(mid, scale) du conditionnement Mach vu par un checkpoint donné à
+    l'entraînement, lu dans son cfg persisté (clé 'mach_norm', ajoutée par
+    train.py). Repli sur l'historique (0.7, 3.0) si absente -- checkpoints
+    entraînés avant ce champ (DAM/FAM_multi_final, 6geo, SIAM confirm...) :
+    ne JAMAIS changer ce repli, c'est ce qui garantit qu'ils continuent de
+    recevoir exactement le même conditionnement qu'à l'entraînement."""
+    mn = (cfg or {}).get('mach_norm')
+    if mn is None:
+        return (_MACH_MID, _MACH_SCALE)
+    lo, hi = float(mn[0]), float(mn[1])
+    return ((lo + hi) / 2, (hi - lo) / 2)
+
+
 def build_hr_feat(geom: _MeshGeom, mach_in: float, aoa_in: float,
-                  geom_id: int = 0) -> np.ndarray:
+                  geom_id: int = 0,
+                  mach_norm: tuple[float, float] = (_MACH_MID, _MACH_SCALE)) -> np.ndarray:
+    """mach_norm = (mid, scale) du conditionnement Mach vu par CE checkpoint à
+    l'entraînement -- par défaut l'historique (0.7, 3.0) pour compatibilité,
+    cf. eval/runner.py:_resolve_mach_norm qui le résout par entrée de modèle."""
     N = geom.hr_n.shape[0]
+    mmid, mscale = mach_norm
     return np.stack([
         geom.hr_n[:, 0], geom.hr_n[:, 1],
-        np.full(N, (mach_in - _MACH_MID) / _MACH_SCALE, np.float32),
+        np.full(N, (mach_in - mmid) / mscale, np.float32),
         np.full(N, aoa_in / _AOA_SCALE, np.float32),
         np.full(N, float(geom_id), np.float32),
     ], axis=1)
@@ -59,16 +78,33 @@ def build_lr_feat(geom: _MeshGeom, d: dict, mu: np.ndarray, sig: np.ndarray) -> 
     return np.concatenate(parts, axis=1)
 
 
+def build_wall_feat(d: dict, mu: np.ndarray, sig: np.ndarray, mesh_meta: dict) -> np.ndarray:
+    """Équivalent de build_lr_feat pour FAMWall/DAMWall : observations de bord
+    (wall_pos/wall_normal/wall_value/wall_s, fusionnées dans `d` par
+    utils.layout.load_sample depuis le store _wall compagnon). coord_norm=
+    'object' imposé pour les modèles bord (cf. models/fam_wall.py)."""
+    from utils.coords import object_center_scale
+    ctr, scl = object_center_scale(mesh_meta)
+    wall_pos_n = (d['wall_pos'].astype(np.float32) - ctr) / scl
+    wall_val_n = (d['wall_value'].astype(np.float32) - mu) / sig
+    return np.concatenate([wall_pos_n, d['wall_normal'].astype(np.float32),
+                           wall_val_n, d['wall_s'].astype(np.float32)[:, None]], axis=1)
+
+
 def build_features(d: dict, mach_in: float, aoa_in: float,
                    stats: dict, geom_id: int = 0, coord_norm: str = 'domain',
-                   mesh_meta: dict | None = None) -> tuple:
+                   mesh_meta: dict | None = None, is_wall: bool = False,
+                   mach_norm: tuple[float, float] = (_MACH_MID, _MACH_SCALE)) -> tuple:
     mu = stats['mu'].astype(np.float32)
     sig = stats['sig'].astype(np.float32)
     geom = mesh_geom_from_case(d, coord_norm, mesh_meta)
-    hr_feat = jnp.array(build_hr_feat(geom, mach_in, aoa_in, geom_id))
-    lr_feat = jnp.array(build_lr_feat(geom, d, mu, sig))
+    hr_feat = jnp.array(build_hr_feat(geom, mach_in, aoa_in, geom_id, mach_norm=mach_norm))
+    if is_wall:
+        cond_feat = jnp.array(build_wall_feat(d, mu, sig, mesh_meta))
+    else:
+        cond_feat = jnp.array(build_lr_feat(geom, d, mu, sig))
     hr_prim = d['hr_primitives'].astype(np.float32) if 'hr_primitives' in d else None
-    return hr_feat, lr_feat, hr_prim, mu, sig
+    return hr_feat, cond_feat, hr_prim, mu, sig
 
 # Inférence
 def predict_idw(lr_prim: np.ndarray, idx: np.ndarray, dist: np.ndarray,
@@ -81,15 +117,42 @@ def predict_idw(lr_prim: np.ndarray, idx: np.ndarray, dist: np.ndarray,
     return pred, t_ms
 
 
+def predict_wall_baseline(d: dict, mach_in: float, aoa_in: float,
+                          wd_exp: np.ndarray, k: int = 6) -> tuple[np.ndarray, float]:
+    """Baseline "sans réseau" pour un testset FAMWall/DAMWall (idw_knn['mode']
+    == 'wall') : IDW(bord) blend freestream, en unités physiques directes
+    (même esprit que predict_idw, qui n'est pas non plus normalisé -- cf.
+    models/fam_wall.wall_baseline pour la version normalisée utilisée dans le
+    réseau). d doit contenir wall_pos/wall_value (fusionnés par
+    utils.layout.load_sample depuis le store _wall compagnon) et hr_node_pos."""
+    from scipy.spatial import cKDTree
+    t0 = time.perf_counter()
+    wall_pos = d['wall_pos'].astype(np.float64)
+    wall_val = d['wall_value'].astype(np.float32)
+    k_eff = min(k, len(wall_pos))
+    dist, idx = cKDTree(wall_pos).query(d['hr_node_pos'].astype(np.float64), k=k_eff, workers=-1)
+    w = idw_weights(dist).astype(np.float32)
+    idw = (w[:, :, None] * wall_val[idx]).sum(axis=1)
+    c_inf = np.sqrt(1.4)
+    u_inf = mach_in * c_inf * np.cos(np.deg2rad(aoa_in))
+    v_inf = mach_in * c_inf * np.sin(np.deg2rad(aoa_in))
+    freestream = np.array([1.0, u_inf, v_inf, 1.0], np.float32)
+    pred = (wd_exp[:, None] * idw + (1.0 - wd_exp[:, None]) * freestream).astype(np.float32)
+    t_ms = (time.perf_counter() - t0) * 1e3
+    return pred, t_ms
+
+
 def predict_det(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
                 stats: dict, knn: dict | None = None,
                 geom_id: int = 0, mesh_meta: dict | None = None) -> tuple[np.ndarray, float]:
     coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
-    hr_feat, lr_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
-                                                  coord_norm, mesh_meta)
+    is_wall = hasattr(entry.model, 'wall_encoder')
+    hr_feat, cond_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
+                                                    coord_norm, mesh_meta, is_wall=is_wall,
+                                                    mach_norm=_resolve_mach_norm(entry.cfg))
     knn_used = knn if knn is not None else entry.knn
     t0 = time.perf_counter()
-    pred = jax.block_until_ready(entry.model.predict(hr_feat, lr_feat, knn_used))
+    pred = jax.block_until_ready(entry.model.predict(hr_feat, cond_feat, knn_used))
     t_ms = (time.perf_counter() - t0) * 1e3
     return (np.array(pred) * sig + mu).astype(np.float32), t_ms
 
@@ -98,16 +161,18 @@ def predict_ensemble(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
                      stats: dict, knn: dict | None = None, geom_id: int = 0,
                      key: jax.Array | None = None, mesh_meta: dict | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Ensemble stochastique (SDE) : renvoie (mean, std, t_ms) en unites physiques."""
+    """Ensemble stochastique (SDE ou FAMWall) : renvoie (mean, std, t_ms) en unites physiques."""
     coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
-    hr_feat, lr_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
-                                                  coord_norm, mesh_meta)
+    is_wall = hasattr(entry.model, 'wall_encoder')
+    hr_feat, cond_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
+                                                    coord_norm, mesh_meta, is_wall=is_wall,
+                                                    mach_norm=_resolve_mach_norm(entry.cfg))
     knn_used = knn if knn is not None else entry.knn
     if key is None:
         key = jax.random.PRNGKey(int(getattr(entry.model, 'sample_seed', 0)))
     t0 = time.perf_counter()
     samples = jax.block_until_ready(
-        entry.model.sample(hr_feat, lr_feat, knn_used, key=key))  # [S, N, 4] normalise
+        entry.model.sample(hr_feat, cond_feat, knn_used, key=key))  # [S, N, 4] normalise
     t_ms = (time.perf_counter() - t0) * 1e3
     samples = np.asarray(samples) * sig + mu
     mean = samples.mean(axis=0).astype(np.float32)

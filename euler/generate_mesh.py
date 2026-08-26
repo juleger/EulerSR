@@ -37,8 +37,7 @@ GEOMS["bump"] = (
 )
 
 # Variantes OOD du diamond (translation / demi-angle) et du rae2822
-# (translation) — cf. plan "Nouveaux cas test géométriques OOD" :
-# évaluation de la robustesse géométrique des modèles SR.
+# (translation), pour évaluer la robustesse géométrique des modèles SR.
 GEOMS["diamond_tx"] = (
     lambda h, out_dir: diamond.build_mesh(Lx=4.0, Ly=4.0, h=h, chord=1.0,
                                           height=tan(radians(5)), cx=2.0, cy=2.0,

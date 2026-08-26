@@ -10,9 +10,9 @@ import jax.numpy as jnp
 
 from eval.loader import ModelEntry
 from eval.testset import TestSet, _find_val_cases
-from eval.core import (mesh_geom_from_case, build_hr_feat, build_lr_feat, build_features,
-                       predict_det, predict_ensemble, make_batch_predict,
-                       run_batched, _BATCH_SIZE)
+from eval.core import (mesh_geom_from_case, build_hr_feat, build_lr_feat, build_wall_feat,
+                       build_features, predict_det, predict_ensemble, predict_wall_baseline,
+                       make_batch_predict, run_batched, _BATCH_SIZE, _resolve_mach_norm)
 from utils.refs import to_mach
 from utils.metrics import (compute_field_errors, l2_rel, aero_metrics,
                             enthalpy_rms, entropy_violation, fvm_euler_rms,
@@ -133,9 +133,12 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
 
     calib_excluded = _maybe_recalibrate(models, ts, knn_map)
 
-    # KNN IDW dédié : toujours reconstruit sur la géométrie/résolution du TestSet
-    print("  [IDW]  construction kNN simple...")
-    idw_knn = ts.build_idw_knn(k=6)
+    # KNN IDW dédié : toujours reconstruit sur la géométrie/résolution du TestSet.
+    # wall=True (tous les modèles évalués sont bord-seul) : baseline pertinente =
+    # IDW(bord) blend freestream, pas l'IDW volumique (pas la même info disponible).
+    is_wall_eval = bool(models) and all(hasattr(m.model, 'wall_encoder') for m in models)
+    print(f"  [{'baseline bord' if is_wall_eval else 'IDW'}]  construction kNN simple...")
+    idw_knn = ts.build_idw_knn(k=6, wall=is_wall_eval)
 
     ref_results = None
     sweep_results = None
@@ -199,18 +202,20 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
             _gid = ts.geom_id_for(entry)
             _mu, _sig = _train_stats(entry, ts.stats)
             _coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+            _is_wall = hasattr(entry.model, 'wall_encoder')
             _hf, _lf, *_ = build_features(_d0, _c0['mach_in'], _c0['aoa_in'],
                                            {'mu': _mu, 'sig': _sig}, _gid,
-                                           _coord_norm, ts.hr_mesh_meta)
+                                           _coord_norm, ts.hr_mesh_meta, is_wall=_is_wall,
+                                           mach_norm=_resolve_mach_norm(entry.cfg))
             print(f"  [{entry.name}] warmup JIT ({ts.tag})...")
             jax.block_until_ready(entry.model.predict(_hf, _lf, knn_map[entry.name]))
 
     def _field_errs(prim, cd):
         if cd['hr_prim'] is None:
-            return None, None
+            return None, None, None
         er = compute_field_errors(prim, cd['hr_prim'],
                                   wc.cell_adj_edges, wc.bary, dxy_edges)
-        return er['linf_mach'], er['l2w_mach']
+        return er['linf_mach'], er['l2w_mach'], er['w2_mach']
 
     def _aero(prim, cd):
         if cd['hr_prim'] is None:
@@ -218,26 +223,36 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
         am = aero_metrics(prim, cd['hr_prim'], wc, cd['meta']['mach_in'])
         return am['wall_mach_pred'], am
 
-    # IDW baseline
+    # Baseline "sans réseau" : IDW volumique (LR complet) ou baseline bord
+    # (idw_knn['mode']=='wall'), selon le testset -- cf. TestSet.build_idw_knn.
+    is_wall_bl = idw_knn is not None and idw_knn.get('mode') == 'wall'
+    # Nom interne toujours 'LR IDW' (~10 endroits dans utils/viz/eval.py et
+    # combined.py s'appuient sur cette chaîne littérale pour repérer la ligne
+    # baseline) -- seul le CONTENU calculé change en mode wall, cf. plus bas.
     idw_row = {'name': 'LR IDW', 'prim_preds': [], 'mach_preds': [],
-                'l2': [], 'linf': [], 'l2w': [], 'time_ms': [],
+                'l2': [], 'linf': [], 'l2w': [], 'w2': [], 'time_ms': [],
                 'wall_mach': [], 'aero': []}
-    if idw_knn is not None and 'idx' in idw_knn:
-        idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
-        w_idw = idw_weights(np.asarray(idw_knn['dist'])[:, :6]).astype(np.float32)
+    if idw_knn is not None and (is_wall_bl or 'idx' in idw_knn):
+        if not is_wall_bl:
+            idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
+            w_idw = idw_weights(np.asarray(idw_knn['dist'])[:, :6]).astype(np.float32)
         for cd in case_data:
-            lr_p = cd['d']['lr_primitives'].astype(np.float32)
-            t0 = time.perf_counter()
-            prim = (w_idw[:, :, None] * lr_p[idx_idw]).sum(axis=1)
-            t = (time.perf_counter() - t0) * 1e3
+            c = cd['meta']
+            if is_wall_bl:
+                prim, t = predict_wall_baseline(cd['d'], c['mach_in'], c['aoa_in'], idw_knn['wd_exp'])
+            else:
+                lr_p = cd['d']['lr_primitives'].astype(np.float32)
+                t0 = time.perf_counter()
+                prim = (w_idw[:, :, None] * lr_p[idx_idw]).sum(axis=1)
+                t = (time.perf_counter() - t0) * 1e3
             mach = to_mach(prim)
-            li, lw = _field_errs(prim, cd)
+            li, lw, w2v = _field_errs(prim, cd)
             wm, am = _aero(prim, cd)
             idw_row['prim_preds'].append(prim)
             idw_row['mach_preds'].append(mach)
             idw_row['l2'].append(l2_rel(mach, cd['mach_ref'])
                                  if cd['mach_ref'] is not None else None)
-            idw_row['linf'].append(li); idw_row['l2w'].append(lw)
+            idw_row['linf'].append(li); idw_row['l2w'].append(lw); idw_row['w2'].append(w2v)
             idw_row['time_ms'].append(t)
             idw_row['wall_mach'].append(wm); idw_row['aero'].append(am)
 
@@ -250,7 +265,7 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
         # Modele stochastique (interpolant SDE) : ensemble -> moyenne + incertitude
         is_sde = getattr(entry.model, 'sampler', 'ode') == 'sde'
         row = {'name': ts.display_name(entry), 'prim_preds': [], 'mach_preds': [],
-               'l2': [], 'linf': [], 'l2w': [], 'time_ms': [],
+               'l2': [], 'linf': [], 'l2w': [], 'w2': [], 'time_ms': [],
                'wall_mach': [], 'aero': [], 'prim_std': []}
         for cd in case_data:
             c = cd['meta']
@@ -265,14 +280,14 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
                                        mesh_meta=ts.hr_mesh_meta)
                 prim_std = None
             mach = to_mach(prim)
-            li, lw = _field_errs(prim, cd)
+            li, lw, w2v = _field_errs(prim, cd)
             wm, am = _aero(prim, cd)
             row['prim_preds'].append(prim)
             row['prim_std'].append(prim_std)
             row['mach_preds'].append(mach)
             row['l2'].append(l2_rel(mach, cd['mach_ref'])
                              if cd['mach_ref'] is not None else None)
-            row['linf'].append(li); row['l2w'].append(lw)
+            row['linf'].append(li); row['l2w'].append(lw); row['w2'].append(w2v)
             row['time_ms'].append(t)
             row['wall_mach'].append(wm); row['aero'].append(am)
         model_rows.append(row)
@@ -285,7 +300,7 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
                                  'wall_mach_hr': cd['wall_mach_hr']}
                   for cd in case_data],
         'rows': model_rows,
-        'idw': idw_row if (idw_knn is not None and 'idx' in idw_knn) else None,
+        'idw': idw_row if (idw_knn is not None and (is_wall_bl or 'idx' in idw_knn)) else None,
     }
 
 
@@ -300,18 +315,20 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
     n = len(cases)
 
     det_models = [m for m in models if m.kind == 'det']
-    method_names = (['LR IDW'] if idw_knn is not None else []) +                   [ts.display_name(m) for m in models]
+    is_wall_bl = idw_knn is not None and idw_knn.get('mode') == 'wall'
+    _bl_name = 'LR IDW'  # nom interne fixe, cf. remarque _run_ref_cases -- seul le contenu change
+    method_names = ([_bl_name] if idw_knn is not None else []) +                   [ts.display_name(m) for m in models]
 
     results: dict[str, dict] = {
         nm: {'times': [], 'CL': [], 'CD': [], 'grad_p_max': [],
              'mach_max': [], 'mach_min': [], 'l2_mach': [], 'linf_mach': [],
              'l2w_mach': [], 'w2_mach': [], 'l2_prims': [], 'linf_prims': [],
-             'wall_mach': [], 'has_ref': [], 'enthalpy': [], 'entropy': [],
+             'wall_mach': [], 'wall_cp': [], 'has_ref': [], 'enthalpy': [], 'entropy': [],
              'euler_fvm': []}
         for nm in method_names
     }
     results['HR'] = {'CL': [], 'CD': [], 'grad_p_max': [],
-                     'mach_max': [], 'mach_min': [], 'wall_mach': [],
+                     'mach_max': [], 'mach_min': [], 'wall_mach': [], 'wall_cp': [],
                      'enthalpy_hr': [], 'entropy_hr': [], 'euler_fvm_hr': []}
 
     _knn_mesh = next((knn_map[m.name] for m in det_models
@@ -333,10 +350,16 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         wc.bary[wc.cell_adj_edges[:, 0]] - wc.bary[wc.cell_adj_edges[:, 1]], axis=1
     ).astype(np.float32)
 
-    # IDW
+    # Baseline "sans réseau" (IDW volumique ou baseline bord, cf. plus haut)
     idw_preds: list[np.ndarray] = []
     idw_t_ms_per_case: float = 0.0
-    if idw_knn is not None:
+    if idw_knn is not None and is_wall_bl:
+        t0 = time.perf_counter()
+        for d, c in zip(all_data, cases):
+            prim, _ = predict_wall_baseline(d, c['mach_in'], c['aoa_in'], idw_knn['wd_exp'])
+            idw_preds.append(prim)
+        idw_t_ms_per_case = (time.perf_counter() - t0) * 1e3 / max(n, 1)
+    elif idw_knn is not None:
         idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
         w_idw = idw_weights(np.asarray(idw_knn['dist'])[:, :6]).astype(np.float32)
         t0 = time.perf_counter()
@@ -353,12 +376,20 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         gid = ts.geom_id_for(entry)
         mu_e, sig_e = _train_stats(entry, ts.stats)
         coord_norm_e = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+        mach_norm_e = _resolve_mach_norm(entry.cfg)
         geom_e = geom if coord_norm_e == 'domain' else mesh_geom_from_case(
             all_data[0], coord_norm_e, ts.hr_mesh_meta)
 
         # Temps de construction des features
+        is_wall_e = hasattr(entry.model, 'wall_encoder')
         t0_feat = time.perf_counter()
-        if coord_norm_e == 'domain' and np.allclose(mu_e, mu) and np.allclose(sig_e, sig):
+        if is_wall_e:
+            # FAMWall/DAMWall : observations de bord (fusionnées dans d par
+            # utils.layout.load_sample depuis le store _wall compagnon), pas de
+            # champ LR volumique -- jamais le chemin lr_feats partagé ci-dessus.
+            lrf = [build_wall_feat(d, mu_e, sig_e, ts.hr_mesh_meta) for d in all_data]
+            feat_ms_per_case = (time.perf_counter() - t0_feat) * 1e3 / n
+        elif coord_norm_e == 'domain' and np.allclose(mu_e, mu) and np.allclose(sig_e, sig):
             lrf = lr_feats
             t0_lr = time.perf_counter()
             _ = build_lr_feat(geom_e, all_data[0], mu_e, sig_e)
@@ -367,7 +398,8 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
             lrf = [build_lr_feat(geom_e, d, mu_e, sig_e) for d in all_data]
             feat_ms_per_case = (time.perf_counter() - t0_feat) * 1e3 / n
         t0_hr = time.perf_counter()
-        hr_feats = [build_hr_feat(geom_e, c['mach_in'], c['aoa_in'], gid) for c in cases]
+        hr_feats = [build_hr_feat(geom_e, c['mach_in'], c['aoa_in'], gid, mach_norm=mach_norm_e)
+                   for c in cases]
         feat_ms_per_case += (time.perf_counter() - t0_hr) * 1e3 / n
 
         print(f"  [{entry.name}] warmup + inférence batch (B={batch_size})...")
@@ -394,6 +426,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         r['grad_p_max'].append(ac['grad_p_max'])
         r['mach_max'].append(ac['mach_max']); r['mach_min'].append(ac['mach_min'])
         r['wall_mach'].append(ac['wall_mach'])
+        r['wall_cp'].append(ac['wall_cp'])
         r['enthalpy'].append(enthalpy_rms(prim, mach_in))
         r['entropy'].append(entropy_violation(prim))
         r['euler_fvm'].append(fvm_euler_rms(prim, _mesh_obj, mach_in, aoa_in, mu)
@@ -432,6 +465,12 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
                 for k2 in ('CL', 'CD', 'grad_p_max', 'mach_max', 'mach_min'):
                     gt[k2].append(float(gc[k2][i]))
                 gt['wall_mach'].append(gc['wall_mach'][i])
+                if 'wall_cp' in gc:
+                    gt['wall_cp'].append(gc['wall_cp'][i])
+                else:
+                    # cache GT généré avant l'ajout de wall_cp : repli ponctuel
+                    # sur un calcul direct (à régénérer via utils/gt_cache.py).
+                    gt['wall_cp'].append(aero_coeffs(hr_prim, wc, c['mach_in'])['wall_cp'])
                 gt['enthalpy_hr'].append(float(gc.get('enthalpy_hr', [np.nan] * n)[i]))
                 gt['entropy_hr'].append(float(gc.get('entropy_hr', [np.nan] * n)[i]))
             else:
@@ -439,6 +478,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
                 for k2 in ('CL', 'CD', 'grad_p_max', 'mach_max', 'mach_min'):
                     gt[k2].append(ac[k2])
                 gt['wall_mach'].append(ac['wall_mach'])
+                gt['wall_cp'].append(ac['wall_cp'])
                 gt['enthalpy_hr'].append(enthalpy_rms(hr_prim, c['mach_in']))
                 gt['entropy_hr'].append(entropy_violation(hr_prim))
             gt['euler_fvm_hr'].append(fvm_euler_rms(hr_prim, _mesh_obj, c['mach_in'], aoa_in, mu)
@@ -447,12 +487,13 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
             for k2 in ('CL', 'CD', 'grad_p_max', 'mach_max', 'mach_min'):
                 gt[k2].append(None)
             gt['wall_mach'].append(np.array([], dtype=np.float32))
+            gt['wall_cp'].append(np.array([], dtype=np.float32))
             gt['enthalpy_hr'].append(np.nan)
             gt['entropy_hr'].append(np.nan)
             gt['euler_fvm_hr'].append(np.nan)
 
         if idw_knn is not None:
-            _fill('LR IDW', idw_preds[i], idw_t_ms_per_case,
+            _fill(_bl_name, idw_preds[i], idw_t_ms_per_case,
                   hr_prim, has_ref, c['mach_in'], aoa_in)
         for entry in det_models:
             nm = ts.display_name(entry)
@@ -464,13 +505,14 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         if not isinstance(r, dict):
             continue
         for k2 in list(r.keys()):
-            if isinstance(r[k2], list) and k2 not in ('l2_prims', 'linf_prims', 'wall_mach'):
+            if isinstance(r[k2], list) and k2 not in ('l2_prims', 'linf_prims', 'wall_mach', 'wall_cp'):
                 r[k2] = np.array([v if v is not None else np.nan for v in r[k2]], dtype=float)
 
     # Erreurs aéro vs GT
     gt_CL = results['HR']['CL']
     gt_CD = results['HR']['CD']
     gt_wall_mach = results['HR']['wall_mach']
+    gt_wall_cp = results['HR']['wall_cp']
     for nm in method_names:
         r = results[nm]
         r['CL_err'] = np.abs(r['CL'] - gt_CL)
@@ -483,9 +525,17 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
             else:
                 wall_mach_l2.append(np.nan)
         r['wall_mach_l2'] = np.array(wall_mach_l2, dtype=float)
+        wall_cp_l2 = []
+        for cp_p, cp_r in zip(r['wall_cp'], gt_wall_cp):
+            if len(cp_p) > 0 and len(cp_r) > 0:
+                wall_cp_l2.append(float(
+                    np.linalg.norm(cp_p - cp_r) / (np.linalg.norm(cp_r) + 1e-8)))
+            else:
+                wall_cp_l2.append(np.nan)
+        r['wall_cp_l2'] = np.array(wall_cp_l2, dtype=float)
 
     results['_cases'] = cases
-    results['_name_map'] = {'LR IDW': 'LR IDW'}
+    results['_name_map'] = {_bl_name: _bl_name}
     results['_name_map'].update({ts.display_name(m): m.name for m in models})
     _print_phys_table(results, method_names, _has_mesh)
     return results
@@ -572,7 +622,7 @@ def _merge_sweep_results(sweep_list: list[dict]) -> dict:
                 base_names.append(base)
                 seen.add(base)
 
-    _LIST_KEYS = {'wall_mach', 'l2_prims', 'linf_prims'}
+    _LIST_KEYS = {'wall_mach', 'wall_cp', 'l2_prims', 'linf_prims'}
 
     def _gather(key: str, sweep_dicts: list[dict]) -> list:
         """Collecte les valeurs d'une clé à travers tous les sweeps pour une méthode."""

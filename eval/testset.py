@@ -268,18 +268,31 @@ class TestSet:
         model_cls = type(entry.model).__name__
         if model_cls in ('FAM', 'DAM', 'SIAM'):
             return self._knn_hierarchical(entry)
+        if model_cls in ('FAMWall', 'DAMWall'):
+            return self._knn_wall(entry)
         return self._knn_simple(entry)
 
-    def build_idw_knn(self, k: int = 6) -> dict:
+    def build_idw_knn(self, k: int = 6, wall: bool = False) -> dict:
         """KNN simple (LR→HR) pour l'IDW baseline sur ce TestSet.
 
         Toujours reconstruit depuis les maillages du layout courant,
-        quelle que soit la géométrie ou résolution
+        quelle que soit la géométrie ou résolution.
+
+        wall=True : baseline pertinente pour un testset FAMWall/DAMWall --
+        IDW(bord) blend freestream (cf. models/fam_wall.wall_baseline) au lieu
+        de l'IDW volumique classique (comparer un modèle bord-seul à l'IDW du
+        champ LR complet n'a pas de sens, l'info dont il dispose n'est pas la
+        même). Même rôle dans le framework -- ligne "baseline sans réseau" --
+        juste la source qui change.
         """
-        from scipy.spatial import cKDTree
         mesh_hr = np.load(self.layout.mesh_path(self.hr_res), allow_pickle=True).item()
-        mesh_lr = np.load(self.layout.mesh_path(self.lr_res), allow_pickle=True).item()
         hr_pos = np.asarray(mesh_hr.barycenter, dtype=np.float64)
+        if wall:
+            from utils.aero import wall_feature_array
+            wd_exp = wall_feature_array(mesh_hr, hr_pos, 0.1)[:, 1].astype(np.float32)
+            return {'mode': 'wall', 'wd_exp': wd_exp}
+        from scipy.spatial import cKDTree
+        mesh_lr = np.load(self.layout.mesh_path(self.lr_res), allow_pickle=True).item()
         lr_pos = np.asarray(mesh_lr.barycenter, dtype=np.float64)
         dists, idx = cKDTree(lr_pos).query(hr_pos, k=k)
         return {
@@ -310,6 +323,16 @@ class TestSet:
             except Exception:
                 pass
         return knn
+
+    def _knn_wall(self, entry: ModelEntry) -> dict:
+        """KNN pour FAMWall/DAMWall (bord uniquement) -- réutilise
+        load_hierarchical_knn_wall (models/fam_wall.py), même principe que
+        _knn_hierarchical mais sans champ LR volumique."""
+        from models.fam_wall import load_hierarchical_knn_wall
+        arch = (entry.cfg or {}).get('architecture', {})
+        levels = list(arch.get('levels', type(entry.model).DEFAULT_LEVELS))
+        return load_hierarchical_knn_wall(self.layout, levels, entry.cfg,
+                                          tag=type(entry.model).__name__)
 
     def _knn_hierarchical(self, entry: ModelEntry) -> dict:
         from eval.loader import rebuild_fm_cond

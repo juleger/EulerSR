@@ -1,0 +1,70 @@
+model: fam_wall
+data_root: data/
+
+# FAMWall 2 geometries (diamond + naca0012) : teste si le conditionnement
+# geom_id permet de generaliser au-dela de diamond (naca0012 s'effondre en
+# mono-geometrie, cf. memoire projet "famwall-ablation-results"). Architecture
+# reprise de fam_wall_sd.yaml (AMNet reduit, retenu par la campagne d'ablation).
+#
+# Repro : uv run python train_wall.py --config configs/fam_wall_2geo.yaml --run_name fam_wall_2geo
+
+resolution:
+  hr: 0.025
+  lr: 0.1                 # proxy wall_decay_length (wd_exp), partage entre geometries
+
+architecture:
+  levels: [0.1]            # 1 niveau grossier (AMNet reduit)
+  embed_dim: 96
+  cond_dim: 128            # dimension du vecteur de conditionnement
+  wall_embed_dim: 128      # dimension de l'embedding des observations de bord
+  n_heads: 4
+  n_global_blocks: 1       # blocs d'attention globale au niveau grossier (AMNet reduit)
+  n_hr_blocks: 2           # blocs d'attention a pleine resolution HR
+  mlp_ratio: 4
+  n_wall_self_blocks: 2    # profondeur du WallEncoder
+  wall_dist_bias: true     # biais de distance appris dans WallCondBlock
+  use_geom_cond: true      # necessaire en multi-geometrie -- sinon geom_id est ignore
+  n_geoms: 2               # nombre de geometries distinctes (auto-recalcule par train_wall.py)
+  geom_cfg_prob: 0.1       # dropout CFG sur la geometrie (meme ordre de grandeur que fam_6geo)
+  coord_norm: object       # impose pour FAMWall
+  use_bf16: false
+
+flow:
+  n_steps: 16               # pas d'integration ODE a l'inference
+  use_residual: true        # predit le residu sur la baseline IDW (bord)
+  n_samples: 4               # echantillons moyennes par prediction
+  n_val_gen: 16               # nombre de cas evalues en validation
+  sample_seed: 42
+  t_dist: logit_normal        # distribution du temps d'entrainement
+  sigma_t: 1.2                 # ecart-type du temps si t_dist = logit_normal
+  cfg_prob: 0.1                 # proba de dropout du conditionnement a l'entrainement
+  cfg_scale: 1.0                 # echelle de guidance a l'inference
+  learned_res_scale: true   # quasi obligatoire pour FAMWall (pas de HR au deploiement)
+  lambda_res_scale: 0.1     # poids de la loss auxiliaire qui entraine la tete
+
+# Une branche = une geometrie (pas de sweep lr_res : wd_exp est un proxy fixe
+# pour FAMWall, pas un axe d'entrainement comme pour DAM/FAM/SIAM legacy).
+datasets:
+  - name: diamond
+    weight: 1
+  - name: naca0012
+    weight: 1
+
+training:
+  epochs: 200
+  lr: 0.0005
+  weight_decay: 0.00001
+  val_every: 5
+  seed: 42
+  loss: shock_weighted_rel_mse
+  shock_weight_factor: 1.0
+  schedule: cosine
+  warmup_epochs: 5
+  grad_clip: 2.0
+  save_best: true
+  batch_size: 8
+  lambda_phys: 0.05          # plus fort que le SR volumique (probleme plus sous-contraint)
+  lambda_enthalpy: 0.02
+  ema_decay: 0.999
+  preload: true
+  train_fraction: 1.0

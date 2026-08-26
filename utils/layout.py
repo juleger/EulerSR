@@ -104,8 +104,19 @@ def hr_store_path(lr_path) -> Path:
     return set_dir.parent / hr_set / split / lr_path.name
 
 
+def wall_store_path(lr_path) -> Path:
+    """Chemin du fichier d'observations de bord (FAMWall, preprocessing/
+    preprocess_wall.py) correspondant à un fichier du store LR"""
+    lr_path = Path(lr_path)
+    split = lr_path.parent.name
+    set_dir = lr_path.parent.parent
+    wall_set = _LR_SET_RE.sub('_wall', set_dir.name)
+    return set_dir.parent / wall_set / split / lr_path.name
+
+
 def load_sample(path, raw_hr_override: str | Path | None = None) -> dict:
-    """Charge un sample processed en fusionnant la HR partagée et le LR."""
+    """Charge un sample processed en fusionnant la HR partagée, le LR, et (si
+    disponible) les observations de bord FAMWall"""
     d = dict(np.load(path))
     if raw_hr_override is not None:
         raw = np.load(raw_hr_override, allow_pickle=True)
@@ -116,5 +127,10 @@ def load_sample(path, raw_hr_override: str | Path | None = None) -> dict:
         hp = hr_store_path(path)
         if hp.exists():
             for k, v in np.load(hp).items():
+                d.setdefault(k, v)
+    if 'wall_value' not in d:
+        wp = wall_store_path(path)
+        if wp.exists():
+            for k, v in np.load(wp).items():
                 d.setdefault(k, v)
     return d

@@ -16,6 +16,8 @@ _MODEL_REGISTRY = {
     'fam': ('models.fam', 'FAM'),
     'dam': ('models.dam', 'DAM'),
     'siam': ('models.siam', 'SIAM'),
+    'fam_wall': ('models.fam_wall', 'FAMWall'),
+    'dam_wall': ('models.fam_wall', 'DAMWall'),
 }
 
 

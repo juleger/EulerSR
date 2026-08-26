@@ -600,11 +600,21 @@ class SRModel(nnx.Module):
               f"schedule={cfg.schedule}{warmup_str}  grad_clip={cfg.grad_clip}  "
               f"batch={batch_size}{_ema_str}{_multi_str}")
 
-        # Baseline IDW sur le jeu de validation — une référence par géométrie
-        _idw_refs = {_all_names[0]: eval_idw(_all_val[0], _primary_knn)}
+        # Baseline IDW sur le jeu de validation -- une référence par géométrie.
+        # eval_idw suppose un champ LR volumique, absent pour les modèles bord-seul
+        # (FAMWall/DAMWall) : repli NaN plutôt que de faire planter fit().
+        def _safe_eval_idw(ds, knn):
+            try:
+                return eval_idw(ds, knn)
+            except Exception as e:
+                print(f"  [IDW baseline non disponible : {e!r} -- attendu pour un modèle "
+                      "bord-seul, pas de champ LR volumique]")
+                return {'l2': np.full(4, np.nan), 'mach': float('nan')}
+
+        _idw_refs = {_all_names[0]: _safe_eval_idw(_all_val[0], _primary_knn)}
         if _is_multi:
             for _g_i, (_g_ds, _g_knn) in enumerate(zip(_all_val[1:], list(_all_knns.values())[1:])):
-                _idw_refs[_all_names[_g_i + 1]] = eval_idw(_g_ds, _g_knn)
+                _idw_refs[_all_names[_g_i + 1]] = _safe_eval_idw(_g_ds, _g_knn)
         idw_ref = _idw_refs[_all_names[0]]
 
         def _idw_line(ref, name=None):
@@ -628,7 +638,7 @@ class SRModel(nnx.Module):
 
             if _is_multi:
                 # Mode multi-dataset : un meta-step = un micro-batch de CHAQUE branche,
-                # gradients moyennés (pondérés) puis UN SEUL optimizer.update -- évite
+                # gradients moyennés (pondérés) puis UN SEUL optimizer.update évite
                 # le tug-of-war d'un update séquentiel mono-branche par step.
                 for group in train_ds.iter_grouped_batches(batch_size, rng):
                     step_key = jax.random.fold_in(base_key, _n_grad_steps)

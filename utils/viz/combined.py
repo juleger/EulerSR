@@ -14,7 +14,8 @@ import matplotlib.gridspec as _mgs
 from matplotlib.colors import LogNorm
 
 from utils.viz._style import _DPI, CMAP_FIELD as _CMAP_FIELD
-from utils.viz.eval import _build_palette, _display_name, _kde_or_hist
+from utils.viz.eval import (_build_palette, _display_name, _kde_or_hist,
+                            _color_table_gradient, _fmt_metric, _fmt_time)
 
 # Tableau global : les métriques essentielles (erreurs aéro/paroi + distributionnelle + coût)
 _TABLE_METRICS = [
@@ -24,6 +25,16 @@ _TABLE_METRICS = [
     ('wall_mach_l2', r'$M_{wall}$ L2'),
     ('times', 't (ms/cas)'),
 ]
+# Table récapitulative unique (une ligne par modèle, moyennée sur tous les
+# testsets) : mêmes erreurs que _TABLE_METRICS mais Cp paroi plutôt que Mach
+# paroi -- Cp est la grandeur directement comparée aux mesures/litté aéro.
+_GLOBAL_SUMMARY_METRICS = [
+    ('w2_mach', r'$W_2$'),
+    ('CL_err', r'$\Delta C_L$'),
+    ('CD_err', r'$\Delta C_D$'),
+    ('wall_cp_l2', r'$C_p$ paroi L2'),
+    ('times', 'Temps/cas'),
+]
 # Barres + distributions : erreurs de champ (L2w, W2) + erreur paroi
 _ERR_METRICS = [
     ('l2w_mach', r'$L_{2w}$ Mach'),
@@ -32,7 +43,7 @@ _ERR_METRICS = [
 ]
 # Colonnes du CSV (superset, pour garder aussi L2w/Linf sous la main)
 _CSV_KEYS = ['w2_mach', 'l2w_mach', 'linf_mach', 'CL_err', 'CD_err',
-             'wall_mach_l2', 'times', 'enthalpy', 'entropy']
+             'wall_mach_l2', 'wall_cp_l2', 'times', 'enthalpy', 'entropy']
 
 
 def _mean(v) -> float:
@@ -159,6 +170,64 @@ def combined_global_table(ts_results: dict, out_dir: Path, min_groups: int = 2):
 
     _suptitle(fig, 'Tableau global — moyenne par test (plus bas = mieux)', C)
     out_path = Path(out_dir) / 'global_table.png'
+    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  > {out_path.name}")
+
+
+def combined_summary_table(ts_results: dict, out_dir: Path, min_groups: int = 2):
+    """Table récapitulative unique (une ligne par modèle) façon summary_table
+    mono-géométrie, mais moyennée sur tous les testsets évalués -- complète
+    combined_global_table (qui garde la ventilation par testset, utile pour
+    diagnostiquer, mais illisible d'un coup d'œil dès qu'il y a beaucoup de
+    testsets) par un classement global immédiat. Colonnes : W2 Mach, ΔCL,
+    ΔCD, Cp paroi L2 (Mwall exclu ici, cf. _GLOBAL_SUMMARY_METRICS), temps/cas.
+    """
+    C = collect(ts_results)
+    tags, models = C['tags'], C['models']
+    if len(tags) < min_groups or not models:
+        return
+
+    metrics = _GLOBAL_SUMMARY_METRICS
+    col_labels = ['Méthode'] + [lbl for _, lbl in metrics]
+
+    raw: list[list[float]] = []
+    for m in models:
+        row = []
+        for key, _ in metrics:
+            per_tag = [v for v in (_mean(C['get'](t, m, key)) for t in tags) if np.isfinite(v)]
+            row.append(float(np.mean(per_tag)) if per_tag else float('nan'))
+        raw.append(row)
+
+    rows = [[_display_name(m)] +
+            [(_fmt_time(v) if key == 'times' else _fmt_metric(v))
+             for (key, _), v in zip(metrics, r)]
+            for m, r in zip(models, raw)]
+
+    fig, ax = plt.subplots(figsize=(max(6, 1.5 * len(col_labels)), 0.9 + 0.45 * len(rows)),
+                           dpi=_DPI)
+    ax.axis('off')
+    tbl = ax.table(cellText=rows, colLabels=col_labels, loc='center', cellLoc='center')
+    tbl.auto_set_font_size(False); tbl.set_fontsize(10); tbl.scale(1, 1.5)
+
+    for j in range(len(col_labels)):
+        tbl[0, j].set_facecolor('#2c3e50')
+        tbl[0, j].set_text_props(color='white', fontweight='bold')
+
+    _color_table_gradient(tbl, raw, models, len(col_labels) - 1)
+
+    # Titre + sous-titre en offset points (pas en fraction de figure) : cette
+    # figure est bien plus basse que les grilles GridSpec où _suptitle est
+    # calibré (0.995/0.955), et ces deux lignes s'y chevaucheraient sinon.
+    ax.annotate('Tableau récapitulatif global — moyenne sur tous les tests',
+               xy=(0.5, 1.0), xycoords='axes fraction', xytext=(0, 42),
+               textcoords='offset points', ha='center', va='bottom',
+               fontsize=13, fontweight='bold')
+    ax.annotate(_subtitle(C), xy=(0.5, 1.0), xycoords='axes fraction', xytext=(0, 26),
+               textcoords='offset points', ha='center', va='bottom',
+               fontsize=8, style='italic', color='#555555')
+
+    out_path = Path(out_dir) / 'summary_table_global.png'
     plt.savefig(out_path, dpi=_DPI, bbox_inches='tight')
     plt.close(fig)
     print(f"  > {out_path.name}")
@@ -339,6 +408,7 @@ def combined_summary_csv(ts_results: dict, out_dir: Path):
 
 def plot_all_combined(ts_results: dict, out_dir: Path):
     combined_global_table(ts_results, out_dir)
+    combined_summary_table(ts_results, out_dir)
     combined_metric_bars(ts_results, out_dir)
     combined_error_distributions(ts_results, out_dir)
     combined_reference_fields(ts_results, out_dir)
@@ -356,7 +426,8 @@ def plot_by_geometry(by_geom: dict, out_dir: Path):
 
 
 __all__ = [
-    'collect', 'combined_global_table', 'combined_metric_bars',
-    'combined_error_distributions', 'combined_reference_fields',
-    'combined_summary_csv', 'plot_all_combined', 'plot_by_geometry',
+    'collect', 'combined_global_table', 'combined_summary_table',
+    'combined_metric_bars', 'combined_error_distributions',
+    'combined_reference_fields', 'combined_summary_csv',
+    'plot_all_combined', 'plot_by_geometry',
 ]

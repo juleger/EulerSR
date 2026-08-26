@@ -11,7 +11,7 @@ import jax
 
 from eval.loader import ModelEntry
 from eval.testset import TestSet
-from eval.core import build_features, predict_det, predict_ensemble, predict_idw
+from eval.core import build_features, predict_det, predict_ensemble, predict_idw, _resolve_mach_norm
 from utils.refs import to_mach
 from utils.metrics import compute_field_errors, l2_rel, aero_metrics
 
@@ -95,9 +95,11 @@ def run_single_case(models: list[ModelEntry], ts: TestSet, case: dict, d: dict,
         gid = ts.geom_id_for(entry)
         mu_e, sig_e = _train_stats(entry, ts.stats)
         coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+        is_wall = hasattr(entry.model, 'wall_encoder')
         hf, lf, *_ = build_features(d, case['mach_in'], case['aoa_in'],
                                      {'mu': mu_e, 'sig': sig_e}, gid,
-                                     coord_norm, ts.hr_mesh_meta)
+                                     coord_norm, ts.hr_mesh_meta, is_wall=is_wall,
+                                     mach_norm=_resolve_mach_norm(entry.cfg))
         print(f"  [{entry.name}] warmup JIT...")
         jax.block_until_ready(entry.model.predict(hf, lf, knn_map[entry.name]))
 

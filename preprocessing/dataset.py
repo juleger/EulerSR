@@ -179,6 +179,149 @@ class SRDataset:
         return self._load(idx)
 
 
+class WallSRDataset:
+    """Dataset FAMWall : reconstruction du champ complet à partir d'observations
+    de bord uniquement (pas de champ LR volumique).
+
+    Joint DEUX stores séparés par nom de fichier, tous deux en LECTURE SEULE :
+      - data/processed/{geometry}_hr/{split}/*.npz   (store legacy DAM/FAM/SIAM,
+        jamais modifié -- réutilise hr_node_pos/hr_primitives/hr_grad_p)
+      - data/processed/{geometry}_wall/{split}/*.npz  (preprocessing/preprocess_wall.py,
+        wall_pos/wall_normal/wall_s/wall_value)
+    Un cas HR sans fichier de bord correspondant (pas encore prétraité via
+    preprocess_wall.py) est simplement ignoré, pas une erreur.
+
+    Reprend la logique split/Mach-AoA/train_fraction/preload de SRDataset,
+    adaptée à une itération directe sur le store HR (pas de store LR intermédiaire).
+    coord_norm='object' est imposé : les positions de bord n'ont de sens que
+    dans un repère centré/échelle sur l'obstacle (cf. utils/coords.py).
+    """
+
+    def __init__(self, layout: DataLayout,
+                 split: str = 'train',
+                 mach_range: tuple | None = None,
+                 aoa_range: tuple | None = None,
+                 aoa_step: float | None = None,
+                 preload: bool = True,
+                 shock_weight_factor: float = 1.0,
+                 geom_id: int = 0,
+                 train_fraction: float = 1.0,
+                 coord_norm: str = 'object',
+                 mach_norm: tuple[float, float] | None = None):
+        if coord_norm != 'object':
+            raise ValueError("WallSRDataset impose coord_norm='object' -- les positions de "
+                             "bord n'ont de sens que dans un repère centré sur l'obstacle "
+                             "(pas de domaine LR/HR de référence en boundary-only).")
+        hr_split_dir = layout.hr_proc_dir / split
+        # Stocké à part (pas dans entries) : base.py (eval_idw/_validate) suppose
+        # partout la convention entries[i] = (f, mach, aoa), 3-tuple comme
+        # SRDataset -- le chemin de bord est recalculé dans _load() à partir du nom
+        # de fichier HR, jamais stocké comme 2e élément d'entries.
+        self._wall_dir = layout.root / 'processed' / f'{layout.geometry}_wall' / split
+        d = np.load(layout.stats_path)
+        self.mu = d['mu'].astype(np.float32)
+        self.sig = d['sig'].astype(np.float32)
+        # cf. SRDataset : (mid, scale) résolu une fois par run, repli historique sinon.
+        self.mach_mid, self.mach_scale = mach_norm if mach_norm is not None else (_MACH_MID, _MACH_SCALE)
+
+        self.entries: list[tuple] = []
+        n_missing_wall = 0
+        for f in sorted(hr_split_dir.glob('aoa*.npz')):
+            m = _PROC_RE.match(f.stem)
+            if not m:
+                continue
+            aoa, mach = float(m.group(1)), float(m.group(2))
+            if mach_range is not None and not (mach_range[0] <= mach <= mach_range[1]):
+                continue
+            if aoa_range is not None and not (aoa_range[0] <= aoa <= aoa_range[1]):
+                continue
+            if aoa_step is not None and abs(aoa / aoa_step - round(aoa / aoa_step)) > 1e-6:
+                continue
+            if not (self._wall_dir / f.name).exists():
+                n_missing_wall += 1
+                continue
+            self.entries.append((f, mach, aoa))
+        if n_missing_wall:
+            print(f"  WallSRDataset [{split}] : {n_missing_wall} cas HR sans observation de "
+                  f"bord correspondante (ignorés -- lancer preprocess_wall.py sur cette géométrie ?)")
+
+        # Sous-échantillonnage du train set pour ablation (train_fraction), reproductible
+        if split == 'train' and train_fraction < 1.0:
+            k = max(1, int(round(len(self.entries) * train_fraction)))
+            coords = np.array([[(mach - self.mach_mid) / self.mach_scale, aoa / _AOA_SCALE]
+                               for _, mach, aoa in self.entries])
+            idx = _farthest_point_subsample(coords, k, seed=_SUBSAMPLE_SEED)
+            self.entries = [self.entries[i] for i in idx]
+
+        self._geom_id = geom_id
+        self._sw_factor = shock_weight_factor
+        self.coord_norm = coord_norm
+        self._pos_center = np.zeros(2, np.float32)
+        self._pos_scale = 1.0
+        if self.entries:
+            import euler.jax_fvm.src.mesh  # noqa: requis pour unpickle
+            mesh_hr = np.load(layout.mesh_path(layout.hr_res), allow_pickle=True).item()
+            ctr, scl = object_center_scale(mesh_hr.metadata)
+            self._pos_center = ctr.astype(np.float32)
+            self._pos_scale = scl
+
+        self._cache: list | None = None
+        if preload and self.entries:
+            _t0 = time.time()
+            print(f"  WallSRDataset [{split}] preload {len(self.entries)} samples...",
+                  end='', flush=True)
+            self._cache = [self._load(i) for i in range(len(self.entries))]
+            _mb = sum(sum(a.nbytes for a in item) for item in self._cache) / 1e6
+            print(f" {_mb:.0f} Mo  ({time.time()-_t0:.1f}s)")
+
+    def __len__(self):
+        return len(self.entries)
+
+    def _load(self, idx: int) -> tuple:
+        """Charge et prépare un sample -- joint hr_path (store legacy, lecture
+        seule) et wall_path (store FAMWall) par nom de fichier."""
+        hr_path, mach_in, aoa_in = self.entries[idx]
+        hr = np.load(hr_path)
+        wall = np.load(self._wall_dir / hr_path.name)
+
+        hr_pos = hr['hr_node_pos'].astype(np.float32)
+        hr_prim = hr['hr_primitives'].astype(np.float32)
+        hr_grad_p = hr['hr_grad_p'].astype(np.float32)
+        N = hr_pos.shape[0]
+
+        hr_pos_n = (hr_pos - self._pos_center) / self._pos_scale
+        mach_n = (mach_in - self.mach_mid) / self.mach_scale
+        aoa_n = aoa_in / _AOA_SCALE
+
+        hr_feat = np.stack([
+            hr_pos_n[:, 0], hr_pos_n[:, 1],
+            np.full(N, mach_n, np.float32),
+            np.full(N, aoa_n, np.float32),
+            np.full(N, float(self._geom_id), np.float32),
+        ], axis=1)
+
+        wall_pos_n = (wall['wall_pos'].astype(np.float32) - self._pos_center) / self._pos_scale
+        wall_val_n = (wall['wall_value'].astype(np.float32) - self.mu) / self.sig
+        wall_feat = np.concatenate([
+            wall_pos_n, wall['wall_normal'].astype(np.float32),
+            wall_val_n, wall['wall_s'].astype(np.float32)[:, None],
+        ], axis=1)
+
+        target = (hr_prim - self.mu) / self.sig
+
+        gp = np.sqrt((hr_grad_p ** 2).sum(-1))
+        weights = np.minimum(1.0 + self._sw_factor * gp / (gp.mean() + 1e-8), 5.0).astype(np.float32)
+
+        grad_p_target = np.arcsinh(hr_grad_p / self.sig[3]).astype(np.float32)
+
+        return hr_feat, wall_feat, target, weights, grad_p_target
+
+    def __getitem__(self, idx: int) -> tuple:
+        if self._cache is not None:
+            return self._cache[idx]
+        return self._load(idx)
+
+
 class MultiSRDataset:
     """Dataset multi-géométrie : agrège plusieurs SRDataset, chacun avec ses
     propres stats mu/sig, et fournit des batches mono-géométrie via
