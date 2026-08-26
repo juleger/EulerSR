@@ -1,24 +1,20 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train
-#SBATCH --partition=gpu-l40,gpu-h100
+#SBATCH --partition=gpu-h100
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/train/train_%j.out
 #SBATCH --error=logs/train/train_%j.err
 
-# Usage:
-#   sbatch slurm/train.sbatch <config> [run_name]
-#   sbatch slurm/train.sbatch configs/fam_sr.yaml fm_v1
-#   sbatch slurm/train.sbatch configs/fam_multi.yaml
-#
-# Variables d'environnement optionnelles (surchargent les défauts du config YAML) :
-#   DATA_ROOT  : racine des données (ex: data/)
-#   GEOMETRY   : géométrie pour single-dataset (ex: diamond)
-#   MODEL      : nom du modèle      (ex: fam, dam)
+# Usage : sbatch slurm/train.sbatch <config> [run_name]   (ex: configs/fam_sr.yaml fm_v1)
+# Env vars optionnelles (surchargent le YAML) : DATA_ROOT, GEOMETRY, MODEL, EPOCHS,
+#   VAL_EVERY, TRAIN_FRACTION, AOA_STEP (ne garde que les AoA multiples), BATCH_SIZE,
+#   INIT_FROM (checkpoint pour fine-tuning). Les env vars du shell soumetteur sont
+#   propagées par `sbatch` sur ce cluster (vérifié empiriquement).
 
 set -euo pipefail
 
@@ -44,6 +40,7 @@ echo "Run name          : ${RUN_NAME:-<auto>}"
 echo "DATA_ROOT         : ${DATA_ROOT:-<from config>}"
 echo "GEOMETRY          : ${GEOMETRY:-<from config>}"
 echo "MODEL             : ${MODEL:-<from config>}"
+echo "INIT_FROM         : ${INIT_FROM:-<none, init aleatoire>}"
 echo "SLURM_JOB_NODELIST: ${SLURM_JOB_NODELIST}"
 echo "GPU Info:"
 nvidia-smi || true
@@ -55,6 +52,12 @@ python -u train.py \
     ${MODEL:+--model      "${MODEL}"} \
     ${DATA_ROOT:+--data   "${DATA_ROOT}"} \
     ${GEOMETRY:+--geometry "${GEOMETRY}"} \
-    ${RUN_NAME:+--run_name "${RUN_NAME}"}
+    ${RUN_NAME:+--run_name "${RUN_NAME}"} \
+    ${EPOCHS:+--epochs "${EPOCHS}"} \
+    ${VAL_EVERY:+--val_every "${VAL_EVERY}"} \
+    ${TRAIN_FRACTION:+--train_fraction "${TRAIN_FRACTION}"} \
+    ${AOA_STEP:+--aoa_step "${AOA_STEP}"} \
+    ${BATCH_SIZE:+--batch_size "${BATCH_SIZE}"} \
+    ${INIT_FROM:+--init_from "${INIT_FROM}"}
 
 echo "Done — $(date)"

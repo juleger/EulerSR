@@ -4,29 +4,17 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=6
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=20:00:00
 #SBATCH --array=0-20
 #SBATCH --output=logs/euler/%x_%A_%a.out
 #SBATCH --error=logs/euler/%x_%A_%a.err
 
-# Grille de simulations Euler, un SLURM array par AoA, chaque tâche couvre
-# une plage de Mach pour une géométrie donnée.
-#
-# Usage :
-#   sbatch slurm/run_euler_grid.sbatch
-#
-# Paramètres (modifier directement ou via env vars) :
-#   CASE       : géométrie  — diamond | naca0012 | rae2822 | oneraD
-#   MESH_PATHS : un ou plusieurs maillages, séparés par des virgules et/ou
-#                espaces (ex: "mesh_LR.npy,mesh_HR.npy" pour générer LR et HR).
-#                Chaque maillage exécute la grille (Mach x AoA) complète.
-#                MESH_PATH reste accepté pour la compatibilité (maillage unique).
-#   MACH       : plage Mach au format start:stop:step  (ex: 0.70:4.00:0.01)
-#   AOA_MIN    : AoA minimum correspondant au SLURM array task 0 (défaut: -5)
-#   TF         : temps final simulation (défaut: 5.0)
-#   STATIONARITY_THRESHOLD : seuil de convergence (défaut: 1e-8)
+# Grille Euler (Mach x AoA), un SLURM array par AoA. Usage : sbatch slurm/run_euler_grid.sbatch
+# Env vars : CASE (géométrie), MESH_PATHS (1+ maillages séparés par virgule/espace,
+#   chacun exécute la grille complète ; MESH_PATH = alias legacy), MACH (start:stop:step),
+#   AOA_MIN (AoA du task 0, défaut -5), TF (défaut 5.0), STATIONARITY_THRESHOLD (défaut 1e-8)
 
 
 CASE="${CASE:-oneraD}"
