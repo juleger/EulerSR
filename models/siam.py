@@ -35,10 +35,11 @@ from flax import nnx
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-from models.base import SRModel, Buffer
+from models.base import SRModel, Buffer, MLP
 from utils.layout import DataLayout
 from models.dam import (AMNet, build_context, load_hierarchical_knn, _LR_REF,
-                        cfg_drop_geom_id)
+                        cfg_drop_geom_id, _N_SCALARS, _N_COND)
+from utils.attention import scalar_fourier_embedding
 
 
 class SIAM(SRModel):
@@ -90,12 +91,11 @@ class SIAM(SRModel):
         self._path = flow.get('path', 'linear')
         self._gamma_env = flow.get('gamma', 'sin')
 
-        # Echelle du bruit du pont PAR CANAL
+        # Echelle du bruit du pont PAR CANAL (toujours active, pas de toggle -- un ancien
+        # flag flow.per_channel_noise existait ici mais n'etait lu nulle part ; supprime) :
         #   ODE (learn_score=False) : echelle estimee EN LIGNE sur le residu du batch
         #   SDE (learn_score=True)  : buffer global fige une fois dans _pre_fit, pour
         #     la coherence entrainement / echantillonnage du score.
-
-        self.per_channel_noise = bool(flow.get('per_channel_noise', True))
         self.noise_scale = Buffer(jnp.ones((4,), jnp.float32))
         self._nominal_lr = float((cfg.get('resolution') or {}).get('lr', _LR_REF))
 
@@ -129,32 +129,59 @@ class SIAM(SRModel):
         # Dropout de conditionnement (classifier-free guidance) : regularise + guidance
         self.cfg_prob = float(flow.get('cfg_prob', 0.0))   # proba de dropout a l'entrainement
         self.cfg_scale = float(flow.get('cfg_scale', 1.0))  # echelle de guidance a l'inference
-        # Dropout CFG du conditionnement geometrique (entrainement uniquement)
+        # Dropout CFG du conditionnement geometrique (entrainement uniquement) + guidance
+        # a l'inference (geom_cfg_scale, meme mecanisme que FAM) : null geom_id -> token
+        # n_geoms. 1.0 = desactive (comportement inchange). Necessite geom_cfg_prob > 0 a
+        # l'entrainement pour que le token nul soit reellement entraine.
         self.geom_cfg_prob = float(arch.get('geom_cfg_prob', 0.0))
+        self.geom_cfg_scale = float(flow.get('geom_cfg_scale', 1.0))
         self._n_geoms = arch.get('n_geoms', 8)
 
         # Stats d'entrainement (denormalisation pour la projection de positivite)
         self.mu_train = Buffer(jnp.zeros((4,), jnp.float32))
         self.sig_train = Buffer(jnp.ones((4,), jnp.float32))
 
-    def _net_out(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict, scal: jax.Array | None = None) -> jax.Array:
+        # res_scale appris (opt-in, comportement historique inchange si False)
+        self._learned_res_scale = bool(flow.get('learned_res_scale', False))
+        self.lambda_res_scale = float(flow.get('lambda_res_scale', 0.1))
+        if self._learned_res_scale:
+            scale_hidden = arch.get('scale_head_dim', 64)
+            self.scale_mlp = MLP([_N_COND, scale_hidden, 4], rngs, dtype=compute_dtype)
+            self.scale_mlp.layers[-1].kernel.value = jnp.zeros_like(self.scale_mlp.layers[-1].kernel.value)
+            self.scale_mlp.layers[-1].bias.value = jnp.zeros_like(self.scale_mlp.layers[-1].bias.value)
+            if self._use_geom_cond:
+                self.scale_geom_emb = nnx.Embed(self._n_geoms + 1, 4, rngs=rngs)
+                self.scale_geom_emb.embedding.value = jnp.zeros_like(self.scale_geom_emb.embedding.value)
+            self.log_scale_bias = Buffer(jnp.zeros((4,), jnp.float32))
+
+    def _net_out(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict,
+                scal: jax.Array | None = None, geom_id: jax.Array | None = None) -> jax.Array:
         """Sortie brute du reseau : [N, 4] (drift b) ou [N, 8] (drift b + denoiser eta)."""
         s = ctx['scal'] if scal is None else scal
-        return self.net(ctx['c'], s, knn['fm'], ctx['wall'], ctx['geom_id'], x_t=x_t, t=t)
+        g = ctx['geom_id'] if geom_id is None else geom_id
+        return self.net(ctx['c'], s, knn['fm'], ctx['wall'], g, x_t=x_t, t=t)
 
     def velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict,
-                 scal: jax.Array | None = None) -> jax.Array:
+                 scal: jax.Array | None = None, geom_id: jax.Array | None = None) -> jax.Array:
         """Drift du pont b(x_t, t | cond) (canaux 0:4)."""
-        return self._net_out(x_t, t, ctx, knn, scal=scal)[..., :4]
+        return self._net_out(x_t, t, ctx, knn, scal=scal, geom_id=geom_id)[..., :4]
 
     def _guided_velocity(self, x_t: jax.Array, t: jax.Array, ctx: dict, knn: dict) -> jax.Array:
-        """Vitesse du pont avec classifier-free guidance (inference)."""
+        """Vitesse du pont avec classifier-free guidance (inference), scalaire (Mach/AoA)
+        et/ou geometrique (meme mecanisme que FAM, cf. models/fam.py)."""
+        if self.cfg_scale == 1.0 and self.geom_cfg_scale == 1.0:
+            return self.velocity(x_t, t, ctx, knn)
         v_cond = self.velocity(x_t, t, ctx, knn)
-        if self.cfg_scale == 1.0:
-            return v_cond
-        scal_null = jnp.zeros_like(ctx['scal'])
-        v_uncond = self.velocity(x_t, t, ctx, knn, scal=scal_null)
-        return v_uncond + self.cfg_scale * (v_cond - v_uncond)
+        v = v_cond
+        if self.cfg_scale != 1.0:
+            scal_null = jnp.zeros_like(ctx['scal'])
+            v_uncond = self.velocity(x_t, t, ctx, knn, scal=scal_null)
+            v = v + (self.cfg_scale - 1.0) * (v_cond - v_uncond)
+        if self.geom_cfg_scale != 1.0:
+            geom_null = jnp.full_like(ctx['geom_id'], self._n_geoms)
+            v_uncond_geom = self.velocity(x_t, t, ctx, knn, geom_id=geom_null)
+            v = v + (self.geom_cfg_scale - 1.0) * (v_cond - v_uncond_geom)
+        return v
 
     def _eps(self, t: jax.Array, gamma: jax.Array) -> jax.Array:
         """Coefficient de diffusion eps(t) >= 0 du SDE (preserve les marginales)."""
@@ -210,8 +237,20 @@ class SIAM(SRModel):
             return jax.random.beta(key, self._t_alpha, self._t_beta)
         return jax.random.uniform(key)
     
-    def _res_scale(self, knn: dict | None = None) -> jax.Array:
+    def _predicted_res_scale(self, ctx: dict) -> jax.Array:
+        """noise_scale predite (learned_res_scale=True) a partir du conditionnement
+        seul (Mach, AoA, resolution LR, geometrie)"""
+        scal = ctx['scal']
+        feat = jnp.concatenate([scalar_fourier_embedding(scal[:_N_SCALARS]), scal[_N_SCALARS:]])
+        log_scale = self.log_scale_bias.value + self.scale_mlp(feat)
+        if self._use_geom_cond:
+            log_scale = log_scale + self.scale_geom_emb(ctx['geom_id'])
+        return jnp.exp(log_scale)
+
+    def _res_scale(self, knn: dict | None = None, ctx: dict | None = None) -> jax.Array:
         """Echelle par canal du residu HR-IDW (std), qui normalise le pont"""
+        if self._learned_res_scale and ctx is not None:
+            return self._predicted_res_scale(ctx)[None, :]
         if knn is not None:
             rs = knn.get('res_scale')
             if rs is not None:
@@ -236,7 +275,7 @@ class SIAM(SRModel):
     def _integrate(self, ctx: dict, knn: dict) -> jax.Array:
         """Integre le pont (t=0) -> (t=1) par la PF-ODE (Heun)"""
         dt = 1.0 / self.n_steps
-        rs = self._res_scale(knn)
+        rs = jax.lax.stop_gradient(self._res_scale(knn, ctx))
         vscale = 1.0 if self.use_residual else rs
 
         def body(k, x):
@@ -256,7 +295,7 @@ class SIAM(SRModel):
         dt = 1.0 / self.n_sde_steps
         sqrt_dt = jnp.sqrt(dt)
 
-        rs = self._res_scale(knn)
+        rs = jax.lax.stop_gradient(self._res_scale(knn, ctx))
         vscale = 1.0 if self.use_residual else rs   # increment normalise -> unites champ
 
         def body(k, carry):
@@ -342,6 +381,11 @@ class SIAM(SRModel):
         if multi:
             print(f"  buffer res_scale : branche lr={self._branch_lr(branch_pairs[best_i][1]):g}"
                   f"  (resolution nominale {self._nominal_lr:g})")
+        if self._learned_res_scale:
+            # Point de depart de la tete apprise = buffer historique
+            self.log_scale_bias.value = jnp.log(jnp.maximum(self.noise_scale.value, 1e-6))
+            print(f"  res_scale APPRISE (learned_res_scale=True, lambda={self.lambda_res_scale:g}) "
+                  "-- tete initialisee sur le buffer ci-dessus, affinee pendant l'entrainement.")
 
         mode = "residu IDW + delta" if self.use_residual else "champ"
         print(f"  SIAM pont LR IDW -> HR normalise  (path={self._path}, gamma={self._gamma_env}, "
@@ -351,7 +395,10 @@ class SIAM(SRModel):
                      gp: jax.Array, knn_g: dict, key: jax.Array, aux: dict) -> jax.Array:
         """Loss du pont : b(x_t, t | cond) doit matcher la derive x1 - x0 (+ bruit)."""
         ctx = build_context(self, hr, lr, knn_g)
-        rs = self._res_scale(knn_g)              # [1, 4] : std residuel par canal (fixe)
+        # rs_raw garde le gradient (utilisé uniquement par la loss auxiliaire ci-dessous) ;
+        # rs (stop_gradient) normalise le pont, comme pour le lookup calibré sur le HR.
+        rs_raw = self._res_scale(knn_g, ctx)      # [1, 4] : std residuel par canal
+        rs = jax.lax.stop_gradient(rs_raw)
         kt, kz, kcfg, kgeom = jax.random.split(key, 4)
         t = self._sample_t(kt)
         alpha, dalpha, beta, dbeta, gamma, dgamma = self._interp_coeffs(t)
@@ -383,6 +430,15 @@ class SIAM(SRModel):
         out = self._net_out(x_t, t, ctx, knn_g, scal=scal_used)
         v = out[..., :4]
         loss = aux['loss_fn'](v, drift_target, wt)
+
+        if self._learned_res_scale and self.lambda_res_scale > 0:
+            # Loss auxiliaire : régresse rs_raw (avec gradient) vers le std réel du résidu
+            # HR-IDW de CE cas -- TOUJOURS le résidu, même en mode champ (use_residual=False),
+            # cf. _branch_res_std : noise_scale calibre l'échelle de l'enveloppe de bruit du
+            # pont, pas la normalisation de x1 dans ce mode.
+            true_std = jnp.maximum((tg - ctx['baseline']).std(axis=0), 1e-6)
+            loss = loss + self.lambda_res_scale * jnp.mean(
+                (jnp.log(rs_raw) - jnp.log(true_std)) ** 2)
 
         # Tete denoiser : eta = E[z|x_t]
         if self.learn_score:
