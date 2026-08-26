@@ -309,7 +309,7 @@ class SRModel(nnx.Module):
                 (jnp.arcsinh(grad_p_lsq(pred, knn_g)) - gp) ** 2).mean()
         if aux['lambda_enthalpy'] > 0 and 'mu' in knn_g:
             extra = extra + aux['lambda_enthalpy'] * enthalpy_residual(
-                pred, hr[0, 2], knn_g['mu'], knn_g['sig'])
+                pred, hr[0, 2], knn_g['mu'], knn_g['sig'], mach_norm=aux['mach_norm'])
         return extra
 
     def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array,
@@ -443,7 +443,8 @@ class SRModel(nnx.Module):
         # est un jnp scalaire trace, pas un float -- cf. TracerBoolConversionError.
         _aux = {'loss_fn': _loss_fn, 'lambda_phys': lambda_phys,
                 'lambda_enthalpy': lambda_enth, 'lambda_endpoint': lambda_endpoint,
-                'use_endpoint': lambda_endpoint > 0}
+                'use_endpoint': lambda_endpoint > 0,
+                'mach_norm': (float(train_ds.mach_mid), float(train_ds.mach_scale))}
         use_phys_loss = lambda_phys > 0 and 'grad_op' in _primary_knn
 
         def _make_step_fns(knn_g):

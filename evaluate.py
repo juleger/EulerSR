@@ -52,6 +52,9 @@ def main():
 
             # syntaxe complète : geometry:lr_res:hr_res
             %(prog)s --data data/ --models m.pkl --testsets diamond:0.05:0.025
+
+            # exclure les cas Mach>2 (tf solveur raccourci sur la plupart des géométries, cf. logs/euler/*)
+            %(prog)s --data data/ --models m.pkl --testsets naca0012 --mach_max 2.0
             """)
     p.add_argument('--data', required=True, help='Racine des données (ex: data/)')
     p.add_argument('--models', nargs='+', required=True, help='Chemins vers les checkpoints (.pkl)')
@@ -64,6 +67,8 @@ def main():
                         '(doit avoir autant d\'entrées que --testsets).')
     p.add_argument('--lr_res', type=float, default=0.1, help='Résolution LR par défaut (défaut: 0.1)')
     p.add_argument('--hr_res', type=float, default=0.025, help='Résolution HR par défaut (défaut: 0.025)')
+    p.add_argument('--mach_max', type=float, default=None,
+                   help="Exclut du sweep (et des cas de référence) tout cas Mach > valeur")
     p.add_argument('--full_eval', action='store_true', help='Sweep complet du test set (timing, distributions, aéro)')
     p.add_argument('--n_eval', type=int, default=0, help='Limiter le nombre de cas du sweep (0 = tout)')
     p.add_argument('--batch_size', type=int, default=_BATCH_SIZE)
@@ -71,7 +76,7 @@ def main():
     p.add_argument('--n_samples', type=int, default=None, help='Override n_samples ensemble (défaut: valeur du checkpoint)')
     p.add_argument('--cfg_scale', type=float, default=None, help='Override cfg_scale guidance Mach/AoA (défaut: valeur du checkpoint)')
     p.add_argument('--geom_cfg_scale', type=float, default=None,
-                   help="Override geom_cfg_scale (guidance CFG sur la geometrie, FAM uniquement ; "
+                   help="Override geom_cfg_scale (guidance CFG sur la geometrie, FAM/SIAM ; "
                         "1.0 = desactive, defaut: valeur du checkpoint)")
     p.add_argument('--n_steps_sweep', type=int, nargs='+', default=None,
                    help='Balaie plusieurs n_steps pour UN SEUL modèle (--models à 1 checkpoint) : '
@@ -94,7 +99,8 @@ def main():
     testsets: list[TestSet] = []
     for spec in args.testsets:
         layout = _parse_testset_spec(spec, data_root, args.lr_res, args.hr_res)
-        ts = TestSet.from_dir(data_root, layout.geometry, layout.lr_res, layout.hr_res)
+        ts = TestSet.from_dir(data_root, layout.geometry, layout.lr_res, layout.hr_res,
+                              mach_max=args.mach_max)
         testsets.append(ts)
 
     primary_layout = testsets[0].layout

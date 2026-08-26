@@ -147,10 +147,14 @@ def main():
     res_cfg = cfg.get('resolution', {})
     lr_res = res_cfg.get('lr', 0.1)
     hr_res = res_cfg.get('hr', 0.025)
-    mach_range = _parse_range(args.mach)
+    mach_range = _parse_range(args.mach) or (tuple(tr['mach_range']) if tr.get('mach_range') else None)
     aoa_range = _parse_range(args.aoa)
     use_lr_grad = cfg.get('architecture', {}).get('use_lr_grad', False)
     coord_norm = cfg.get('architecture', {}).get('coord_norm', 'domain')
+    # (mid, scale) du conditionnement Mach pour CE run
+    _mn_range = mach_range if mach_range is not None else (0.7, 3.0)
+    mach_norm = ((_mn_range[0] + _mn_range[1]) / 2, (_mn_range[1] - _mn_range[0]) / 2)
+    cfg['mach_norm'] = list(_mn_range)
     preload = tr.get('preload', True)
     sw_factor = tr.get('shock_weight_factor', 1.0)
 
@@ -172,10 +176,11 @@ def main():
             train_list.append(SRDataset(b['layout'], 'train', use_lr_grad=use_lr_grad,
                 mach_range=b['mach_range'], aoa_range=b['aoa_range'], aoa_step=b['aoa_step'], preload=preload,
                 shock_weight_factor=sw_factor, geom_id=b['geom_id'], train_fraction=b['train_fraction'],
-                coord_norm=coord_norm))
+                coord_norm=coord_norm, mach_norm=mach_norm))
             val_list.append(SRDataset(b['layout'], 'val', use_lr_grad=use_lr_grad,
                 mach_range=b['mach_range'], aoa_range=b['aoa_range'], preload=preload,
-                shock_weight_factor=sw_factor, geom_id=b['geom_id'], coord_norm=coord_norm))
+                shock_weight_factor=sw_factor, geom_id=b['geom_id'], coord_norm=coord_norm,
+                mach_norm=mach_norm))
             names.append(b['name'])
             weights.append(b['weight'])
             knns[b['name']] = cls.load_knn(b['layout'], cfg)
@@ -232,9 +237,10 @@ def main():
         knn = cls.load_knn(primary_layout, cfg)
         train_ds = SRDataset(primary_layout, 'train', use_lr_grad=use_lr_grad, mach_range=mach_range,
             aoa_range=aoa_range, aoa_step=args.aoa_step, preload=preload, shock_weight_factor=sw_factor,
-            train_fraction=args.train_fraction, coord_norm=coord_norm)
+            train_fraction=args.train_fraction, coord_norm=coord_norm, mach_norm=mach_norm)
         val_ds = SRDataset(primary_layout, 'val', use_lr_grad=use_lr_grad, mach_range=mach_range,
-            aoa_range=aoa_range, preload=preload, shock_weight_factor=sw_factor, coord_norm=coord_norm)
+            aoa_range=aoa_range, preload=preload, shock_weight_factor=sw_factor, coord_norm=coord_norm,
+            mach_norm=mach_norm)
         stats = np.load(primary_layout.stats_path)
 
     cfg.setdefault('architecture', {})['use_lr_grad'] = (
@@ -271,14 +277,15 @@ def main():
         try:
             plot_val_panels(m, knn_, ref_cases, stats, mesh_hr, mesh_lr,
                             pred_dir / f'ep{epoch:04d}.png',
-                            title=f'{run_label} — epoch {epoch}', coord_norm=coord_norm)
+                            title=f'{run_label} — epoch {epoch}', coord_norm=coord_norm,
+                            mach_norm=mach_norm)
             # Plots par géométrie secondaire
             for sec in secondary_plot_data:
                 if not sec['ref_cases']:
                     continue
                 plot_val_panels(m, sec['knn'], sec['ref_cases'], sec['stats'], sec['mesh_hr'], sec['mesh_lr'],
                     pred_dir / f'ep{epoch:04d}_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — epoch {epoch}',
-                    coord_norm=coord_norm)
+                    coord_norm=coord_norm, mach_norm=mach_norm)
         except Exception as e:
             print(f"  pred_callback epoch {epoch} : {e}")
 
@@ -292,17 +299,23 @@ def main():
         pretrained = cls.load(args.init_from)
         nnx.update(model, nnx.state(pretrained))
         print("  Params + buffers (res_scale, mu_train/sig_train, ...) repris du checkpoint.")
+        if hasattr(model, 'mach_mid'):
+            # cfg['mach_norm'] (résolu pour CE run) 
+            import jax.numpy as _jnp
+            model.mach_mid.value = _jnp.array(mach_norm[0], _jnp.float32)
+            model.mach_scale.value = _jnp.array(mach_norm[1], _jnp.float32)
 
     trained = model.fit(train_ds, val_ds, knn, train_cfg, out_dir='results/checkpoints',
         model_cfg=cfg, run_name=run_label, pred_callback=pred_callback)
 
     plot_val_panels(trained, primary_knn, ref_cases, stats, mesh_hr, mesh_lr,
-                    pred_dir / 'best.png', title=f'{run_label} — best', coord_norm=coord_norm)
+                    pred_dir / 'best.png', title=f'{run_label} — best', coord_norm=coord_norm,
+                    mach_norm=mach_norm)
     for sec in secondary_plot_data:
         if sec['ref_cases']:
             plot_val_panels(trained, sec['knn'], sec['ref_cases'], sec['stats'], sec['mesh_hr'], sec['mesh_lr'],
                     pred_dir / f'best_{sec["name"]}.png', title=f'{run_label} [{sec["name"]}] — best',
-                    coord_norm=coord_norm)
+                    coord_norm=coord_norm, mach_norm=mach_norm)
     print(f"Prediction plots: {pred_dir}/")
 
 

@@ -51,12 +51,19 @@ class SRDataset:
                  shock_weight_factor: float = 1.0,
                  geom_id: int = 0,
                  train_fraction: float = 1.0,
-                 coord_norm: str = 'domain'):
+                 coord_norm: str = 'domain',
+                 mach_norm: tuple[float, float] | None = None):
         split_dir = layout.proc_dir() / split
         d = np.load(layout.stats_path)
         self.mu = d['mu'].astype(np.float32)
         self.sig = d['sig'].astype(np.float32)
         self.use_lr_grad = use_lr_grad
+        # (mid, scale) du conditionnement Mach -- résolu une fois par run
+        # d'entraînement (cf. train.py), pas par branche géométrique : tout le
+        # modèle doit partager la même échelle. Repli sur l'historique
+        # (0.7, 3.0) si non précisé, pour compatibilité avec les checkpoints
+        # existants (cf. eval/runner.py:_resolve_mach_norm).
+        self.mach_mid, self.mach_scale = mach_norm if mach_norm is not None else (_MACH_MID, _MACH_SCALE)
 
         self.entries: list[tuple] = []
 
@@ -78,7 +85,7 @@ class SRDataset:
         # Sous-échantillonnage du train set pour ablation (train_fraction), reproductible
         if split == 'train' and train_fraction < 1.0:
             k = max(1, int(round(len(self.entries) * train_fraction)))
-            coords = np.array([[(mach - _MACH_MID) / _MACH_SCALE, aoa / _AOA_SCALE]
+            coords = np.array([[(mach - self.mach_mid) / self.mach_scale, aoa / _AOA_SCALE]
                                for _, mach, aoa in self.entries])
             idx = _farthest_point_subsample(coords, k, seed=_SUBSAMPLE_SEED)
             self.entries = [self.entries[i] for i in idx]
@@ -133,7 +140,7 @@ class SRDataset:
 
         hr_pos_n = (hr_pos - self._pos_center) / self._pos_scale
         lr_pos_n = (lr_pos - self._pos_center) / self._pos_scale
-        mach_n = (mach_in - _MACH_MID) / _MACH_SCALE
+        mach_n = (mach_in - self.mach_mid) / self.mach_scale
         aoa_n = aoa_in / _AOA_SCALE
 
         hr_feat = np.stack([
@@ -188,6 +195,10 @@ class MultiSRDataset:
         # mu/sig du dataset primaire (affiché dans les métriques globales)
         self.mu = datasets[0].mu
         self.sig = datasets[0].sig
+        # (mid, scale) Mach : identique sur toutes les branches par construction
+        # (résolu une fois au niveau run dans train.py, pas par géométrie).
+        self.mach_mid = datasets[0].mach_mid
+        self.mach_scale = datasets[0].mach_scale
         # Poids d'échantillonnage normalisés
         if weights is None:
             sizes = [len(d) for d in datasets]

@@ -46,12 +46,17 @@ _RHO_INF = 1.0
 
 
 def enthalpy_residual(pred_norm: jax.Array, mach_n: jax.Array,
-                      mu: jax.Array, sig: jax.Array, gamma: float = _GAMMA) -> jax.Array:
-    """Résidu RMS d'enthalpie totale (= 0 pour une solution Euler parfaite), différentiable."""
+                      mu: jax.Array, sig: jax.Array, gamma: float = _GAMMA,
+                      mach_norm: tuple[float, float] = (_MACH_MID, _MACH_SCALE)) -> jax.Array:
+    """Résidu RMS d'enthalpie totale (= 0 pour une solution Euler parfaite), différentiable.
+
+    mach_norm = (mid, scale) résolu pour CE run d'entraînement (cf.
+    models/base.py:_aux, dérivé de train_ds.mach_mid/mach_scale)"""
     prim = pred_norm * sig + mu  # dénormalisation
     rho = jnp.maximum(prim[:, 0], 1e-12)
     H = gamma / (gamma - 1) * prim[:, 3] / rho + 0.5 * (prim[:, 1] ** 2 + prim[:, 2] ** 2)
-    mach_in = mach_n * _MACH_SCALE + _MACH_MID
+    mach_mid, mach_scale = mach_norm
+    mach_in = mach_n * mach_scale + mach_mid
     v_inf = mach_in * jnp.sqrt(gamma * _P_INF / _RHO_INF)
     H_inf = gamma / (gamma - 1) * _P_INF / _RHO_INF + 0.5 * v_inf ** 2
     return jnp.sqrt((((H - H_inf) / H_inf) ** 2).mean() + 1e-12)

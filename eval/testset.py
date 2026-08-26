@@ -333,8 +333,16 @@ class TestSet:
 
     @classmethod
     def from_dir(cls, data_root: str | Path, geometry: str,
-                 lr_res: float = 0.1, hr_res: float = 0.025) -> 'TestSet':
-        """Construit un TestSet depuis la racine des données et le nom de géométrie."""
+                 lr_res: float = 0.1, hr_res: float = 0.025,
+                 mach_max: float | None = None) -> 'TestSet':
+        """Construit un TestSet depuis la racine des données et le nom de géométrie.
+
+        mach_max : si donné, exclut du sweep (et des cas de référence) tout cas
+        avec mach_in > mach_max -- utile pour écarter les régimes générés avec
+        un tf solveur raccourci (cf. logs/euler/*, tf réduit au-delà de M=2 sur
+        la plupart des géométries d'entraînement) plutôt que de les laisser
+        polluer silencieusement les métriques agrégées.
+        """
         layout = DataLayout.from_root(data_root, geometry, lr_res, hr_res)
         ref_specs = {
             'diamond': REFERENCE_CASES,
@@ -345,11 +353,14 @@ class TestSet:
         if abs(hr_res - _HR_REF) > 1e-6:
             tag += f'_hr{hr_res:g}'
             label += f', HR h={hr_res:g}'
-        return cls._build(tag, label, layout, ref_specs)
+        if mach_max is not None:
+            tag += f'_machle{mach_max:g}'
+            label += f', Mach≤{mach_max:g}'
+        return cls._build(tag, label, layout, ref_specs, mach_max=mach_max)
 
     @classmethod
     def _build(cls, tag: str, label: str, layout: DataLayout,
-               ref_specs: list) -> 'TestSet':
+               ref_specs: list, mach_max: float | None = None) -> 'TestSet':
         import euler.jax_fvm.src.mesh  # noqa: requis pour unpickle
 
         mesh_hr = np.load(layout.mesh_path(layout.hr_res), allow_pickle=True).item()
@@ -363,8 +374,16 @@ class TestSet:
         ref_cases = _find_ref_cases(layout, ref_specs)
         test_cases = _find_test_cases(layout)
 
+        cap_note = ''
+        if mach_max is not None:
+            n_ref0, n_test0 = len(ref_cases), len(test_cases)
+            ref_cases = [c for c in ref_cases if c['mach_in'] <= mach_max]
+            test_cases = [c for c in test_cases if c['mach_in'] <= mach_max]
+            cap_note = (f"  [Mach≤{mach_max:g} : {n_test0 - len(test_cases)} cas test "
+                       f"et {n_ref0 - len(ref_cases)} cas ref exclus]")
+
         print(f"  TestSet '{tag}' : {len(ref_cases)} cas ref, "
-              f"{len(test_cases)} cas test")
+              f"{len(test_cases)} cas test{cap_note}")
 
         return cls(tag=tag, label=label, layout=layout,
                    stats=stats, wc=wc, triang_hr=triang,
