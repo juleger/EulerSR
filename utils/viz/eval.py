@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as _mgs
+from matplotlib.colors import LogNorm, Normalize
 from scipy.stats import gaussian_kde
 from scipy.interpolate import griddata
 
@@ -158,10 +159,10 @@ def plot_reference_grid(results: dict, triang, out_path: Path):
     if any(has_ref):
         if results['idw']:
             err_cols.append({'name': 'LR IDW', 'mach_preds': results['idw']['mach_preds'],
-                             'l2w': results['idw'].get('l2w', [])})
+                             'w2': results['idw'].get('w2', [])})
         for row in results['rows']:
             err_cols.append({'name': row['name'], 'mach_preds': row['mach_preds'],
-                             'l2w': row.get('l2w', [])})
+                             'w2': row.get('w2', [])})
 
     if not err_cols:
         return
@@ -212,9 +213,9 @@ def plot_reference_grid(results: dict, triang, out_path: Path):
             sc = ax.tripcolor(triang, facecolors=err,
                                cmap=_CMAP_ERR, vmin=0, vmax=err_vmax)
             ax.set_aspect('equal'); ax.axis('off')
-            l2w_v = (cd.get('l2w', []) or []); l2w_v = l2w_v[ri] if ri < len(l2w_v) else None
-            if l2w_v is not None:
-                ax.text(0.5, 0.03, f'L2w={l2w_v:.3f}',
+            w2_v = (cd.get('w2', []) or []); w2_v = w2_v[ri] if ri < len(w2_v) else None
+            if w2_v is not None:
+                ax.text(0.5, 0.03, f'W2={w2_v:.4f}',
                         transform=ax.transAxes, ha='center', va='bottom',
                         fontsize=6.5, fontweight='bold',
                         bbox=dict(boxstyle='round,pad=0.2', fc='white', alpha=0.88,
@@ -717,6 +718,41 @@ def _fvm_avg_time_text(geometry: str | None, hr_res: float | None,
     return "Temps solveur FVM (GPU) — " + '   '.join(parts)
 
 
+def _color_table_gradient(tbl, raw: list[list[float]], row_names: list[str],
+                          n_metric_cols: int, exclude: frozenset[str] = frozenset({'LR IDW'})):
+    """Colore une table matplotlib (lignes 1..len(row_names), colonnes
+    0..n_metric_cols) selon un gradient RdYlGn_r continu *par colonne*
+    (vert = meilleur/plus bas, rouge = pire/plus haut), calculé parmi les
+    lignes hors `exclude` -- toujours grisées. Ailleurs (colonne 'Méthode',
+    valeurs manquantes) : fond zébré discret. Remplace l'ancien
+    vert/rouge binaire (best/worst uniquement) par une teinte continue qui
+    situe aussi les modèles intermédiaires -- cf. combined_global_table."""
+    _GRAY = '#c9c9c9'
+    cmap = plt.get_cmap('RdYlGn_r')
+    model_idx = [i for i, nm in enumerate(row_names) if nm not in exclude]
+
+    for i in range(len(row_names)):
+        for j in range(n_metric_cols + 1):
+            tbl[i + 1, j].set_facecolor('#eaf0f6' if i % 2 == 0 else 'white')
+
+    for j in range(n_metric_cols):
+        vals = [(i, raw[i][j]) for i in model_idx if np.isfinite(raw[i][j])]
+        norm = None
+        if len(vals) >= 2:
+            vmin = min(v for _, v in vals); vmax = max(v for _, v in vals)
+            if vmax > vmin:
+                norm = (LogNorm(vmin=vmin, vmax=vmax) if (vmin > 0 and vmax / vmin > 5)
+                        else Normalize(vmin=vmin, vmax=vmax))
+        if norm is not None:
+            for i, v in vals:
+                tbl[i + 1, j + 1].set_facecolor(cmap(norm(v)))
+
+    for i, nm in enumerate(row_names):
+        if nm in exclude:
+            for j in range(n_metric_cols + 1):
+                tbl[i + 1, j].set_facecolor(_GRAY)
+
+
 def plot_summary_table(results_ref: dict, dataset_results: dict | None, out_dir: Path,
                        hr_res: float | None = None, lr_res: float | None = None,
                        geometry: str | None = None):
@@ -734,32 +770,7 @@ def plot_summary_table(results_ref: dict, dataset_results: dict | None, out_dir:
         tbl[0, j].set_facecolor('#2c3e50')
         tbl[0, j].set_text_props(color='white', fontweight='bold')
 
-    # Meilleur (vert) / pire (rouge) par colonne, uniquement parmi les modèles
-    # (LR IDW exclu de la comparaison mais toujours grisé).
-    _GRAY, _GREEN, _RED = '#c9c9c9', '#a5d6a7', '#ef9a9a'
-    n_metric_cols = len(col_labels) - 1
-    model_idx = [i for i, nm in enumerate(methods) if nm != 'LR IDW']
-    best_i: list[int | None] = [None] * n_metric_cols
-    worst_i: list[int | None] = [None] * n_metric_cols
-    for j in range(n_metric_cols):
-        vals = [(i, raw[i][j]) for i in model_idx if np.isfinite(raw[i][j])]
-        if vals:
-            best_i[j] = min(vals, key=lambda t: t[1])[0]
-            worst_i[j] = max(vals, key=lambda t: t[1])[0]
-
-    for i in range(1, len(rows) + 1):
-        ri = i - 1
-        is_idw = methods[ri] == 'LR IDW'
-        for j in range(len(col_labels)):
-            cell = tbl[i, j]
-            if is_idw:
-                cell.set_facecolor(_GRAY)
-            elif j > 0 and best_i[j - 1] is not None and best_i[j - 1] != worst_i[j - 1] and ri == best_i[j - 1]:
-                cell.set_facecolor(_GREEN)
-            elif j > 0 and worst_i[j - 1] is not None and best_i[j - 1] != worst_i[j - 1] and ri == worst_i[j - 1]:
-                cell.set_facecolor(_RED)
-            else:
-                cell.set_facecolor('#eaf0f6' if i % 2 == 0 else 'white')
+    _color_table_gradient(tbl, raw, methods, len(col_labels) - 1)
 
     fvm_text = _fvm_avg_time_text(geometry, hr_res, lr_res)
     if fvm_text:
