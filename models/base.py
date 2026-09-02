@@ -1,17 +1,11 @@
 """
-Module de base pour les réseaux de neurones de super-résolution de champs CFD (prédiction directe de HR à partir de LR)
+Modèles de base pour la super-résolution de champs CFD (prédiction HR à partir de LR).
 
-SRModel : classe de base abstraite pour les modèles de super-résolution. Définit l'interface commune pour la prédiction, le chargement des kNN, l'entraînement et l'évaluation.
-MLP : classe utilitaire pour un perceptron multi-couches simple, utilisé dans les modèles de super-résolution.
+SRModel : classe abstraite définissant l'interface commune (predict, load_knn, fit).
+MLP : perceptron multi-couches utilitaire.
 
-Hyperparamètres :
-- resolution : résolution LR et HR du maillage (ex: 0.1 et 0.025)
-- architecture : dict contenant les détails de l'architecture du modèle (ex: dimensions des couches, utilisation des gradients CFD LR, échelles de kNN, etc.)
-- training : dict contenant les détails de l'entraînement (ex: nombre d'époques, taux d'apprentissage, poids de la loss physique, etc.)
-- datasets : si multi-géométrie, liste des datasets à utiliser pour l'entraînement et la validation, avec leurs propres stats mu/sig pour normaliser les primitives LR et HR.
-
-Entraînement :
-- fit() : méthode d'entraînement du modèle sur un dataset de train et de validation, avec évaluation périodique sur la validation, sauvegarde du meilleur modèle, et possibilité de callback pour visualiser les prédictions pendant l'entraînement.
+Config via dict (architecture/training/datasets) ; fit() gère l'entraînement,
+la validation périodique, le meilleur checkpoint et un callback de visualisation.
 """
 
 import csv
@@ -115,6 +109,8 @@ class TrainConfig:
     batch_size: int = 1
     lambda_phys: float = 0.0
     lambda_enthalpy: float = 0.0
+    lambda_endpoint: float = 0.0
+    lambda_endpoint_warmup_epochs: int = 0  # rampe lineaire 0 -> lambda_endpoint (0 = pas de warmup)
     warmup_epochs: int = 0
     ema_decay: float = 0.0
 
@@ -173,7 +169,7 @@ def _validate(eval_model, all_names, all_val, all_step_fns, train_ds, is_multi,
     per_geom: dict = {}
 
     for i_g, (g_name, val_ds_g) in enumerate(zip(all_names, all_val)):
-        _, _, ev_g = all_step_fns[g_name]
+        ev_g = all_step_fns[g_name]['ev']
         mu_g = np.asarray(train_ds.datasets[i_g].mu if is_multi else train_ds.mu)
         sig_g = np.asarray(train_ds.datasets[i_g].sig if is_multi else train_ds.sig)
         has_flow_g = hasattr(val_ds_g, 'entries')
@@ -249,6 +245,7 @@ def _log_epoch(epoch, cfg, metrics, *, train_loss, lr_now, elapsed, is_best, mem
         'enthalpy': round(float(enth_acc / n_val), 8) if has_flow else '',
         'enthalpy_gt': round(float(enth_ref_acc / n_val), 8) if has_flow else '',
         'idw_enthalpy': round(float(idw_ref.get('enthalpy', float('nan'))), 8) if has_flow else '',
+        **({f'val_{nm}': round(float(per_geom[nm]['vl']), 8) for nm in all_names} if is_multi else {}),
         'ram_gb': '' if np.isnan(ram) else round(ram, 3),
         'gpu_gb': '' if np.isnan(gpu) else round(gpu, 3),
         'gpu_peak_gb': '' if np.isnan(gpup) else round(gpup, 3),
@@ -313,7 +310,7 @@ class SRModel(nnx.Module):
                 (jnp.arcsinh(grad_p_lsq(pred, knn_g)) - gp) ** 2).mean()
         if aux['lambda_enthalpy'] > 0 and 'mu' in knn_g:
             extra = extra + aux['lambda_enthalpy'] * enthalpy_residual(
-                pred, hr[0, 2], knn_g['mu'], knn_g['sig'])
+                pred, hr[0, 2], knn_g['mu'], knn_g['sig'], mach_norm=aux['mach_norm'])
         return extra
 
     def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array,
@@ -398,7 +395,24 @@ class SRModel(nnx.Module):
             self.mu_train.value = jnp.array(_primary_ds.mu, jnp.float32)
             self.sig_train.value = jnp.array(_primary_ds.sig, jnp.float32)
 
-        _steps_per_epoch = math.ceil(len(train_ds) / max(cfg.batch_size, 1))
+        # Stats de dénormalisation par branche + calibration
+        _name_to_ds = {nm: (train_ds.datasets[i] if _is_multi else train_ds)
+                       for i, nm in enumerate(_all_names)}
+        for nm in _all_names:
+            ds_b = _name_to_ds[nm]
+            _all_knns[nm]['mu'] = jnp.array(ds_b.mu, jnp.float32)
+            _all_knns[nm]['sig'] = jnp.array(ds_b.sig, jnp.float32)
+        _branch_pairs = [(_name_to_ds[nm], _all_knns[nm]) for nm in _all_names]
+
+        self._pre_fit(_branch_pairs, cfg)
+
+        # Mode multi-branche : un meta-step = un micro-batch par branche (cf.
+        # iter_grouped_batches), donc le nombre de steps/epoque cale sur la plus grosse branche.
+        if isinstance(train_ds, MultiSRDataset):
+            _steps_per_epoch = max(math.ceil(len(ds) / max(cfg.batch_size, 1))
+                                   for ds in train_ds.datasets)
+        else:
+            _steps_per_epoch = math.ceil(len(train_ds) / max(cfg.batch_size, 1))
         n_steps = cfg.epochs * _steps_per_epoch
         warmup_steps = cfg.warmup_epochs * _steps_per_epoch
 
@@ -422,32 +436,34 @@ class SRModel(nnx.Module):
         def _ema_update(e, p):
             return jax.tree.map(lambda a, b: decay * a + (1.0 - decay) * b, e, p)
 
+        @nnx.jit
+        def _apply_update(opt, grads):
+            opt.update(grads)
+
         _loss_fn = LOSS_FNS[cfg.loss]
         batch_size = cfg.batch_size
         lambda_phys = cfg.lambda_phys
         lambda_enth = cfg.lambda_enthalpy
-
-        # Stats de dénormalisation par branche
-        _name_to_ds = {nm: (train_ds.datasets[i] if _is_multi else train_ds)
-                       for i, nm in enumerate(_all_names)}
-        for nm in _all_names:
-            ds_b = _name_to_ds[nm]
-            _all_knns[nm]['mu'] = jnp.array(ds_b.mu, jnp.float32)
-            _all_knns[nm]['sig'] = jnp.array(ds_b.sig, jnp.float32)
-        _branch_pairs = [(_name_to_ds[nm], _all_knns[nm]) for nm in _all_names]
-
-        self._pre_fit(_branch_pairs, cfg)
+        lambda_endpoint = cfg.lambda_endpoint
 
         # aux statique capturé par les closures jit (loss + poids physiques)
+        # use_endpoint : flag STATIQUE (python bool, connu a la compilation) qui decide
+        # si le terme d'endpoint est calcule ; independant de sa ponderation courante
+        # (lambda_endpoint ci-dessous, traceee/dynamique pour le warmup). Ne jamais
+        # brancher un `if` python sur aux['lambda_endpoint'] dans le modele : sa valeur
+        # est un jnp scalaire trace, pas un float -- cf. TracerBoolConversionError.
         _aux = {'loss_fn': _loss_fn, 'lambda_phys': lambda_phys,
-                'lambda_enthalpy': lambda_enth}
+                'lambda_enthalpy': lambda_enth, 'lambda_endpoint': lambda_endpoint,
+                'use_endpoint': lambda_endpoint > 0,
+                'mach_norm': (float(train_ds.mach_mid), float(train_ds.mach_scale))}
         use_phys_loss = lambda_phys > 0 and 'grad_op' in _primary_knn
 
         def _make_step_fns(knn_g):
             @nnx.jit
-            def _ss(opt, hr, lr, tg, wt, gp_tg, key):
+            def _ss(opt, hr, lr, tg, wt, gp_tg, key, lam_ep):
                 def lf(m):
-                    return m._sample_loss(hr, lr, tg, wt, gp_tg, knn_g, key, _aux)
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
+                    return m._sample_loss(hr, lr, tg, wt, gp_tg, knn_g, key, aux_ep)
                 loss, grads = nnx.value_and_grad(lf)(opt.model)
                 leaves = jax.tree_util.tree_leaves(grads)
                 grad_norm = jnp.sqrt(sum(jnp.sum(g ** 2) for g in leaves if hasattr(g, 'shape')))
@@ -455,11 +471,12 @@ class SRModel(nnx.Module):
                 return loss, grad_norm
 
             @nnx.jit
-            def _sb(opt, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b, keys):
+            def _sb(opt, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b, keys, lam_ep):
                 def lf(m):
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
                     losses = jax.vmap(
                         lambda hr, lr, tg, wt, gp, k:
-                            m._sample_loss(hr, lr, tg, wt, gp, knn_g, k, _aux)
+                            m._sample_loss(hr, lr, tg, wt, gp, knn_g, k, aux_ep)
                     )(hr_b, lr_b, tg_b, wt_b, gp_b, keys)
                     return (losses * valid_b).sum() / valid_b.sum()
                 loss, grads = nnx.value_and_grad(lf)(opt.model)
@@ -473,14 +490,34 @@ class SRModel(nnx.Module):
                 pred = model.predict(hr, lr, knn_g)
                 return _loss_fn(pred, tg, wt), pred
 
-            return _ss, _sb, _ev
+            # Variantes "gradient seul" (pas d'opt.update interne) : accumule les
+            # gradients de toutes les branches d'un meta-step avant un update unique.
+            @nnx.jit
+            def _gs(model, hr, lr, tg, wt, gp_tg, key, lam_ep):
+                def lf(m):
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
+                    return m._sample_loss(hr, lr, tg, wt, gp_tg, knn_g, key, aux_ep)
+                return nnx.value_and_grad(lf)(model)
+
+            @nnx.jit
+            def _gb(model, hr_b, lr_b, tg_b, wt_b, valid_b, gp_b, keys, lam_ep):
+                def lf(m):
+                    aux_ep = {**_aux, 'lambda_endpoint': lam_ep}
+                    losses = jax.vmap(
+                        lambda hr, lr, tg, wt, gp, k:
+                            m._sample_loss(hr, lr, tg, wt, gp, knn_g, k, aux_ep)
+                    )(hr_b, lr_b, tg_b, wt_b, gp_b, keys)
+                    return (losses * valid_b).sum() / valid_b.sum()
+                return nnx.value_and_grad(lf)(model)
+
+            return {'ss': _ss, 'sb': _sb, 'ev': _ev, 'gs': _gs, 'gb': _gb}
 
         _all_step_fns = {name: _make_step_fns(_all_knns[name]) for name in _all_names}
 
         _has_flow = hasattr(_all_val[0], 'entries')
 
-        def _do_one_batch(raw, sfns, step_key):
-            _ss, _sb, _ = sfns
+        def _do_one_batch(raw, sfns, step_key, lam_ep):
+            _ss, _sb = sfns['ss'], sfns['sb']
             B = len(raw)
             if batch_size > 1:
                 B_real = B
@@ -493,13 +530,42 @@ class SRModel(nnx.Module):
                 wt_b = jnp.array(np.stack([s[3] for s in samples]))
                 gp_b = jnp.array(np.stack([s[4] for s in samples]))
                 keys = jax.random.split(step_key, batch_size)
-                loss, gnorm = _sb(optimizer, hr_b, lr_b, tg_b, wt_b, jnp.array(valid), gp_b, keys)
+                loss, gnorm = _sb(optimizer, hr_b, lr_b, tg_b, wt_b, jnp.array(valid), gp_b, keys, lam_ep)
                 return float(loss) * B_real, B_real, float(gnorm)
             else:
                 hr, lr, tg, wt, gp = raw[0]
                 loss, gnorm = _ss(optimizer, jnp.array(hr), jnp.array(lr),
-                                  jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key)
+                                  jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key, lam_ep)
                 return float(loss), 1, float(gnorm)
+
+        def _do_one_batch_grad(raw, sfns, step_key, lam_ep):
+            """Comme _do_one_batch, mais retourne les gradients au lieu d'appliquer
+            un update -- pour accumulation multi-branche (cf. iter_grouped_batches)."""
+            _gs, _gb = sfns['gs'], sfns['gb']
+            B = len(raw)
+            if batch_size > 1:
+                B_real = B
+                pad = [raw[-1]] * (batch_size - B_real)
+                samples = raw + pad
+                valid = np.array([1.0] * B_real + [0.0] * (batch_size - B_real), dtype=np.float32)
+                hr_b = jnp.array(np.stack([s[0] for s in samples]))
+                lr_b = jnp.array(np.stack([s[1] for s in samples]))
+                tg_b = jnp.array(np.stack([s[2] for s in samples]))
+                wt_b = jnp.array(np.stack([s[3] for s in samples]))
+                gp_b = jnp.array(np.stack([s[4] for s in samples]))
+                keys = jax.random.split(step_key, batch_size)
+                loss, grads = _gb(optimizer.model, hr_b, lr_b, tg_b, wt_b,
+                                  jnp.array(valid), gp_b, keys, lam_ep)
+                return float(loss) * B_real, B_real, grads
+            else:
+                hr, lr, tg, wt, gp = raw[0]
+                loss, grads = _gs(optimizer.model, jnp.array(hr), jnp.array(lr),
+                                  jnp.array(tg), jnp.array(wt), jnp.array(gp), step_key, lam_ep)
+                return float(loss), 1, grads
+
+        def _tree_grad_norm(grads) -> float:
+            leaves = jax.tree_util.tree_leaves(grads)
+            return float(jnp.sqrt(sum(jnp.sum(g ** 2) for g in leaves if hasattr(g, 'shape'))))
 
         rng = np.random.default_rng(cfg.seed)
         base_key = jax.random.PRNGKey(cfg.seed)
@@ -513,6 +579,7 @@ class SRModel(nnx.Module):
                        + [f'l2_{v}' for v in VAR_LABELS] + ['l2_mach']
                        + [f'idw_{v}' for v in VAR_LABELS] + ['idw_mach']
                        + ['enthalpy', 'enthalpy_gt', 'idw_enthalpy']
+                       + ([f'val_{nm}' for nm in _all_names] if _is_multi else [])  # val_loss par branche
                        + ['ram_gb', 'gpu_gb', 'gpu_peak_gb', 'is_best'])
         _csv_path = out_dir / f'{run_name}.csv'
         with open(_csv_path, 'w', newline='') as _f:
@@ -521,6 +588,10 @@ class SRModel(nnx.Module):
         extra_loss = ""
         if use_phys_loss:
             extra_loss += f"  lambda_phys={lambda_phys}"
+        if lambda_endpoint > 0:
+            ep_warm = (f" (warmup {cfg.lambda_endpoint_warmup_epochs}ep)"
+                      if cfg.lambda_endpoint_warmup_epochs > 0 else "")
+            extra_loss += f"  lambda_endpoint={lambda_endpoint}{ep_warm}"
         warmup_str = f"  warmup={cfg.warmup_epochs}ep" if cfg.warmup_epochs > 0 else ""
         _ema_str = f"  ema={decay}" if decay > 0 else ""
         _multi_str = f"  datasets={_all_names}" if _is_multi else ""
@@ -529,11 +600,21 @@ class SRModel(nnx.Module):
               f"schedule={cfg.schedule}{warmup_str}  grad_clip={cfg.grad_clip}  "
               f"batch={batch_size}{_ema_str}{_multi_str}")
 
-        # Baseline IDW sur le jeu de validation — une référence par géométrie
-        _idw_refs = {_all_names[0]: eval_idw(_all_val[0], _primary_knn)}
+        # Baseline IDW sur le jeu de validation -- une référence par géométrie.
+        # eval_idw suppose un champ LR volumique, absent pour les modèles bord-seul
+        # (FAMWall/DAMWall) : repli NaN plutôt que de faire planter fit().
+        def _safe_eval_idw(ds, knn):
+            try:
+                return eval_idw(ds, knn)
+            except Exception as e:
+                print(f"  [IDW baseline non disponible : {e!r} -- attendu pour un modèle "
+                      "bord-seul, pas de champ LR volumique]")
+                return {'l2': np.full(4, np.nan), 'mach': float('nan')}
+
+        _idw_refs = {_all_names[0]: _safe_eval_idw(_all_val[0], _primary_knn)}
         if _is_multi:
             for _g_i, (_g_ds, _g_knn) in enumerate(zip(_all_val[1:], list(_all_knns.values())[1:])):
-                _idw_refs[_all_names[_g_i + 1]] = eval_idw(_g_ds, _g_knn)
+                _idw_refs[_all_names[_g_i + 1]] = _safe_eval_idw(_g_ds, _g_knn)
         idw_ref = _idw_refs[_all_names[0]]
 
         def _idw_line(ref, name=None):
@@ -549,13 +630,34 @@ class SRModel(nnx.Module):
             ep_loss, n = 0.0, 0
             _ep_gnorm_sum, _ep_gnorm_n, _ep_n_clipped = 0.0, 0, 0
 
+            if cfg.lambda_endpoint_warmup_epochs > 0:
+                lam_ep_val = lambda_endpoint * min(1.0, epoch / cfg.lambda_endpoint_warmup_epochs)
+            else:
+                lam_ep_val = lambda_endpoint
+            lam_ep = jnp.asarray(lam_ep_val, jnp.float32)
+
             if _is_multi:
-                # Mode multi-dataset : batches mono-géométrie routés vers le bon knn
-                for raw, geom_idx in train_ds.iter_batches(batch_size, rng):
-                    sfns = _all_step_fns[_all_names[geom_idx]]
+                # Mode multi-dataset : un meta-step = un micro-batch de CHAQUE branche,
+                # gradients moyennés (pondérés) puis UN SEUL optimizer.update évite
+                # le tug-of-war d'un update séquentiel mono-branche par step.
+                for group in train_ds.iter_grouped_batches(batch_size, rng):
                     step_key = jax.random.fold_in(base_key, _n_grad_steps)
-                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key)
-                    ep_loss += loss_c; n += B_r; _n_grad_steps += 1
+                    grads_list, w_list = [], []
+                    loss_acc, B_acc = 0.0, 0
+                    for raw, geom_idx in group:
+                        sfns = _all_step_fns[_all_names[geom_idx]]
+                        b_key = jax.random.fold_in(step_key, geom_idx)
+                        loss_c, B_r, grads = _do_one_batch_grad(raw, sfns, b_key, lam_ep)
+                        grads_list.append(grads)
+                        w_list.append(train_ds.weights[geom_idx])
+                        loss_acc += loss_c; B_acc += B_r
+                    wsum = sum(w_list)
+                    w_norm = [w / wsum for w in w_list]
+                    avg_grads = jax.tree.map(
+                        lambda *gs: sum(w * g for w, g in zip(w_norm, gs)), *grads_list)
+                    gn = _tree_grad_norm(avg_grads)
+                    _apply_update(optimizer, avg_grads)
+                    ep_loss += loss_acc; n += B_acc; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:
                         _ep_n_clipped += 1
@@ -567,7 +669,7 @@ class SRModel(nnx.Module):
                 for bi in range(0, len(idx), batch_size):
                     raw = [train_ds[int(i)] for i in idx[bi:bi + batch_size]]
                     step_key = jax.random.fold_in(base_key, _n_grad_steps)
-                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key)
+                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key, lam_ep)
                     ep_loss += loss_c; n += B_r; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:

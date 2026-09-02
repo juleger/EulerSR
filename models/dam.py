@@ -72,9 +72,10 @@ class AMNet(nnx.Module):
         cond_in = (d_t if self.use_time else 0) + _N_COND
 
         self._use_geom_cond = use_geom_cond
+        self.n_geoms = n_geoms
         self.cond_mlp = MLP([cond_in, d_cond, d_cond], rngs, dtype=dtype)
         if use_geom_cond:
-            self.geom_emb = nnx.Embed(n_geoms, d_cond, rngs=rngs)
+            self.geom_emb = nnx.Embed(n_geoms + 1, d_cond, rngs=rngs)  # +1 : token nul, cf. cfg_drop_geom_id
         self.enc = nnx.Linear(in0, d, rngs=rngs, dtype=dtype)
 
         # Stack de self-attention locale répétée à HR (raffinement pleine résolution)
@@ -156,6 +157,13 @@ class AMNet(nnx.Module):
         return self.dec(self.dec_norm(h0))
 
 
+def cfg_drop_geom_id(geom_id: jax.Array, n_geoms: int, prob: float,
+                     key: jax.Array) -> jax.Array:
+    """Remplace geom_id par le token nul (index n_geoms) avec probabilité `prob`."""
+    drop = jax.random.bernoulli(key, prob)
+    return jnp.where(drop, jnp.asarray(n_geoms, geom_id.dtype), geom_id)
+
+
 def build_context(model, hr_feat: jax.Array, lr_feat: jax.Array, knn: dict) -> dict:
     """Construit le contexte commun DAM/FAM : features LR interpolées par niveau,
     baseline IDW, scalaires de conditionnement, features de paroi et geom_id
@@ -196,6 +204,7 @@ def load_hierarchical_knn(layout: DataLayout, default_levels: list,
     k_up = arch.get('k_up', 4)
     k_self = arch.get('k_self', 9)
     k_cond = arch.get('k_cond', _IDW_K)
+    coord_norm = arch.get('coord_norm', 'domain')
 
     d = np.load(_ensure_knn(layout, hr_res, lr_res, max(k_cond, _IDW_K)))
     knn = {'idx': jnp.array(d['indices']),
@@ -222,14 +231,18 @@ def load_hierarchical_knn(layout: DataLayout, default_levels: list,
     knn['mesh'] = mesh_hr
 
     res_tag = '_'.join(_res_tag(r) for r in [hr_res] + levels)
+    # Suffixe uniquement si coord_norm != 'domain' : les caches existants
+    # (déjà utilisés par des entraînements en cours) restent inchangés/intacts.
+    coord_tag = '' if coord_norm == 'domain' else f'_{coord_norm}'
     cache = (layout.knn_dir /
              f'fm_{res_tag}_lr{_res_tag(lr_res)}_kp{k_pool}_ku{k_up}'
-             f'_ks{k_self}_kc{k_cond}.npz')
+             f'_ks{k_self}_kc{k_cond}{coord_tag}.npz')
     if cache.exists():
         z = dict(np.load(cache))
     else:
         print(f"  [{tag}] construction hiérarchie kNN -> {cache.name}")
-        z = _build_hierarchy(lvl_pos, lr_pos, k_pool, k_up, k_self, k_cond)
+        z = _build_hierarchy(lvl_pos, lr_pos, k_pool, k_up, k_self, k_cond,
+                             coord_norm, mesh_hr.metadata)
         cache.parent.mkdir(parents=True, exist_ok=True)
         np.savez(cache, **z)
 
@@ -265,6 +278,9 @@ class DAM(SRModel):
         compute_dtype = jnp.bfloat16 if use_bf16 else None
 
         self._use_geom_cond = arch.get('use_geom_cond', False)
+        # Dropout CFG du conditionnement géométrique (entraînement uniquement)
+        self.geom_cfg_prob = float(arch.get('geom_cfg_prob', 0.0))
+        self._n_geoms = arch.get('n_geoms', 8)
         # Stats d'entraînement (mu/sig du dataset primaire, sauvées avec l'état)
         self.mu_train = Buffer(jnp.zeros((4,), jnp.float32))
         self.sig_train = Buffer(jnp.ones((4,), jnp.float32))
@@ -283,10 +299,24 @@ class DAM(SRModel):
             n_hr_blocks=arch.get('n_hr_blocks', 1),
             dtype=compute_dtype)
 
-    def predict(self, hr_feat: jax.Array, lr_feat: jax.Array, knn: dict) -> jax.Array:
-        ctx = build_context(self, hr_feat, lr_feat, knn)
+    def _forward(self, ctx: dict, knn: dict) -> jax.Array:
         delta = self.net(ctx['c'], ctx['scal'], knn['fm'], ctx['wall'], ctx['geom_id'])
         return ctx['baseline'] + delta
+
+    def predict(self, hr_feat: jax.Array, lr_feat: jax.Array, knn: dict) -> jax.Array:
+        ctx = build_context(self, hr_feat, lr_feat, knn)
+        return self._forward(ctx, knn)
+
+    def _sample_loss(self, hr: jax.Array, lr: jax.Array, tg: jax.Array,
+                     wt: jax.Array, gp: jax.Array, knn_g: dict,
+                     key: jax.Array, aux: dict) -> jax.Array:
+        ctx = build_context(self, hr, lr, knn_g)
+        if self.geom_cfg_prob > 0:
+            ctx = dict(ctx)
+            ctx['geom_id'] = cfg_drop_geom_id(ctx['geom_id'], self._n_geoms,
+                                              self.geom_cfg_prob, key)
+        pred = self._forward(ctx, knn_g)
+        return aux['loss_fn'](pred, tg, wt) + self._phys_terms(pred, hr, gp, knn_g, aux)
 
     @classmethod
     def load_knn(cls, layout: DataLayout, cfg: dict | None = None) -> dict:

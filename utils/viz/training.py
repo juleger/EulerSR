@@ -50,8 +50,13 @@ def plot_training_curves(train_losses, val_losses, val_l2s, out_path,
     plt.close(fig)
 
 
-def _snapshot_feats(d, mach_in: float, aoa_in: float, stats):
-    """Construit (hr_feat, lr_feat) jnp pour predict() + primitives physiques du snapshot."""
+def _snapshot_feats(d, mach_in: float, aoa_in: float, stats,
+                    coord_norm: str = 'domain', mesh_meta: dict | None = None,
+                    mach_norm: tuple[float, float] | None = None):
+    """Construit (hr_feat, lr_feat) jnp pour predict() + primitives physiques du snapshot.
+
+    mach_norm = (mid, scale) résolu pour le run d'entraînement en cours (cf.
+    train.py) -- repli sur l'historique (0.7, 3.0) si non fourni."""
     import jax.numpy as jnp
 
     hr_prim = d['hr_primitives'].astype(np.float32)
@@ -61,16 +66,18 @@ def _snapshot_feats(d, mach_in: float, aoa_in: float, stats):
     mu, sig = stats['mu'].astype(np.float32), stats['sig'].astype(np.float32)
 
     from preprocessing.dataset import _MACH_MID, _MACH_SCALE, _AOA_SCALE
-    pts = np.concatenate([hr_pos, lr_pos], axis=0).astype(np.float64)
-    pos_center = ((pts.max(0) + pts.min(0)) / 2).astype(np.float32)
-    pos_scale = float((pts.max(0) - pts.min(0)).max() / 2)
+    from utils.coords import center_scale
+    ctr, scl = center_scale(hr_pos, lr_pos, coord_norm, mesh_meta)
+    pos_center = ctr.astype(np.float32)
+    pos_scale = scl
+    mach_mid, mach_scale = mach_norm if mach_norm is not None else (_MACH_MID, _MACH_SCALE)
 
     N = hr_pos.shape[0]
     hr_pos_n = (hr_pos - pos_center) / pos_scale
     lr_pos_n = (lr_pos - pos_center) / pos_scale
     hr_feat = jnp.array(np.stack([
         hr_pos_n[:, 0], hr_pos_n[:, 1],
-        np.full(N, (mach_in - _MACH_MID) / _MACH_SCALE, np.float32),
+        np.full(N, (mach_in - mach_mid) / mach_scale, np.float32),
         np.full(N, aoa_in / _AOA_SCALE, np.float32),
     ], axis=1))
 
@@ -100,7 +107,9 @@ def _tri(mesh):
 
 def plot_val_panels(model: SRModel, knn: dict, cases: list, stats,
                     mesh_hr, mesh_lr, out_path: str | Path,
-                    title: str | None = None, dpi: int = _DPI):
+                    title: str | None = None, dpi: int = _DPI,
+                    coord_norm: str = 'domain',
+                    mach_norm: tuple[float, float] | None = None):
     # Panneau de suivi : une ligne par cas, colonnes LR / IDW / SR / HR (champ Mach).
     if not cases:
         return
@@ -127,7 +136,8 @@ def plot_val_panels(model: SRModel, knn: dict, cases: list, stats,
         aoa_in, mach_in = float(m.group(1)), float(m.group(2))
         d = load_sample(path)
 
-        hr_feat, lr_feat, hr_prim, lr_prim = _snapshot_feats(d, mach_in, aoa_in, stats)
+        hr_feat, lr_feat, hr_prim, lr_prim = _snapshot_feats(
+            d, mach_in, aoa_in, stats, coord_norm, mesh_hr.metadata, mach_norm=mach_norm)
 
         pred = np.array(model.predict(hr_feat, lr_feat, knn)) * sig + mu
 

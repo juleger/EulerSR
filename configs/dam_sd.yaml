@@ -1,5 +1,11 @@
 model: dam
 data_root: data/
+geometry: diamond
+
+# DAM mono-geometrie (diamond), reglages repris de la base historique du projet
+# (pas d'ablation DAM dediee).
+#
+# Repro : uv run python train.py --config configs/dam_sd.yaml --run_name dam_sd
 
 resolution:
   hr: 0.025
@@ -8,7 +14,7 @@ resolution:
 architecture:
   levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
   embed_dim: 96
-  cond_dim: 96           # dimension du vecteur de conditionnement
+  cond_dim: 96            # dimension du vecteur de conditionnement
   n_heads: 3
   n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
   n_global_blocks: 3      # blocs d'attention globale au niveau grossier
@@ -19,16 +25,6 @@ architecture:
   k_cond: 6               # voisins kNN pour le conditionnement
   use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
-  use_geom_cond: false    # embedding de geometrie ; false pour le zero-shot sur geometrie inconnue
-  n_geoms: 1              # nombre de geometries distinctes
-
-# Entrainement multi-branche : une branche = (geometrie, resolution LR).
-# weight = proportion d'echantillonnage de la branche (somme normalisee).
-datasets:
-  - name: diamond
-    lr_res:         [0.05, 0.1, 0.2]   # resolutions LR d'entree
-    weight:         [1,    1,   1]     # proportion d'echantillonnage par resolution
-    train_fraction: [1.0,  1.0, 1.0]   # fraction des donnees utilisee par branche
 
 training:
   epochs: 200
@@ -36,8 +32,9 @@ training:
   weight_decay: 5.0e-4
   val_every: 20
   seed: 42
-  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, sliced_wasserstein
+  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, w2
   shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
+  lambda_phys: 0.0               # poids de la perte residu physique (0 = desactive)
   lambda_enthalpy: 0.01          # poids de la perte de conservation d'enthalpie (0 = desactive)
   schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
@@ -45,5 +42,6 @@ training:
   save_best: true
   batch_size: 32
   ema_decay: 0.999
-  train_fraction: 1.0
+  train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
   preload: true
+  mach_range: [0.7, 2.0]         # exclut Mach>2 (solveur de generation moins fiable au-dela)

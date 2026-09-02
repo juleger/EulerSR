@@ -17,6 +17,11 @@ AIRFOILS = {
     "rae2822":  dict(kind="dat", dat="rae2822.dat", fmt="rae",      symmetric=False),
     "oneraD":   dict(kind="dat", dat="oneraD.dat",  fmt="selig",    symmetric=True),
     "oa209":    dict(kind="dat", dat="oa209.dat",   fmt="lednicer", symmetric=False),
+    # Variante OOD (translation cx/cy) du profil rae2822 ci-dessus, même .dat :
+    # réservée à l'évaluation géométrique hors distribution (cf. eval_case.py).
+    "rae2822_txy": dict(kind="dat", dat="rae2822.dat", fmt="rae", symmetric=False),
+    # NACA 5 chiffres 23012 (classique aérodynamique)
+    "naca23012": dict(kind="dat", dat="naca23012.dat", fmt="selig", symmetric=False),
 }
 
 

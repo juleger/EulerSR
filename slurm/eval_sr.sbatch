@@ -22,6 +22,9 @@
 #
 #   # Sweep limité pour test rapide
 #   FULL_EVAL=1 N_EVAL=100 sbatch slurm/eval_sr.sbatch results/checkpoints/run42/FAM.pkl
+#
+#   # Exclure les cas Mach>2 (tf solveur raccourci, cf. logs/euler/*)
+#   MACH_MAX=2.0 sbatch slurm/eval_sr.sbatch results/checkpoints/run42/FAM.pkl
 
 set -euo pipefail
 
@@ -37,15 +40,25 @@ DATA_ROOT="${DATA_ROOT:-data/}"
 TESTSETS="${TESTSETS:-diamond naca0012}"
 LR_RES="${LR_RES:-0.1}"
 HR_RES="${HR_RES:-0.025}"
+MACH_MAX="${MACH_MAX:-}"
 OUT_DIR="${OUT_DIR:-results/eval/${SLURM_JOBID}/}"
+OUT_DIRS="${OUT_DIRS:-}"
 FULL_EVAL="${FULL_EVAL:-1}"
 N_EVAL="${N_EVAL:-0}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 N_STEPS="${N_STEPS:-}"
 N_SAMPLES="${N_SAMPLES:-}"
 CFG_SCALE="${CFG_SCALE:-}"
+GEOM_CFG_SCALE="${GEOM_CFG_SCALE:-}"
+GEOM_CFG_SCALE_SWEEP="${GEOM_CFG_SCALE_SWEEP:-}"
+CFG_SCALE_SWEEP="${CFG_SCALE_SWEEP:-}"
+N_STEPS_SWEEP="${N_STEPS_SWEEP:-}"
+N_SAMPLES_SWEEP="${N_SAMPLES_SWEEP:-}"
 
 mkdir -p logs "${OUT_DIR}"
+if [[ -n "${OUT_DIRS}" ]]; then
+    for d in ${OUT_DIRS}; do mkdir -p "${d}"; done
+fi
 
 source .venv/bin/activate
 
@@ -64,6 +77,7 @@ echo "Modèles           : ${MODELS[*]}"
 echo "data_root         : ${DATA_ROOT}"
 echo "testsets          : ${TESTSETS}"
 echo "lr_res / hr_res   : ${LR_RES} / ${HR_RES}"
+echo "mach_max          : ${MACH_MAX:-<aucun>}"
 echo "out_dir           : ${OUT_DIR}"
 echo "full_eval         : ${FULL_EVAL}  (n_eval=${N_EVAL})"
 echo "batch_size        : ${BATCH_SIZE}"
@@ -78,11 +92,19 @@ if [[ "${FULL_EVAL}" == "1" ]]; then
         EXTRA_ARGS+=(--n_eval "${N_EVAL}")
     fi
 fi
+[[ -n "${MACH_MAX}"  ]] && EXTRA_ARGS+=(--mach_max  "${MACH_MAX}")
 [[ -n "${N_STEPS}"   ]] && EXTRA_ARGS+=(--n_steps   "${N_STEPS}")
 [[ -n "${N_SAMPLES}" ]] && EXTRA_ARGS+=(--n_samples "${N_SAMPLES}")
 [[ -n "${CFG_SCALE}" ]] && EXTRA_ARGS+=(--cfg_scale "${CFG_SCALE}")
+[[ -n "${GEOM_CFG_SCALE}" ]] && EXTRA_ARGS+=(--geom_cfg_scale "${GEOM_CFG_SCALE}")
+[[ -n "${GEOM_CFG_SCALE_SWEEP}" ]] && EXTRA_ARGS+=(--geom_cfg_scale_sweep ${GEOM_CFG_SCALE_SWEEP})
+[[ -n "${N_STEPS_SWEEP}"   ]] && EXTRA_ARGS+=(--n_steps_sweep   ${N_STEPS_SWEEP})
+[[ -n "${N_SAMPLES_SWEEP}" ]] && EXTRA_ARGS+=(--n_samples_sweep ${N_SAMPLES_SWEEP})
+[[ -n "${CFG_SCALE_SWEEP}" ]] && EXTRA_ARGS+=(--cfg_scale_sweep ${CFG_SCALE_SWEEP})
 
 echo "[$(date +%T)] Démarrage évaluation SR-CFD"
+
+[[ -n "${OUT_DIRS}" ]] && EXTRA_ARGS+=(--out_dirs ${OUT_DIRS})
 
 python -u evaluate.py \
     --models     "${MODELS[@]}" \

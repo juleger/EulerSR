@@ -1,6 +1,10 @@
 model: dam
 data_root: data/
-geometry: diamond
+
+# DAM mono-geometrie (diamond), multi-resolution : LR h=0.1 et h=0.2 vues a
+# l'entrainement (au lieu de h=0.2 tenu en reserve comme test OOD dans dam_sd.yaml).
+#
+# Repro : uv run python train.py --config configs/dam_md.yaml --run_name dam_md
 
 resolution:
   hr: 0.025
@@ -21,13 +25,21 @@ architecture:
   use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
 
+# Une seule geometrie mais deux branches de resolution LR -- necessite le mode
+# multi-branche (datasets:) meme si geom_id reste 0 sur les deux.
+datasets:
+  - name: diamond
+    lr_res:         [0.1, 0.2]
+    weight:         [1,   1]
+    train_fraction: [1.0, 1.0]
+
 training:
   epochs: 200
   lr: 5.0e-4
   weight_decay: 5.0e-4
-  val_every: 10
+  val_every: 20
   seed: 42
-  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, sliced_wasserstein
+  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, w2
   shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
   lambda_phys: 0.0               # poids de la perte residu physique (0 = desactive)
   lambda_enthalpy: 0.01          # poids de la perte de conservation d'enthalpie (0 = desactive)
@@ -35,7 +47,8 @@ training:
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 32
+  batch_size: 12                 # mode multi-branche plus gourmand en memoire que dam_sd.yaml (batch=32)
   ema_decay: 0.999
-  train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
+  train_fraction: 1.0            # repli documentaire, shadow par datasets: ci-dessus
   preload: true
+  mach_range: [0.7, 2.0]         # exclut Mach>2 (solveur de generation moins fiable au-dela)

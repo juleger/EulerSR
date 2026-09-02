@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.spatial import cKDTree
 
-from utils.refs import to_mach, parse_case
+from utils.refs import to_mach
 
 GAMMA = 1.4
 _P_INF = 1.0
@@ -78,12 +78,12 @@ def q_inf(mach_in: float) -> float:
 
 
 def cp_field(prim: np.ndarray, mach_in: float) -> np.ndarray:
-    """Coefficient de pression Cp = (p - p_inf) / q_inf, par cellule."""
+    """Coefficient de pression Cp = (p - p_inf) / q_inf, à chaque cellule."""
     return ((prim[:, 3] - _P_INF) / q_inf(mach_in)).astype(np.float32)
 
 
 def aero_coeffs(prim: np.ndarray, wc: WallCache, mach_in: float) -> dict:
-    # CL, CD, grad_p_max, Mach paroi, Cp paroi depuis prim
+    # CL, CD, grad_p_max, Mach/Cp paroi depuis prim
     qi = q_inf(mach_in)
 
     p_wall = prim[wc.wall_cell_ids, 3]
@@ -98,7 +98,7 @@ def aero_coeffs(prim: np.ndarray, wc: WallCache, mach_in: float) -> dict:
 
     mach = to_mach(prim)
     wall_mach = mach[wc.unique_wall_cell_ids]
-    wall_cp = ((prim[wc.unique_wall_cell_ids, 3] - _P_INF) / qi).astype(np.float32)
+    wall_cp = cp_field(prim, mach_in)[wc.unique_wall_cell_ids]
 
     return dict(
         CL=CL, CD=CD,
@@ -107,44 +107,8 @@ def aero_coeffs(prim: np.ndarray, wc: WallCache, mach_in: float) -> dict:
         mach_min=float(mach.min()),
         mach_mean=float(mach.mean()),
         wall_mach=wall_mach.astype(np.float32),
-        wall_cp=wall_cp,
+        wall_cp=wall_cp.astype(np.float32),
     )
-
-
-# Doit rester synchronisé avec preprocessing.dataset : plage Mach [0.70, 3.00].
-_MACH_MID, _MACH_SCALE, _AOA_SCALE = 1.85, 1.15, 5.0
-
-
-def compute_aero_scalars(d: dict, path: str, wc_lr: WallCache | None = None) -> np.ndarray:
-    # Vecteur 7-dim [mach_n, aoa_n, mach_max_LR, mach_min_LR, grad_p_max_LR, CL_LR, mach_wall_min_LR].
-    mach_in, aoa_in = parse_case(path)
-    lr = d['lr_primitives'].astype(np.float32)
-    mach_lr = to_mach(lr)
-
-    if 'lr_primitives_grad' in d:
-        gp = np.linalg.norm(d['lr_primitives_grad'][:, 3, :].astype(np.float32), axis=-1)
-        grad_p_max = float(gp.max())
-    else:
-        grad_p_max = float(np.abs(np.diff(lr[:, 3])).max() if len(lr) > 1 else 0.0)
-
-    Cl, mach_wall_min = 0.0, 0.0
-    if wc_lr is not None:
-        try:
-            coeffs = aero_coeffs(lr, wc_lr, mach_in)
-            Cl = float(coeffs['CL'])
-            mach_wall_min = float(coeffs['wall_mach'].min())
-        except Exception:
-            pass
-
-    return np.array([
-        float((mach_in - _MACH_MID) / _MACH_SCALE),
-        float(aoa_in / _AOA_SCALE),
-        float(mach_lr.max()),
-        float(mach_lr.min()),
-        grad_p_max,
-        Cl,
-        mach_wall_min,
-    ], dtype=np.float32)
 
 
 def _wall_segments(mesh) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -19,7 +19,7 @@ for path in (REPO_ROOT, EULER_DIR):
         sys.path.insert(0, path_str)
 
 from euler import main as euler_main
-from euler.config import load_mesh, setup_dirs, print_config
+from euler.config import load_mesh, setup_dirs, print_config, KNOWN_CASES
 
 
 def parse_range(spec: str):
@@ -59,7 +59,7 @@ def build_case_cfg(base_cfg, case, mach, aoa):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--case", choices=("bump", "diamond", "naca0012", "naca2412", "rae2822", "oneraD", "oa209"), required=True)
+    parser.add_argument("--case", choices=KNOWN_CASES, required=True)
     parser.add_argument("--mesh-path", required=True)
     parser.add_argument("--mach", default="0.7:1.5:0.1")
     parser.add_argument("--aoa", default="0:0:1")

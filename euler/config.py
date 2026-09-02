@@ -5,11 +5,20 @@ from copy import deepcopy
 from pathlib import Path
 import tomllib
 
-import numpy as np
-
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("config.toml")
 repo_root = Path(__file__).resolve().parents[1]
+
+# Cas "aile/obstacle avec incidence" (AoA significative, résumé Cl/Cd) reconnus
+# par le solveur. Les variantes géométriques (translation, angle...) d'un cas
+# existant partagent sa physique et doivent simplement être ajoutées ici.
+AOA_CASES = ("diamond", "naca0012", "naca2412", "rae2822", "oneraD", "oa209",
+             "diamond_tx", "diamond_txy", "diamond_alpha10", "rae2822_txy",
+             "diamond_sym", "naca23012")
+# Tous les cas connus (inclut "bump", qui n'a pas d'incidence).
+KNOWN_CASES = ("bump",) + AOA_CASES
+_AOA_CASES_LC = tuple(c.lower() for c in AOA_CASES)
+_KNOWN_CASES_LC = tuple(c.lower() for c in KNOWN_CASES)
 
 
 def load_default_config(config_path: str | Path | None = None):
@@ -22,7 +31,7 @@ def load_default_config(config_path: str | Path | None = None):
 
 def build_config_from_cli(default_cfg):
     parser = ArgumentParser(description="Simulation supersonique avec Euler 2D")
-    parser.add_argument("--case", choices=("bump", "diamond", "naca0012", "naca2412", "rae2822", "oneraD", "oa209"), default=default_cfg["case"], help="Cas test : bump, diamond, naca0012, naca2412, rae2822, oneraD ou oa209")
+    parser.add_argument("--case", choices=KNOWN_CASES, default=default_cfg["case"], help="Cas test : " + ", ".join(KNOWN_CASES))
     parser.add_argument("--mach", type=float, default=default_cfg["Mach"], help="Nombre de Mach du flux entrant")
     parser.add_argument("--mesh-path", type=str, default=default_cfg["mesh_path"], help="Chemin vers le fichier de maillage (.npy)")
     parser.add_argument("--time-scheme", choices=("EE", "RK2", "RK4", "SRK2", "SSP_RK2"), default=default_cfg["time_scheme"], help="Schéma temporel")
@@ -77,7 +86,7 @@ def format_h(mesh):
 
 def format_condition_tag(cfg):
     mach = f"M{float(cfg.get('Mach')):.2f}"
-    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "naca2412", "rae2822", "onerad", "oa209"):
+    if str(cfg.get("case", "")).lower() in _AOA_CASES_LC:
         aoa = float(cfg.get("aoa", 0.0))
         return f"AOA{aoa:.2f}_{mach}"
     return mach
@@ -92,14 +101,10 @@ def format_snapshot_name(cfg, t):
     return f"{prefix}{condition_tag}_{flux}_{reconstruction}_{time_scheme}_t{t:.2f}"
 
 
-def format_sample_id(cfg):
-    return format_condition_tag(cfg)
-
-
 def format_subtitle(cfg, mesh, t):
     reconstruction = str(cfg["reconstruction"]).upper()
     time_scheme = str(cfg["time_scheme"]).upper()
-    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "naca2412", "rae2822", "onerad", "oa209"):
+    if str(cfg.get("case", "")).lower() in _AOA_CASES_LC:
         return (
             f"t={t:.2f}s, M={cfg['Mach']}, AoA={float(cfg.get('aoa', 0.0)):.1f}°, "
             f"h={mesh.metadata.get('h', 'n/a')} | Solver : {cfg['flux']}, {reconstruction}, {time_scheme}"
@@ -113,7 +118,7 @@ def format_subtitle(cfg, mesh, t):
 def setup_dirs(cfg, mesh):
     h_dir = format_h(mesh)
     case = str(cfg.get("case", ""))
-    if case.lower() in ("diamond", "naca0012", "naca2412", "rae2822", "onerad", "oa209"):
+    if case.lower() in _AOA_CASES_LC:
         aoa = float(cfg.get("aoa", 0.0))
         aoa_tag = f"AOA{aoa:.2f}"
         dirs = {
@@ -150,7 +155,7 @@ def print_config(cfg, mesh, out_dirs):
     print(f"Mesh path : {cfg['mesh_path']} (h={mesh.metadata.get('h', 'n/a')})")
     print("-" * 78)
     print("Physique")
-    if str(cfg.get("case", "")).lower() in ("diamond", "naca0012", "naca2412", "rae2822", "onerad", "oa209"):
+    if str(cfg.get("case", "")).lower() in _AOA_CASES_LC:
         print(f"  Mach : {cfg['Mach']}, AoA : {float(cfg.get('aoa', 0.0)):.1f}°, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")
     else:
         print(f"  Mach : {cfg['Mach']}, gamma={cfg['gamma']}, p_inf={cfg['p_inf']}, rho_inf={cfg['rho_inf']}")

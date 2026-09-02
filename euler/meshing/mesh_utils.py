@@ -18,8 +18,8 @@ WALL, INLET, OUTLET = 2, 3, 4
 
 @dataclass(frozen=True)
 class MeshSizeParams:
-    growth_rate:        float = 0.10
-    left_growth_rate:   float = 0.25
+    growth_rate:        float = 0.09
+    left_growth_rate:   float = 0.23
     obstacle_factor:    float = 0.0
     max_size_factor:    float = 6.0
     left_margin_factor: float = 5.0

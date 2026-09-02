@@ -40,7 +40,8 @@ def build(fine_centroids: np.ndarray, coarse_centroids: np.ndarray,
           f"(N_fine={len(fine_centroids)}, k={k}, k_self={_K_SELF})")
 
 
-def build_hierarchy(lvl_pos: list, lr_pos: np.ndarray, k_pool: int, k_up: int, k_self: int, k_cond: int) -> dict:
+def build_hierarchy(lvl_pos: list, lr_pos: np.ndarray, k_pool: int, k_up: int, k_self: int, k_cond: int,
+                    coord_norm: str = 'domain', mesh_meta: dict | None = None) -> dict:
     # Tables kNN entre niveaux + PE Fourier + poids IDW, rel_pos normalisées par l'échelle locale.
     import sys
     from pathlib import Path as _Path
@@ -49,10 +50,13 @@ def build_hierarchy(lvl_pos: list, lr_pos: np.ndarray, k_pool: int, k_up: int, k
     if _root not in sys.path:
         sys.path.insert(0, _root)
     from utils.attention import fourier_pos_enc
+    from utils.coords import center_scale
 
-    pts = np.concatenate([lvl_pos[0], lr_pos], axis=0)
-    ctr = (pts.max(0) + pts.min(0)) / 2
-    scl = float((pts.max(0) - pts.min(0)).max() / 2)
+    # Même normalisation que hr_feat/lr_feat (utils.coords) : l'encodage
+    # positionnel de Fourier ci-dessous doit rester cohérent avec les
+    # features d'entrée, sous peine de fuite de position absolue malgré
+    # coord_norm='object' (cf. discussion ré-entraînement diamond objnorm).
+    ctr, scl = center_scale(lvl_pos[0], lr_pos, coord_norm, mesh_meta)
 
     z = {}
     tree_lr = cKDTree(lr_pos)

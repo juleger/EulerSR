@@ -37,6 +37,7 @@ def build_gt_cache(all_cases: list[dict], wc,
     fvm_residual_hr = np.full(n, np.nan, dtype=np.float32)
     wall_mach_segs: list[np.ndarray] = []
     wall_mach_lens: list[int] = []
+    wall_cp_segs: list[np.ndarray] = []
     hr_prim_list: list[np.ndarray | None] = []
     n_cells = None
 
@@ -49,7 +50,7 @@ def build_gt_cache(all_cases: list[dict], wc,
     for i, c in enumerate(all_cases):
         if (i + 1) % 100 == 0:
             print(f"    {i+1}/{n}...")
-        d = load_sample(c['path'])
+        d = load_sample(c['path'], c.get('raw_hr_path'))
         if 'hr_primitives' not in d:
             wall_mach_lens.append(0)
             hr_prim_list.append(None)
@@ -78,6 +79,7 @@ def build_gt_cache(all_cases: list[dict], wc,
 
         wall_mach_segs.append(ac['wall_mach'])
         wall_mach_lens.append(len(ac['wall_mach']))
+        wall_cp_segs.append(ac['wall_cp'])
         hr_prim_list.append(hp)
 
     if n_cells is None:
@@ -85,6 +87,9 @@ def build_gt_cache(all_cases: list[dict], wc,
 
     wall_mach_flat = np.concatenate(wall_mach_segs) if wall_mach_segs else np.array([], np.float32)
     wall_mach_offsets = np.concatenate([[0], np.cumsum(wall_mach_lens)]).astype(np.int64)
+    # wall_cp partage les mêmes cellules de bord (donc les mêmes longueurs par cas)
+    # que wall_mach : on réutilise wall_mach_offsets, pas besoin d'un 2e offsets.
+    wall_cp_flat = np.concatenate(wall_cp_segs) if wall_cp_segs else np.array([], np.float32)
 
     hr_prim = np.full((n, n_cells, 4), np.nan, dtype=np.float32)
     for i, hp in enumerate(hr_prim_list):
@@ -102,6 +107,7 @@ def build_gt_cache(all_cases: list[dict], wc,
         'fvm_residual_hr': fvm_residual_hr,
         'wall_mach_flat': wall_mach_flat,
         'wall_mach_offsets': wall_mach_offsets,
+        'wall_cp_flat': wall_cp_flat,
         'hr_prim': hr_prim,
     }
 
@@ -122,6 +128,11 @@ def load_gt_cache(npz_path: Path) -> dict:
     flat = cache['wall_mach_flat']
     offs = cache['wall_mach_offsets']
     cache['wall_mach'] = [flat[offs[i]:offs[i + 1]] for i in range(len(offs) - 1)]
+    if 'wall_cp_flat' in cache:
+        cp_flat = cache['wall_cp_flat']
+        cache['wall_cp'] = [cp_flat[offs[i]:offs[i + 1]] for i in range(len(offs) - 1)]
+    # sinon (cache généré avant l'ajout de wall_cp) : pas de clé 'wall_cp',
+    # les appelants retombent sur un calcul à la volée (cf. eval/runner.py).
     return cache
 
 
@@ -152,6 +163,8 @@ def load_or_build_gt_cache(layout: DataLayout, all_cases: list[dict], wc,
     flat = cache['wall_mach_flat']
     offs = cache['wall_mach_offsets']
     cache['wall_mach'] = [flat[offs[i]:offs[i + 1]] for i in range(len(offs) - 1)]
+    cp_flat = cache['wall_cp_flat']
+    cache['wall_cp'] = [cp_flat[offs[i]:offs[i + 1]] for i in range(len(offs) - 1)]
     return cache
 
 

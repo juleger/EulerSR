@@ -1,43 +1,28 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=oneraD
+#SBATCH --job-name=diamond
 #SBATCH --partition=gpu-a40,gpu-l40
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=6
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=20:00:00
 #SBATCH --array=0-10
 #SBATCH --output=logs/euler/%x_%A_%a.out
 #SBATCH --error=logs/euler/%x_%A_%a.err
 
-# Grille de simulations Euler, un SLURM array par AoA ENTIER, chaque tâche
-# couvre une plage de Mach pour une géométrie donnée.
-#
-# Variante de run_euler_grid.sbatch : sweep par AoA entier de -5 à 5 (pas de 1),
-# soit 11 tâches (array 0-10).
-#
-# Usage :
-#   sbatch slurm/run_euler_grid_int.sbatch
-#
-# Paramètres (modifier directement ou via env vars) :
-#   CASE       : géométrie  — diamond | naca0012 | rae2822 | oneraD
-#   MESH_PATHS : un ou plusieurs maillages, séparés par des virgules et/ou
-#                espaces (ex: "mesh_LR.npy,mesh_HR.npy" pour générer LR et HR).
-#                Chaque maillage exécute la grille (Mach x AoA) complète.
-#                MESH_PATH reste accepté pour la compatibilité (maillage unique).
-#   MACH       : plage Mach au format start:stop:step  (ex: 0.70:4.00:0.01)
-#   AOA_MIN    : AoA minimum correspondant au SLURM array task 0 (défaut: -5)
-#   AOA_STEP   : pas d'AoA entre deux tâches (défaut: 1)
-#   TF         : temps final simulation (défaut: 5.0)
-#   STATIONARITY_THRESHOLD : seuil de convergence (défaut: 1e-8)
+# Grille Euler (Mach x AoA), AoA ENTIER de -5 à 5 (pas 1, 11 tâches) -- variante
+# de run_euler_grid.sbatch. Usage : sbatch slurm/run_euler_grid_int.sbatch
+# Env vars : CASE (géométrie), MESH_PATHS (1+ maillages, alias legacy MESH_PATH),
+#   MACH (start:stop:step), AOA_MIN/AOA_STEP (défaut -5/1), TF (défaut 5.0),
+#   STATIONARITY_THRESHOLD (défaut 1e-8)
 
 
 CASE="${CASE:-diamond}"
-MESH_PATHS="${MESH_PATHS:-${MESH_PATH:-data/meshes/diamond_h0.3.npy}}"
+MESH_PATHS="${MESH_PATHS:-${MESH_PATH:-data/meshes/diamond_h0.3.npy,data/meshes/diamond_h0.0175.npy,data/meshes/diamond_h0.0125.npy}}"
 IFS=', ' read -r -a MESH_ARRAY <<< "${MESH_PATHS}"
-MACH="${MACH:-0.70:3.00:0.01}"
-TF="${TF:-5.0}"
+MACH="${MACH:-2.05:3.00:0.05}"
+TF="${TF:-2.0}"
 STATIONARITY_THRESHOLD="${STATIONARITY_THRESHOLD:-1e-8}"
 AOA_MIN="${AOA_MIN:--5}"
 AOA_STEP="${AOA_STEP:-1}"

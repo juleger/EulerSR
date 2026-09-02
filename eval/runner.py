@@ -1,6 +1,5 @@
 """evaluate() unifié : cas de référence + sweep complet pour n'importe quel TestSet."""
 from __future__ import annotations
-import csv
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -10,15 +9,15 @@ import jax
 import jax.numpy as jnp
 
 from eval.loader import ModelEntry
-from eval.testset import TestSet
-from eval.core import (mesh_geom_from_case, build_hr_feat, build_lr_feat, build_features,
-                       predict_det, predict_ensemble, predict_idw, make_batch_predict,
-                       run_batched, _BATCH_SIZE)
+from eval.testset import TestSet, _find_val_cases
+from eval.core import (mesh_geom_from_case, build_hr_feat, build_lr_feat, build_wall_feat,
+                       build_features, predict_det, predict_ensemble, predict_wall_baseline,
+                       make_batch_predict, run_batched, _BATCH_SIZE, _resolve_mach_norm)
 from utils.refs import to_mach
 from utils.metrics import (compute_field_errors, l2_rel, aero_metrics,
                             enthalpy_rms, entropy_violation, fvm_euler_rms,
                             fvm_euler_step_rms, idw_weights)
-from utils.aero import aero_coeffs, cp_field
+from utils.aero import aero_coeffs
 from utils.gt_cache import load_or_build_gt_cache
 from utils.layout import load_sample
 
@@ -43,33 +42,78 @@ def _train_stats(entry: ModelEntry, ts_stats: dict) -> tuple[np.ndarray, np.ndar
     return ts_stats['mu'].astype(np.float32), ts_stats['sig'].astype(np.float32)
 
 
-def _maybe_recalibrate(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dict], n_calib: int = 32) -> None:
-    """Recalibre res_scale des modèles FAM si OOD résolution ou OOD géométrique.
+def _stratified_sample(cases: list[dict], n: int) -> list[dict]:
+    """Sous-échantillon stratifié sur (aoa, mach), trié numériquement (pas
+    lexicographiquement -- 'aoa-5.00' < 'aoa0.00' < 'aoa10.00' < 'aoa2.00' en
+    tri de chaînes !). Même recette que _branch_res_std à l'entraînement
+    (np.linspace sur les indices triés) : couvre tout l'intervalle du pool au
+    lieu de se concentrer sur les premiers cas triés par nom de fichier.
+    """
+    if len(cases) <= n:
+        return list(cases)
+    ordered = sorted(cases, key=lambda c: (c['aoa_in'], c['mach_in']))
+    idx = np.unique(np.linspace(0, len(ordered) - 1, n).astype(int))
+    return [ordered[i] for i in idx]
+
+
+def _maybe_recalibrate(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dict],
+                       n_calib: int = 64) -> set[str]:
+    """Recalibre res_scale des modèles FAM sur CE TestSet, systématiquement.
+
+    Le buffer res_scale du checkpoint n'est qu'une valeur unique choisie parmi
+    les branches d'entraînement (la plus proche de la résolution nominale, en
+    cas d'égalité la première géométrie du yaml -- typiquement 'diamond' en
+    multi-géométrie). Il ne reflète donc PAS le res_scale propre à chaque
+    géométrie, y compris en indistribution (même géométrie/résolution vue à
+    l'entraînement mais différente de celle qui a rempli le buffer). On
+    recalibre donc pour tous les TestSets, indistrib compris, à partir d'un
+    échantillon de cas -- plus fiable que le buffer.
+
+    Pool de calibration, par ordre de préférence :
+    - split 'val' de CETTE géométrie/résolution (layout.proc_dir()/val), s'il
+      existe : totalement disjoint du sweep de test, aucune circularité.
+    - à défaut (géométries OOD préprocessées en test_only=True, cf
+      preprocessing/preprocess.py : pas de val/train), un sous-échantillon
+      stratifié de ts.test_cases. Les cas ainsi utilisés sont retournés pour
+      être exclus du sweep par evaluate() -- sinon on calibre res_scale sur
+      des cas qu'on ensuite note, ce qui biaise favorablement leurs métriques.
 
     Utilise les stats d'entraînement du modèle (mu_train/sig_train) pour normaliser les features et les targets.
     """
-    calib_cases = (ts.test_cases or ts.ref_cases)[:n_calib]
-    if not calib_cases:
-        return
+    val_cases = _find_val_cases(ts.layout)
+    pool = val_cases or ts.test_cases or ts.ref_cases
+    if not pool:
+        return set()
+    calib_cases = _stratified_sample(pool, n_calib)
+    excluded = set() if val_cases else {c['path'] for c in calib_cases}
+
+    pool_aoa = [c['aoa_in'] for c in pool]
+    calib_aoa = [c['aoa_in'] for c in calib_cases]
+    print(f"  Calibration : {len(calib_cases)} cas, source="
+          f"{'val (disjoint du sweep)' if val_cases else 'test (holdout stratifié, exclu du sweep)'}"
+          f"  AoA calib=[{min(calib_aoa):.2f}, {max(calib_aoa):.2f}]"
+          f"  vs pool=[{min(pool_aoa):.2f}, {max(pool_aoa):.2f}]")
+
     for entry in models:
         if type(entry.model).__name__ != 'FAM':
             continue
         ood_kind = ts.ood_kind(entry)
-        if ood_kind == 'indistrib':
-            continue
         mu, sig = _train_stats(entry, ts.stats)
         trained_lr = (entry.cfg or {}).get('resolution', {}).get('lr', 0.1)
+        coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
         print(f"\n── Recalibration res_scale [{entry.name}]"
               f"  ({ood_kind})  LR train={trained_lr} → eval={ts.lr_res} ──")
         lr_feats, tg_list = [], []
         for c in calib_cases:
-            d = load_sample(c['path'])
+            d = load_sample(c['path'], c.get('raw_hr_path'))
             if 'hr_primitives' not in d:
                 continue
-            lr_feats.append(build_lr_feat(mesh_geom_from_case(d), d, mu, sig))
+            geom = mesh_geom_from_case(d, coord_norm, ts.hr_mesh_meta)
+            lr_feats.append(build_lr_feat(geom, d, mu, sig))
             tg_list.append((d['hr_primitives'].astype(np.float32) - mu) / sig)
         if lr_feats:
             entry.model.recalibrate_res_scale(lr_feats, tg_list, knn_map[entry.name])
+    return excluded
 
 
 def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
@@ -87,10 +131,15 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
         knn_map[entry.name] = ts.build_knn(entry)
         print(f"  [{entry.name}]  {ts.ood_label(entry)}")
 
-    # KNN IDW dédié : toujours reconstruit sur la géométrie/résolution du TestSet
-    print("  [IDW]  construction kNN simple...")
-    idw_knn = ts.build_idw_knn(k=6)
-    
+    calib_excluded = _maybe_recalibrate(models, ts, knn_map)
+
+    # KNN IDW dédié : toujours reconstruit sur la géométrie/résolution du TestSet.
+    # wall=True (tous les modèles évalués sont bord-seul) : baseline pertinente =
+    # IDW(bord) blend freestream, pas l'IDW volumique (pas la même info disponible).
+    is_wall_eval = bool(models) and all(hasattr(m.model, 'wall_encoder') for m in models)
+    print(f"  [{'baseline bord' if is_wall_eval else 'IDW'}]  construction kNN simple...")
+    idw_knn = ts.build_idw_knn(k=6, wall=is_wall_eval)
+
     ref_results = None
     sweep_results = None
 
@@ -103,7 +152,13 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
         _plot_ref(ref_results, ts, out)
 
     if ts.test_cases:
-        cases = ts.test_cases[:n_eval] if n_eval > 0 else ts.test_cases
+        # Exclut les cas éventuellement consommés par _maybe_recalibrate (repli
+        # sans split 'val') : jamais calibrer et noter sur les mêmes cas.
+        test_cases = [c for c in ts.test_cases if c['path'] not in calib_excluded]
+        if calib_excluded:
+            print(f"  [calibration] {len(calib_excluded)} cas exclus du sweep "
+                  f"(utilisés pour recalibrer res_scale)")
+        cases = test_cases[:n_eval] if n_eval > 0 else test_cases
         print(f"\n── Sweep test set ({len(cases)} cas) ──"
               f"───────────────────────────────")
         mesh_hr = np.load(ts.layout.mesh_path(ts.hr_res), allow_pickle=True).item()
@@ -118,7 +173,8 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
 
     print(f"\nDone — {out}/")
     return {'ref': ref_results, 'sweep': sweep_results,
-            'triang': getattr(ts, 'triang_hr', None), 'tag': ts.tag}
+            'triang': getattr(ts, 'triang_hr', None), 'tag': ts.tag,
+            'geometry': ts.geometry}
 
 
 def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dict], idw_knn: dict) -> dict:
@@ -132,7 +188,7 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
     # Pré-chargement des cas
     case_data = []
     for c in ts.ref_cases:
-        d = load_sample(c['path'])
+        d = load_sample(c['path'], c.get('raw_hr_path'))
         hr_prim = d['hr_primitives'].astype(np.float32) if 'hr_primitives' in d else None
         mach_ref = to_mach(hr_prim) if hr_prim is not None else None
         wm_hr = (aero_coeffs(hr_prim, wc, c['mach_in'])['wall_mach']
@@ -146,17 +202,21 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
         for entry in models:
             _gid = ts.geom_id_for(entry)
             _mu, _sig = _train_stats(entry, ts.stats)
+            _coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+            _is_wall = hasattr(entry.model, 'wall_encoder')
             _hf, _lf, *_ = build_features(_d0, _c0['mach_in'], _c0['aoa_in'],
-                                           {'mu': _mu, 'sig': _sig}, _gid)
+                                           {'mu': _mu, 'sig': _sig}, _gid,
+                                           _coord_norm, ts.hr_mesh_meta, is_wall=_is_wall,
+                                           mach_norm=_resolve_mach_norm(entry.cfg))
             print(f"  [{entry.name}] warmup JIT ({ts.tag})...")
             jax.block_until_ready(entry.model.predict(_hf, _lf, knn_map[entry.name]))
 
     def _field_errs(prim, cd):
         if cd['hr_prim'] is None:
-            return None, None
+            return None, None, None
         er = compute_field_errors(prim, cd['hr_prim'],
                                   wc.cell_adj_edges, wc.bary, dxy_edges)
-        return er['linf_mach'], er['l2w_mach']
+        return er['linf_mach'], er['l2w_mach'], er['w2_mach']
 
     def _aero(prim, cd):
         if cd['hr_prim'] is None:
@@ -164,26 +224,36 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
         am = aero_metrics(prim, cd['hr_prim'], wc, cd['meta']['mach_in'])
         return am['wall_mach_pred'], am
 
-    # IDW baseline
+    # Baseline "sans réseau" : IDW volumique (LR complet) ou baseline bord
+    # (idw_knn['mode']=='wall'), selon le testset -- cf. TestSet.build_idw_knn.
+    is_wall_bl = idw_knn is not None and idw_knn.get('mode') == 'wall'
+    # Nom interne toujours 'LR IDW' (~10 endroits dans utils/viz/eval.py et
+    # combined.py s'appuient sur cette chaîne littérale pour repérer la ligne
+    # baseline) -- seul le CONTENU calculé change en mode wall, cf. plus bas.
     idw_row = {'name': 'LR IDW', 'prim_preds': [], 'mach_preds': [],
-                'l2': [], 'linf': [], 'l2w': [], 'time_ms': [],
+                'l2': [], 'linf': [], 'l2w': [], 'w2': [], 'time_ms': [],
                 'wall_mach': [], 'aero': []}
-    if idw_knn is not None and 'idx' in idw_knn:
-        idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
-        w_idw = idw_weights(np.asarray(idw_knn['dist'])[:, :6]).astype(np.float32)
+    if idw_knn is not None and (is_wall_bl or 'idx' in idw_knn):
+        if not is_wall_bl:
+            idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
+            w_idw = idw_weights(np.asarray(idw_knn['dist'])[:, :6]).astype(np.float32)
         for cd in case_data:
-            lr_p = cd['d']['lr_primitives'].astype(np.float32)
-            t0 = time.perf_counter()
-            prim = (w_idw[:, :, None] * lr_p[idx_idw]).sum(axis=1)
-            t = (time.perf_counter() - t0) * 1e3
+            c = cd['meta']
+            if is_wall_bl:
+                prim, t = predict_wall_baseline(cd['d'], c['mach_in'], c['aoa_in'], idw_knn['wd_exp'])
+            else:
+                lr_p = cd['d']['lr_primitives'].astype(np.float32)
+                t0 = time.perf_counter()
+                prim = (w_idw[:, :, None] * lr_p[idx_idw]).sum(axis=1)
+                t = (time.perf_counter() - t0) * 1e3
             mach = to_mach(prim)
-            li, lw = _field_errs(prim, cd)
+            li, lw, w2v = _field_errs(prim, cd)
             wm, am = _aero(prim, cd)
             idw_row['prim_preds'].append(prim)
             idw_row['mach_preds'].append(mach)
             idw_row['l2'].append(l2_rel(mach, cd['mach_ref'])
                                  if cd['mach_ref'] is not None else None)
-            idw_row['linf'].append(li); idw_row['l2w'].append(lw)
+            idw_row['linf'].append(li); idw_row['l2w'].append(lw); idw_row['w2'].append(w2v)
             idw_row['time_ms'].append(t)
             idw_row['wall_mach'].append(wm); idw_row['aero'].append(am)
 
@@ -196,27 +266,29 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
         # Modele stochastique (interpolant SDE) : ensemble -> moyenne + incertitude
         is_sde = getattr(entry.model, 'sampler', 'ode') == 'sde'
         row = {'name': ts.display_name(entry), 'prim_preds': [], 'mach_preds': [],
-               'l2': [], 'linf': [], 'l2w': [], 'time_ms': [],
+               'l2': [], 'linf': [], 'l2w': [], 'w2': [], 'time_ms': [],
                'wall_mach': [], 'aero': [], 'prim_std': []}
         for cd in case_data:
             c = cd['meta']
             if is_sde:
                 prim, prim_std, t = predict_ensemble(
                     entry, cd['d'], c['mach_in'], c['aoa_in'],
-                    _stats_e, knn=knn_map[entry.name], geom_id=gid)
+                    _stats_e, knn=knn_map[entry.name], geom_id=gid,
+                    mesh_meta=ts.hr_mesh_meta)
             else:
                 prim, t = predict_det(entry, cd['d'], c['mach_in'], c['aoa_in'],
-                                       _stats_e, knn=knn_map[entry.name], geom_id=gid)
+                                       _stats_e, knn=knn_map[entry.name], geom_id=gid,
+                                       mesh_meta=ts.hr_mesh_meta)
                 prim_std = None
             mach = to_mach(prim)
-            li, lw = _field_errs(prim, cd)
+            li, lw, w2v = _field_errs(prim, cd)
             wm, am = _aero(prim, cd)
             row['prim_preds'].append(prim)
             row['prim_std'].append(prim_std)
             row['mach_preds'].append(mach)
             row['l2'].append(l2_rel(mach, cd['mach_ref'])
                              if cd['mach_ref'] is not None else None)
-            row['linf'].append(li); row['l2w'].append(lw)
+            row['linf'].append(li); row['l2w'].append(lw); row['w2'].append(w2v)
             row['time_ms'].append(t)
             row['wall_mach'].append(wm); row['aero'].append(am)
         model_rows.append(row)
@@ -229,7 +301,7 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
                                  'wall_mach_hr': cd['wall_mach_hr']}
                   for cd in case_data],
         'rows': model_rows,
-        'idw': idw_row if (idw_knn is not None and 'idx' in idw_knn) else None,
+        'idw': idw_row if (idw_knn is not None and (is_wall_bl or 'idx' in idw_knn)) else None,
     }
 
 
@@ -244,14 +316,16 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
     n = len(cases)
 
     det_models = [m for m in models if m.kind == 'det']
-    method_names = (['LR IDW'] if idw_knn is not None else []) +                   [ts.display_name(m) for m in models]
+    is_wall_bl = idw_knn is not None and idw_knn.get('mode') == 'wall'
+    _bl_name = 'LR IDW'  # nom interne fixe, cf. remarque _run_ref_cases -- seul le contenu change
+    method_names = ([_bl_name] if idw_knn is not None else []) +                   [ts.display_name(m) for m in models]
 
     results: dict[str, dict] = {
         nm: {'times': [], 'CL': [], 'CD': [], 'grad_p_max': [],
              'mach_max': [], 'mach_min': [], 'l2_mach': [], 'linf_mach': [],
-             'l2w_mach': [], 'sw2_mach': [], 'l2_prims': [], 'linf_prims': [],
-             'wall_mach': [], 'wall_cp': [], 'has_ref': [], 'enthalpy': [],
-             'entropy': [], 'euler_fvm': [], 'euler_step': []}
+             'l2w_mach': [], 'w2_mach': [], 'l2_prims': [], 'linf_prims': [],
+             'wall_mach': [], 'wall_cp': [], 'has_ref': [], 'enthalpy': [], 'entropy': [],
+             'euler_fvm': [], 'euler_step': []}
         for nm in method_names
     }
     results['HR'] = {'CL': [], 'CD': [], 'grad_p_max': [],
@@ -266,7 +340,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
 
     print(f"  Chargement parallèle de {n} fichiers...")
     with ThreadPoolExecutor(max_workers=8) as ex:
-        all_data: list[dict] = list(ex.map(lambda c: load_sample(c['path']), cases))
+        all_data: list[dict] = list(ex.map(lambda c: load_sample(c['path'], c.get('raw_hr_path')), cases))
 
     print("  Pré-calcul des features...")
     geom = mesh_geom_from_case(all_data[0])
@@ -278,10 +352,16 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         wc.bary[wc.cell_adj_edges[:, 0]] - wc.bary[wc.cell_adj_edges[:, 1]], axis=1
     ).astype(np.float32)
 
-    # IDW
+    # Baseline "sans réseau" (IDW volumique ou baseline bord, cf. plus haut)
     idw_preds: list[np.ndarray] = []
     idw_t_ms_per_case: float = 0.0
-    if idw_knn is not None:
+    if idw_knn is not None and is_wall_bl:
+        t0 = time.perf_counter()
+        for d, c in zip(all_data, cases):
+            prim, _ = predict_wall_baseline(d, c['mach_in'], c['aoa_in'], idw_knn['wd_exp'])
+            idw_preds.append(prim)
+        idw_t_ms_per_case = (time.perf_counter() - t0) * 1e3 / max(n, 1)
+    elif idw_knn is not None:
         idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
         w_idw = idw_weights(np.asarray(idw_knn['dist'])[:, :6]).astype(np.float32)
         t0 = time.perf_counter()
@@ -297,19 +377,31 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         nm = ts.display_name(entry)
         gid = ts.geom_id_for(entry)
         mu_e, sig_e = _train_stats(entry, ts.stats)
+        coord_norm_e = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+        mach_norm_e = _resolve_mach_norm(entry.cfg)
+        geom_e = geom if coord_norm_e == 'domain' else mesh_geom_from_case(
+            all_data[0], coord_norm_e, ts.hr_mesh_meta)
 
         # Temps de construction des features
+        is_wall_e = hasattr(entry.model, 'wall_encoder')
         t0_feat = time.perf_counter()
-        if np.allclose(mu_e, mu) and np.allclose(sig_e, sig):
+        if is_wall_e:
+            # FAMWall/DAMWall : observations de bord (fusionnées dans d par
+            # utils.layout.load_sample depuis le store _wall compagnon), pas de
+            # champ LR volumique -- jamais le chemin lr_feats partagé ci-dessus.
+            lrf = [build_wall_feat(d, mu_e, sig_e, ts.hr_mesh_meta) for d in all_data]
+            feat_ms_per_case = (time.perf_counter() - t0_feat) * 1e3 / n
+        elif coord_norm_e == 'domain' and np.allclose(mu_e, mu) and np.allclose(sig_e, sig):
             lrf = lr_feats
             t0_lr = time.perf_counter()
-            _ = build_lr_feat(geom, all_data[0], mu_e, sig_e)
+            _ = build_lr_feat(geom_e, all_data[0], mu_e, sig_e)
             feat_ms_per_case = (time.perf_counter() - t0_lr) * 1e3
         else:
-            lrf = [build_lr_feat(geom, d, mu_e, sig_e) for d in all_data]
+            lrf = [build_lr_feat(geom_e, d, mu_e, sig_e) for d in all_data]
             feat_ms_per_case = (time.perf_counter() - t0_feat) * 1e3 / n
         t0_hr = time.perf_counter()
-        hr_feats = [build_hr_feat(geom, c['mach_in'], c['aoa_in'], gid) for c in cases]
+        hr_feats = [build_hr_feat(geom_e, c['mach_in'], c['aoa_in'], gid, mach_norm=mach_norm_e)
+                   for c in cases]
         feat_ms_per_case += (time.perf_counter() - t0_hr) * 1e3 / n
 
         print(f"  [{entry.name}] warmup + inférence batch (B={batch_size})...")
@@ -348,11 +440,11 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
             r['l2_mach'].append(er['l2_mach'])
             r['linf_mach'].append(er['linf_mach'])
             r['l2w_mach'].append(er['l2w_mach'])
-            r['sw2_mach'].append(er['sw2_mach'])
+            r['w2_mach'].append(er['w2_mach'])
             r['l2_prims'].append([er[f'l2_{p2}'] for p2 in _PRIM_NAMES])
             r['linf_prims'].append([er[f'linf_{p2}'] for p2 in _PRIM_NAMES])
         else:
-            for k2 in ('l2_mach', 'linf_mach', 'l2w_mach', 'sw2_mach'):
+            for k2 in ('l2_mach', 'linf_mach', 'l2w_mach', 'w2_mach'):
                 r[k2].append(None)
             r['l2_prims'].append(None)
             r['linf_prims'].append(None)
@@ -377,6 +469,12 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
                 for k2 in ('CL', 'CD', 'grad_p_max', 'mach_max', 'mach_min'):
                     gt[k2].append(float(gc[k2][i]))
                 gt['wall_mach'].append(gc['wall_mach'][i])
+                if 'wall_cp' in gc:
+                    gt['wall_cp'].append(gc['wall_cp'][i])
+                else:
+                    # cache GT généré avant l'ajout de wall_cp : repli ponctuel
+                    # sur un calcul direct (à régénérer via utils/gt_cache.py).
+                    gt['wall_cp'].append(aero_coeffs(hr_prim, wc, c['mach_in'])['wall_cp'])
                 gt['enthalpy_hr'].append(float(gc.get('enthalpy_hr', [np.nan] * n)[i]))
                 gt['entropy_hr'].append(float(gc.get('entropy_hr', [np.nan] * n)[i]))
             else:
@@ -384,11 +482,9 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
                 for k2 in ('CL', 'CD', 'grad_p_max', 'mach_max', 'mach_min'):
                     gt[k2].append(ac[k2])
                 gt['wall_mach'].append(ac['wall_mach'])
+                gt['wall_cp'].append(ac['wall_cp'])
                 gt['enthalpy_hr'].append(enthalpy_rms(hr_prim, c['mach_in']))
                 gt['entropy_hr'].append(entropy_violation(hr_prim))
-            # Cp paroi GT (recalculé du champ HR : non sérialisé dans le cache)
-            gt['wall_cp'].append(
-                cp_field(hr_prim, c['mach_in'])[wc.unique_wall_cell_ids])
             # Résidu Euler FVM du HR : priorité au cache (fvm_residual_hr), sinon live
             fr = gc.get('fvm_residual_hr') if gc is not None else None
             if fr is not None and np.isfinite(fr[i]):
@@ -413,7 +509,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
             gt['euler_step_hr'].append(np.nan)
 
         if idw_knn is not None:
-            _fill('LR IDW', idw_preds[i], idw_t_ms_per_case,
+            _fill(_bl_name, idw_preds[i], idw_t_ms_per_case,
                   hr_prim, has_ref, c['mach_in'], aoa_in)
         for entry in det_models:
             nm = ts.display_name(entry)
@@ -431,12 +527,20 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
     # Erreurs aéro vs GT
     gt_CL = results['HR']['CL']
     gt_CD = results['HR']['CD']
+    gt_wall_mach = results['HR']['wall_mach']
     gt_wall_cp = results['HR']['wall_cp']
     for nm in method_names:
         r = results[nm]
         r['CL_err'] = np.abs(r['CL'] - gt_CL)
         r['CD_err'] = np.abs(r['CD'] - gt_CD)
-        # Erreur L2 relative du profil de Cp en paroi (remplace le Mach paroi)
+        wall_mach_l2 = []
+        for wm_p, wm_r in zip(r['wall_mach'], gt_wall_mach):
+            if len(wm_p) > 0 and len(wm_r) > 0:
+                wall_mach_l2.append(float(
+                    np.linalg.norm(wm_p - wm_r) / (np.linalg.norm(wm_r) + 1e-8)))
+            else:
+                wall_mach_l2.append(np.nan)
+        r['wall_mach_l2'] = np.array(wall_mach_l2, dtype=float)
         wall_cp_l2 = []
         for cp_p, cp_r in zip(r['wall_cp'], gt_wall_cp):
             if len(cp_p) > 0 and len(cp_r) > 0:
@@ -447,7 +551,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         r['wall_cp_l2'] = np.array(wall_cp_l2, dtype=float)
 
     results['_cases'] = cases
-    results['_name_map'] = {'LR IDW': 'LR IDW'}
+    results['_name_map'] = {_bl_name: _bl_name}
     results['_name_map'].update({ts.display_name(m): m.name for m in models})
     _print_phys_table(results, method_names, _has_mesh)
     return results
@@ -464,22 +568,17 @@ def _plot_ref(results: dict, ts: TestSet, out: Path):
 
 def _plot_sweep(results: dict, cases: list[dict], ts: TestSet, out: Path):
     from utils.viz.eval import (
-        plot_global_errors, plot_distributions, plot_aero_distributions,
-        plot_cl_cd_distributions, plot_error_kde, plot_error_scatter,
-        plot_error_heatmap, plot_regime_bars, plot_summary_table,
+        plot_global_errors, plot_distributions,
+        plot_cl_cd_distributions, plot_error_kde,
+        plot_error_heatmap, plot_summary_table,
     )
     print("\n── Plots : sweep ───────────────────────────────────────────")
     plot_global_errors(results, out)
     plot_distributions(results, out)
-    plot_aero_distributions(results, out)
     plot_cl_cd_distributions(results, out)
     plot_error_kde(results, out)
-    plot_error_scatter(results, cases, out)
-    plot_error_scatter(results, cases, out, metric_key='sw2_mach',
-             metric_label=r'$SW_2$', fname='error_vs_mach_sw2.png')
     plot_error_heatmap(results, cases, out)
-    plot_regime_bars(results, cases, out)
-    plot_summary_table({}, results, out)
+    plot_summary_table({}, results, out, hr_res=ts.hr_res, lr_res=ts.lr_res, geometry=ts.geometry)
 
 def _print_header(ts: TestSet, models: list[ModelEntry]):
     sep = '─' * 58
@@ -540,7 +639,7 @@ def _merge_sweep_results(sweep_list: list[dict]) -> dict:
                 base_names.append(base)
                 seen.add(base)
 
-    _LIST_KEYS = {'wall_mach', 'l2_prims', 'linf_prims'}
+    _LIST_KEYS = {'wall_mach', 'wall_cp', 'l2_prims', 'linf_prims'}
 
     def _gather(key: str, sweep_dicts: list[dict]) -> list:
         """Collecte les valeurs d'une clé à travers tous les sweeps pour une méthode."""
@@ -601,7 +700,34 @@ def _merge_sweep_results(sweep_list: list[dict]) -> dict:
     for r in sweep_list:
         merged['_cases'].extend(r.get('_cases', []))
 
+    merged['_name_map'] = {base: base for base in base_names if base in merged}
+
     return merged
+
+
+def _group_by_geometry(ts_results: dict[str, dict]) -> dict[str, dict]:
+    """Regroupe les sweeps de plusieurs TestSets par géométrie (résolutions LR fusionnées).
+
+    Ex. 'diamond_lr0.1' + 'diamond_lr0.2' -> une seule entrée 'diamond' dont les
+    métriques sont la concaténation des deux résolutions (via _merge_sweep_results).
+    """
+    from collections import defaultdict
+    from eval.testset import _geom_label
+
+    by_geom: dict[str, list[dict]] = defaultdict(list)
+    for tag, v in ts_results.items():
+        sweep = v.get('sweep')
+        if not sweep:
+            continue
+        geom = v.get('geometry', tag)
+        by_geom[geom].append(sweep)
+
+    out: dict[str, dict] = {}
+    for geom, sweeps in by_geom.items():
+        merged = _merge_sweep_results(sweeps)
+        merged['_ts_label'] = _geom_label(geom)
+        out[geom] = {'sweep': merged}
+    return out
 
 
 def plot_combined(ts_results: dict[str, dict], out_dir: Path) -> None:
@@ -611,8 +737,12 @@ def plot_combined(ts_results: dict[str, dict], out_dir: Path) -> None:
     Contrairement à l'ancienne approche (pool fusionné), la sortie garde la
     ventilation *par testset* : tableau global modèle×test, barres d'erreur par
     test, distributions facettées, et panel de champs (1 cas ref / testset).
+
+    Produit en plus une ventilation *par géométrie seule* (résolutions LR
+    fusionnées) dans combined/by_geometry/ : plus lisible quand plusieurs
+    résolutions par géométrie diluent la comparaison en colonnes séparées.
     """
-    from utils.viz.combined import plot_all_combined
+    from utils.viz.combined import plot_all_combined, plot_by_geometry
 
     tags = [tag for tag, v in ts_results.items() if v.get('sweep') is not None]
     if len(tags) < 2:
@@ -625,6 +755,13 @@ def plot_combined(ts_results: dict[str, dict], out_dir: Path) -> None:
     out.mkdir(exist_ok=True)
 
     plot_all_combined(ts_results, out)
+
+    by_geom = _group_by_geometry(ts_results)
+    if by_geom:
+        out_geom = out / 'by_geometry'
+        out_geom.mkdir(exist_ok=True)
+        plot_by_geometry(by_geom, out_geom)
+        print(f"  -> {out_geom}/")
 
     print(f"  -> {out}/")
 

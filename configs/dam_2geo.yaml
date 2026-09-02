@@ -1,15 +1,15 @@
 model: dam
 data_root: data/
 
-resolution:
-  hr: 0.025
-  lr: 0.1
+# DAM 2 geometries (diamond + naca0012), etape intermediaire vers le 6geo.
+#
+# Repro : uv run python train.py --config configs/dam_2geo.yaml --run_name dam_2geo
 
 architecture:
   levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
-  embed_dim: 96
-  cond_dim: 96           # dimension du vecteur de conditionnement
-  n_heads: 3
+  embed_dim: 128
+  cond_dim: 128          # dimension du vecteur de conditionnement
+  n_heads: 4
   n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
   n_global_blocks: 3      # blocs d'attention globale au niveau grossier
   mlp_ratio: 4
@@ -19,29 +19,23 @@ architecture:
   k_cond: 6               # voisins kNN pour le conditionnement
   use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
-  use_geom_cond: false    # embedding de geometrie ; false pour le zero-shot sur geometrie inconnue
-  n_geoms: 4              # nombre de geometries distinctes
+  coord_norm: object      # centre/echelle sur corde+centre obstacle (cf euler/meshing)
+  use_geom_cond: true     # embedding de geometrie, avec dropout CFG (geom_cfg_prob)
+  n_geoms: 2              # nombre de geometries distinctes (auto-recalcule par train.py)
+  geom_cfg_prob: 0.25     # meilleur sur le sweep 6geo 0.15/0.25/0.35 (OOD-geometrie)
+
+resolution:
+  hr: 0.025
+  lr: 0.1
 
 # Entrainement multi-branche : une branche = (geometrie, resolution LR).
-# weight = proportion d'echantillonnage de la branche (somme normalisee).
-# rae2822 et oneraD exclus (reserves a l'evaluation OOD geometrique).
 datasets:
   - name: diamond
-    lr_res:         [0.05, 0.1, 0.2]
-    weight:         [1,    2,   2]
-    train_fraction: [1.0,  1.0, 1.0]
+    lr_res:         [0.1, 0.2]
+    weight:         [2,   2]
+    train_fraction: [1.0, 1.0]
 
   - name: naca0012
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
-
-  - name: naca2412
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
-
-  - name: oa209
     lr_res:         [0.1, 0.2]
     weight:         [2,   2]
     train_fraction: [1.0, 1.0]
@@ -52,14 +46,15 @@ training:
   weight_decay: 5.0e-4
   val_every: 20
   seed: 42
-  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, sliced_wasserstein
+  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, w2
   shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
   lambda_enthalpy: 0.01          # poids de la perte de conservation d'enthalpie (0 = desactive)
   schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 32
+  batch_size: 12           # A ajuster selon GPU et Modèle (8 sur A40, 12 sur L40, 24 sur H100 environ)
   ema_decay: 0.999
   train_fraction: 1.0
-  preload: true
+  preload: true             # pool 2geo assez petit (contrairement au 6geo, preload=false)
+  mach_range: [0.7, 2.0]    # exclut Mach>2 (solveur de generation moins fiable au-dela)

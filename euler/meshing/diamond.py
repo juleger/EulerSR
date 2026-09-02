@@ -6,9 +6,10 @@ repo_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # euler/ (jax_fvm)
 sys.path.insert(0, str(Path(__file__).parent))                # meshing/ (mesh_utils)
 
-from mesh_utils import (WALL, INLET, OUTLET, MeshSizeParams,
+from mesh_utils import (WALL, MeshSizeParams,
                          triangle_area_from_h, smoothstep,
-                         build_outer_boundary, triangulate_with_hole)
+                         build_outer_boundary, triangulate_with_hole,
+                         triangulate_symmetric_airfoil)
 from jax_fvm.src.mesh import Mesh
 
 DEFAULT_OUT_DIR = repo_root / "data" / "meshes"
@@ -67,8 +68,20 @@ def _diamond_refinement(cx, cy, chord, height, h, size_params):
     return refinement_func
 
 
+def _sample_diamond_upper(cx, cy, chord, height, h):
+    """Contour extrados du diamant pour maillage symétrique"""
+    hc, ht = chord / 2.0, height / 2.0
+    p_le, p_top, p_te = np.array([cx - hc, cy]), np.array([cx, cy + ht]), np.array([cx + hc, cy])
+    n1 = max(2, int(np.ceil(np.linalg.norm(p_top - p_le) / h)))
+    n2 = max(2, int(np.ceil(np.linalg.norm(p_te - p_top) / h)))
+    seg1 = np.linspace(p_le, p_top, n1, endpoint=False)
+    seg2 = np.linspace(p_top, p_te, n2, endpoint=False)
+    return np.concatenate([seg1, seg2, p_te[None, :]])
+
+
 def build_mesh(Lx=6.0, Ly=4.0, h=0.05, chord=1.0, height=0.24, cx=None, cy=None,
-               export_vtk=False, size_params=DEFAULT_SIZE_PARAMS, out_dir=None):
+               export_vtk=False, size_params=DEFAULT_SIZE_PARAMS, out_dir=None,
+               case="diamond", symmetric=False):
 
     cx = Lx / 2 if cx is None else cx
     cy = Ly / 2 if cy is None else cy
@@ -78,20 +91,26 @@ def build_mesh(Lx=6.0, Ly=4.0, h=0.05, chord=1.0, height=0.24, cx=None, cy=None,
     if diamond[0][0] < 0 or diamond[2][0] > Lx or diamond[3][1] < 0 or diamond[1][1] > Ly:
         raise ValueError("Le diamant doit rester entièrement dans le domaine.")
 
-    size_func     = lambda pt: _local_size(pt, cx, cy, chord, height, h, size_params)
-    outer_pts, outer_ms   = build_outer_boundary(Lx, Ly, size_func, h)
-    diamond_pts, diamond_ms = sample_loop(diamond, h, [WALL, WALL, WALL, WALL])
-    refinement    = _diamond_refinement(cx, cy, chord, height, h, size_params)
+    size_func  = lambda pt: _local_size(pt, cx, cy, chord, height, h, size_params)
+    refinement = _diamond_refinement(cx, cy, chord, height, h, size_params)
 
-    mesh = triangulate_with_hole(outer_pts, outer_ms, diamond_pts, diamond_ms, (cx, cy), refinement)
-    mesh.set_metadata(case="diamond", h=h, domain={"Lx": Lx, "Ly": Ly},
+    if symmetric:
+        diamond_upper = _sample_diamond_upper(cx, cy, chord, height, h)
+        mesh = triangulate_symmetric_airfoil(Lx, Ly, cy, cx - hc, cx + hc, diamond_upper,
+                                             size_func, refinement, h)
+    else:
+        outer_pts, outer_ms   = build_outer_boundary(Lx, Ly, size_func, h)
+        diamond_pts, diamond_ms = sample_loop(diamond, h, [WALL, WALL, WALL, WALL])
+        mesh = triangulate_with_hole(outer_pts, outer_ms, diamond_pts, diamond_ms, (cx, cy), refinement)
+
+    mesh.set_metadata(case=case, h=h, domain={"Lx": Lx, "Ly": Ly},
                       obstacle_length=chord, chord=chord, height=height,
-                      center={"cx": cx, "cy": cy})
+                      center={"cx": cx, "cy": cy}, symmetric=symmetric)
     mesh.print_statistics()
 
     out_dir = DEFAULT_OUT_DIR if out_dir is None else Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"diamond_h{h}.npy"
+    path = out_dir / f"{case}_h{h}.npy"
     mesh.save_mesh(str(path))
     if export_vtk:
         mesh.export_vtk(str(path.with_suffix(".vtk")))
