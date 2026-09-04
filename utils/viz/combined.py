@@ -16,6 +16,7 @@ from matplotlib.colors import LogNorm
 from utils.viz._style import _DPI, CMAP_FIELD as _CMAP_FIELD
 from utils.viz.eval import (_build_palette, _display_name, _kde_or_hist,
                             _color_table_gradient, _fmt_metric, _fmt_time)
+from eval.core import IDW_BASELINE_NAMES
 
 # Tableau global : les métriques essentielles (erreurs aéro/paroi + distributionnelle + coût)
 _TABLE_METRICS = [
@@ -91,10 +92,11 @@ def collect(ts_results: dict) -> dict:
                     seen.add(base)
                     models.append(base)
 
-    # 'LR IDW' toujours en tête si présent
-    if 'LR IDW' in models:
-        models.remove('LR IDW')
-        models.insert(0, 'LR IDW')
+    # Baseline sans réseau ('LR IDW' ou 'Extrap. Bord') toujours en tête si présente.
+    _bl = next((m for m in models if m in IDW_BASELINE_NAMES), None)
+    if _bl is not None:
+        models.remove(_bl)
+        models.insert(0, _bl)
 
     def get(tag, model, key):
         return per_tag.get(tag, {}).get(model, {}).get(key)
@@ -310,7 +312,7 @@ def combined_reference_fields(ts_results: dict, out_dir: Path):
     """Panel Mach : une ligne par testset (cas de référence), colonnes = méthodes."""
     C = collect(ts_results)
     tags = C['tags']
-    model_cols = [m for m in C['models'] if m != 'LR IDW']
+    model_cols = [m for m in C['models'] if m not in IDW_BASELINE_NAMES]
 
     # testsets exploitables : ref + triang + cas avec HR
     usable = []
@@ -324,9 +326,12 @@ def combined_reference_fields(ts_results: dict, out_dir: Path):
     if len(usable) < 2:
         return
 
-    # colonnes : IDW, modèles..., HR
-    col_names = (['LR IDW'] if any(ts_results[t]['ref'].get('idw') for t in usable)
-                 else []) + [_display_name(m) for m in model_cols] + ['HR GT']
+    # colonnes : baseline, modèles..., HR. Nom réel de la baseline lu dans les
+    # données plutôt qu'un littéral fixe, cf. eval.core.idw_baseline_name.
+    _idw_name = next((ts_results[t]['ref']['idw']['name'] for t in usable
+                      if ts_results[t]['ref'].get('idw')), None)
+    col_names = ([_idw_name] if _idw_name else []) + \
+                [_display_name(m) for m in model_cols] + ['HR GT']
     ncol = len(col_names)
 
     # ratio d'aspect par testset (pour height_ratios)
@@ -354,7 +359,7 @@ def combined_reference_fields(ts_results: dict, out_dir: Path):
 
         # colonnes de données alignées sur col_names
         cols = []
-        if 'LR IDW' in col_names:
+        if _idw_name is not None:
             cols.append(ref['idw']['mach_preds'][ci_case] if ref.get('idw') else None)
         for row in ref['rows']:
             cols.append(row['mach_preds'][ci_case])

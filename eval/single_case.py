@@ -11,7 +11,8 @@ import jax
 
 from eval.loader import ModelEntry
 from eval.testset import TestSet
-from eval.core import build_features, predict_det, predict_ensemble, predict_idw, _resolve_mach_norm
+from eval.core import (build_features, predict_det, predict_ensemble, predict_idw,
+                       predict_wall_baseline, idw_baseline_name, _resolve_mach_norm)
 from utils.refs import to_mach
 from utils.metrics import compute_field_errors, l2_rel, aero_metrics
 
@@ -103,26 +104,34 @@ def run_single_case(models: list[ModelEntry], ts: TestSet, case: dict, d: dict,
         print(f"  [{entry.name}] warmup JIT...")
         jax.block_until_ready(entry.model.predict(hf, lf, knn_map[entry.name]))
 
-    # Baseline LR -> HR par IDW
+    # Baseline sans réseau : IDW volumique ou baseline bord selon le testset, même
+    # logique que eval/runner.py. 'LR IDW' interpole le vrai champ LR, une info dont
+    # un modèle bord ne dispose jamais, d'où 'Extrap. Bord' pour ces modèles.
     idw_row = None
-    if idw_knn is not None and 'idx' in idw_knn:
-        idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
-        dist_idw = np.asarray(idw_knn['dist'])[:, :6].astype(np.float32)
-        lr_p = d['lr_primitives'].astype(np.float32)
+    is_wall_bl = idw_knn is not None and idw_knn.get('mode') == 'wall'
+    if idw_knn is not None and (is_wall_bl or 'idx' in idw_knn):
+        if is_wall_bl:
+            call_fn = lambda: predict_wall_baseline(
+                d, case['mach_in'], case['aoa_in'], idw_knn['wd_exp'], k=6)
+        else:
+            idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
+            dist_idw = np.asarray(idw_knn['dist'])[:, :6].astype(np.float32)
+            lr_p = d['lr_primitives'].astype(np.float32)
+            call_fn = lambda: predict_idw(lr_p, idx_idw, dist_idw, k=6)
 
-        prim0, times = _timed_repeat(
-            lambda: predict_idw(lr_p, idx_idw, dist_idw, k=6), n_repeat)
+        prim0, times = _timed_repeat(call_fn, n_repeat)
         mach = to_mach(prim0)
         li, lw, w2v = _field_errs(prim0)
         wm, am = _aero(prim0)
+        name = idw_baseline_name(is_wall_bl)
         idw_row = {
-            'name': 'LR IDW', 'prim_preds': [prim0], 'mach_preds': [mach],
+            'name': name, 'prim_preds': [prim0], 'mach_preds': [mach],
             'l2': [l2_rel(mach, mach_ref) if mach_ref is not None else None],
             'linf': [li], 'l2w': [lw], 'w2': [w2v], 'time_ms': times,
             'wall_mach': [wm], 'aero': [am],
         }
         l2_disp = f'{idw_row["l2"][0]:.4f}' if idw_row['l2'][0] is not None else 'N/A'
-        print(f"  [LR IDW]  L2={l2_disp}  médiane {np.median(times):.3f}ms "
+        print(f"  [{name}]  L2={l2_disp}  médiane {np.median(times):.3f}ms "
               f"({n_repeat} tirs)")
 
     # Modèles

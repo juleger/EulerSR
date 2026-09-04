@@ -12,7 +12,8 @@ from eval.loader import ModelEntry
 from eval.testset import TestSet, _find_val_cases
 from eval.core import (mesh_geom_from_case, build_hr_feat, build_lr_feat, build_wall_feat,
                        build_features, predict_det, predict_ensemble, predict_wall_baseline,
-                       make_batch_predict, run_batched, _BATCH_SIZE, _resolve_mach_norm)
+                       make_batch_predict, run_batched, _BATCH_SIZE, _resolve_mach_norm,
+                       idw_baseline_name)
 from utils.refs import to_mach
 from utils.metrics import (compute_field_errors, l2_rel, aero_metrics,
                             enthalpy_rms, entropy_violation, fvm_euler_rms,
@@ -227,10 +228,10 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
     # Baseline "sans réseau" : IDW volumique (LR complet) ou baseline bord
     # (idw_knn['mode']=='wall'), selon le testset -- cf. TestSet.build_idw_knn.
     is_wall_bl = idw_knn is not None and idw_knn.get('mode') == 'wall'
-    # Nom interne toujours 'LR IDW' (~10 endroits dans utils/viz/eval.py et
-    # combined.py s'appuient sur cette chaîne littérale pour repérer la ligne
-    # baseline) -- seul le CONTENU calculé change en mode wall, cf. plus bas.
-    idw_row = {'name': 'LR IDW', 'prim_preds': [], 'mach_preds': [],
+    # Nom de la baseline dépendant du mode : 'LR IDW' (volumique) et 'Extrap. Bord'
+    # (wall) sont de nature différente, cf. eval.core.idw_baseline_name.
+    # utils/viz/eval.py et combined.py matchent sur IDW_BASELINE_NAMES.
+    idw_row = {'name': idw_baseline_name(is_wall_bl), 'prim_preds': [], 'mach_preds': [],
                 'l2': [], 'linf': [], 'l2w': [], 'w2': [], 'time_ms': [],
                 'wall_mach': [], 'aero': []}
     if idw_knn is not None and (is_wall_bl or 'idx' in idw_knn):
@@ -317,7 +318,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
 
     det_models = [m for m in models if m.kind == 'det']
     is_wall_bl = idw_knn is not None and idw_knn.get('mode') == 'wall'
-    _bl_name = 'LR IDW'  # nom interne fixe, cf. remarque _run_ref_cases -- seul le contenu change
+    _bl_name = idw_baseline_name(is_wall_bl)  # cf. remarque _run_ref_cases
     method_names = ([_bl_name] if idw_knn is not None else []) +                   [ts.display_name(m) for m in models]
 
     results: dict[str, dict] = {

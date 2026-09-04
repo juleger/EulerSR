@@ -88,7 +88,12 @@ def main():
     for entry in model_entries:
         knn_map[entry.name] = ts.build_knn(entry)
         print(f"  [{entry.name}]  {ts.ood_label(entry)}")
-    idw_knn = ts.build_idw_knn(k=6)
+    # Mode bord si TOUS les modèles chargés sont des modèles bord, même règle que
+    # eval/runner.py. Change la nature de la baseline sans réseau : LR IDW n'a aucun
+    # sens pour un modèle qui n'a jamais accès au champ LR.
+    is_wall_eval = bool(model_entries) and all(
+        hasattr(e.model, 'wall_encoder') for e in model_entries)
+    idw_knn = ts.build_idw_knn(k=6, wall=is_wall_eval)
 
     print(f"\n── Campagne de convergence ({len(cases)} cas) ────────────────")
     t0 = time.perf_counter()

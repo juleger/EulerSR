@@ -11,6 +11,7 @@ from scipy.stats import gaussian_kde
 from scipy.interpolate import griddata
 
 from utils.viz._style import _DPI, CMAP_FIELD as _CMAP_FIELD, CMAP_ERR as _CMAP_ERR
+from eval.core import IDW_BASELINE_NAMES
 
 # Okabe-Ito — palette colorblind-safe, standard publications scientifiques
 _METHOD_COLORS = [
@@ -158,7 +159,7 @@ def plot_reference_grid(results: dict, triang, out_path: Path):
     err_cols: list[dict] = []
     if any(has_ref):
         if results['idw']:
-            err_cols.append({'name': 'LR IDW', 'mach_preds': results['idw']['mach_preds'],
+            err_cols.append({'name': results['idw']['name'], 'mach_preds': results['idw']['mach_preds'],
                              'w2': results['idw'].get('w2', [])})
         for row in results['rows']:
             err_cols.append({'name': row['name'], 'mach_preds': row['mach_preds'],
@@ -483,7 +484,7 @@ def plot_error_kde(dataset_results: dict, out_dir: Path):
 def _heatmap_metric(dataset_results: dict, all_cases: list[dict], out_dir: Path,
                     metric_key: str, metric_label: str, fname: str):
     methods = [nm for nm in dataset_results
-               if not nm.startswith('_') and nm not in ('GT', 'HR', 'LR IDW')
+               if not nm.startswith('_') and nm not in ({'GT', 'HR'} | IDW_BASELINE_NAMES)
                and metric_key in dataset_results.get(nm, {})]
     if not methods:
         return
@@ -555,7 +556,7 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
     meilleur/pire modèle par colonne sans reparser les chaînes formatées."""
     methods = []
     if results_ref.get('idw'):
-        methods.append('LR IDW')
+        methods.append(results_ref['idw']['name'])
     for row in results_ref.get('rows', []):
         methods.append(row['name'])
     if not methods and dataset_results:
@@ -576,7 +577,7 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
             v = float(np.nanmean(t))
             if np.isfinite(v) and v > 0:
                 return v
-        src = results_ref.get('idw') if nm == 'LR IDW' else next(
+        src = results_ref.get('idw') if nm in IDW_BASELINE_NAMES else next(
             (r for r in results_ref.get('rows', []) if r['name'] == nm), None)
         if src:
             return float(np.nanmean(src.get('time_ms', [np.nan])))
@@ -731,7 +732,7 @@ def _fvm_avg_time_text(geometry: str | None, hr_res: float | None,
 
 
 def _color_table_gradient(tbl, raw: list[list[float]], row_names: list[str],
-                          n_metric_cols: int, exclude: frozenset[str] = frozenset({'LR IDW'})):
+                          n_metric_cols: int, exclude: frozenset[str] = IDW_BASELINE_NAMES):
     """Colore une table matplotlib (lignes 1..len(row_names), colonnes
     0..n_metric_cols) selon un gradient RdYlGn_r continu *par colonne*
     (vert = meilleur/plus bas, rouge = pire/plus haut), calculé parmi les
@@ -875,7 +876,7 @@ def plot_single_case_table(results: dict, out_dir: Path, fvm_live: dict | None =
     if not rows:
         return
 
-    methods = (['LR IDW'] if results.get('idw') else []) + \
+    methods = ([results['idw']['name']] if results.get('idw') else []) + \
               [row['name'] for row in results.get('rows', [])]
 
     # La 1ère colonne (méthode) peut porter le détail d'échantillonnage
@@ -898,7 +899,7 @@ def plot_single_case_table(results: dict, out_dir: Path, fvm_live: dict | None =
 
     _GRAY, _GREEN, _RED = '#c9c9c9', '#a5d6a7', '#ef9a9a'
     n_metric_cols = len(col_labels) - 1
-    model_idx = [i for i, nm in enumerate(methods) if nm != 'LR IDW']
+    model_idx = [i for i, nm in enumerate(methods) if nm not in IDW_BASELINE_NAMES]
     best_i: list[int | None] = [None] * n_metric_cols
     worst_i: list[int | None] = [None] * n_metric_cols
     for j in range(n_metric_cols):
@@ -909,7 +910,7 @@ def plot_single_case_table(results: dict, out_dir: Path, fvm_live: dict | None =
 
     for i in range(1, len(rows) + 1):
         ri = i - 1
-        is_idw = methods[ri] == 'LR IDW'
+        is_idw = methods[ri] in IDW_BASELINE_NAMES
         for j in range(len(col_labels)):
             cell = tbl[i, j]
             if is_idw:

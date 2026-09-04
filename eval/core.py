@@ -18,6 +18,18 @@ from utils.coords import center_scale
 _PRIM_NAMES = ['rho', 'u', 'v', 'p']
 _BATCH_SIZE = 16
 
+# Nom de la ligne baseline sans réseau, de deux natures selon le testset :
+#   volumique (DAM/FAM/SIAM) : vraie interpolation IDW d'un champ LR simulé.
+#   wall (FAMWall/DAMWall)   : IDW du bord mélangé au freestream, sans aucun champ
+#     LR. Nom distinct pour ne pas laisser croire à une interpolation d'un champ LR.
+IDW_BASELINE_NAME_VOL = 'LR IDW'
+IDW_BASELINE_NAME_WALL = 'Extrap. Bord'
+IDW_BASELINE_NAMES = frozenset({IDW_BASELINE_NAME_VOL, IDW_BASELINE_NAME_WALL})
+
+
+def idw_baseline_name(is_wall: bool) -> str:
+    return IDW_BASELINE_NAME_WALL if is_wall else IDW_BASELINE_NAME_VOL
+
 # Features
 @dataclass(frozen=True)
 class _MeshGeom:
