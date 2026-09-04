@@ -25,6 +25,13 @@
 #
 #   # Exclure les cas Mach>2 (tf solveur raccourci, cf. logs/euler/*)
 #   MACH_MAX=2.0 sbatch slurm/eval_sr.sbatch results/checkpoints/run42/FAM.pkl
+#
+#   # Mode apparié : modele[i] evalue UNIQUEMENT sur testset[i] (1:1), un modele
+#   # par checkpoint passe en argument, dans le meme ordre que TESTSETS
+#   PAIRED=1 TESTSETS="diamond diamond_half diamond_quarter diamond_nw10" \
+#     sbatch slurm/eval_sr.sbatch results/checkpoints/FAMWALL_N84/FAMWall.pkl \
+#     results/checkpoints/FAMWALL_N42/FAMWall.pkl results/checkpoints/FAMWALL_N21/FAMWall.pkl \
+#     results/checkpoints/FAMWALL_N10/FAMWall.pkl
 
 set -euo pipefail
 
@@ -55,6 +62,7 @@ GEOM_CFG_SCALE_SWEEP="${GEOM_CFG_SCALE_SWEEP:-}"
 CFG_SCALE_SWEEP="${CFG_SCALE_SWEEP:-}"
 N_STEPS_SWEEP="${N_STEPS_SWEEP:-}"
 N_SAMPLES_SWEEP="${N_SAMPLES_SWEEP:-}"
+PAIRED="${PAIRED:-0}"
 
 mkdir -p logs "${OUT_DIR}"
 if [[ -n "${OUT_DIRS}" ]]; then
@@ -82,6 +90,7 @@ echo "mach_max          : ${MACH_MAX:-<aucun>}"
 echo "out_dir           : ${OUT_DIR}"
 echo "full_eval         : ${FULL_EVAL}  (n_eval=${N_EVAL})"
 echo "batch_size        : ${BATCH_SIZE}"
+echo "paired            : ${PAIRED}"
 nvidia-smi || true
 echo "##############################################################"
 
@@ -103,6 +112,7 @@ fi
 [[ -n "${N_STEPS_SWEEP}"   ]] && EXTRA_ARGS+=(--n_steps_sweep   ${N_STEPS_SWEEP})
 [[ -n "${N_SAMPLES_SWEEP}" ]] && EXTRA_ARGS+=(--n_samples_sweep ${N_SAMPLES_SWEEP})
 [[ -n "${CFG_SCALE_SWEEP}" ]] && EXTRA_ARGS+=(--cfg_scale_sweep ${CFG_SCALE_SWEEP})
+[[ "${PAIRED}" == "1" ]] && EXTRA_ARGS+=(--paired)
 
 echo "[$(date +%T)] Démarrage évaluation SR-CFD"
 

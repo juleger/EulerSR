@@ -35,6 +35,158 @@ def _parse_testset_spec(spec: str, data_root: Path,
     return DataLayout.from_root(data_root, geometry, lr_res, hr_res)
 
 
+def _run_paired(args, testsets: list[TestSet], out_dir: Path) -> None:
+    """Mode --paired : model[i] évalué uniquement sur testsets[i], chaque modèle avec
+    sa propre condition d'entrée (ex. FAMWall entraînés à des N_wall différents). Les
+    inférences se calculent séparément par paire, car load_sample dérive le store
+    d'observations de bord du chemin des test_cases, puis sont fusionnées en un seul
+    jeu de résultats avant de tracer. Le testset canonique (mesh, triang et GT
+    partagés) est testsets[0] : 'cases', HR et baseline viennent de cette première
+    paire, seule la ligne de chaque modèle est injectée depuis la sienne."""
+    from eval.runner import _run_ref_cases, _run_sweep, _plot_ref, _plot_sweep, \
+        _save_summary_csv, _maybe_recalibrate
+    from utils.gt_cache import load_or_build_gt_cache
+    from utils.viz.eval import _summary_methods_rows
+    import numpy as np
+
+    t0 = time.perf_counter()
+    n_eval = args.n_eval if args.full_eval else 0
+    canonical_ts = testsets[0]
+    out = out_dir / f'{canonical_ts.tag}__paired'
+    out.mkdir(parents=True, exist_ok=True)
+
+    merged_ref: dict | None = None
+    merged_sweep: dict | None = None
+    merged_cases = None
+    entries = []
+
+    print("\n── Mode apparié fusionné (chaque modèle sur son propre testset, "
+          "tracé comme un seul) ──")
+    for ckpt, ts in zip(args.models, testsets):
+        entry = load_model(Path(ckpt), ts.layout)
+        if args.n_steps is not None and hasattr(entry.model, 'n_steps'):
+            entry.model.n_steps = args.n_steps
+        if args.n_samples is not None and hasattr(entry.model, 'n_samples'):
+            entry.model.n_samples = args.n_samples
+        if args.cfg_scale is not None and hasattr(entry.model, 'cfg_scale'):
+            entry.model.cfg_scale = args.cfg_scale
+        if args.geom_cfg_scale is not None and hasattr(entry.model, 'geom_cfg_scale'):
+            entry.model.geom_cfg_scale = args.geom_cfg_scale
+        print(f"  {entry.name} [{entry.kind}]  <-> {ts.tag}")
+        entries.append(entry)
+
+        knn_map = {entry.name: ts.build_knn(entry)}
+        calib_excluded = _maybe_recalibrate([entry], ts, knn_map)
+        is_wall_eval = hasattr(entry.model, 'wall_encoder')
+        idw_knn = ts.build_idw_knn(k=6, wall=is_wall_eval)
+
+        if ts.ref_cases:
+            ref_res = _run_ref_cases([entry], ts, knn_map, idw_knn)
+            if merged_ref is None:
+                merged_ref = {'cases': ref_res['cases'], 'rows': [], 'idw': ref_res['idw']}
+            merged_ref['rows'].extend(ref_res['rows'])
+
+        test_cases = [c for c in ts.test_cases if c['path'] not in calib_excluded]
+        if not test_cases and ts.test_cases:
+            print(f"  [sweep] {ts.tag} : {len(ts.test_cases)} cas de test, tous "
+                  f"consommes par la calibration, sweep saute.")
+        if test_cases:
+            cases = test_cases[:n_eval] if n_eval > 0 else test_cases
+            mesh_hr = np.load(ts.layout.mesh_path(ts.hr_res), allow_pickle=True).item()
+            mu_gt = ts.stats['mu'].astype(np.float64)
+            gt_cache = load_or_build_gt_cache(ts.layout, cases, ts.wc, mesh=mesh_hr, mu=mu_gt)
+            sweep_res = _run_sweep([entry], ts, knn_map, cases, gt_cache,
+                                   args.batch_size, idw_knn)
+            model_key = ts.display_name(entry)
+            if merged_sweep is None:
+                merged_sweep = dict(sweep_res)  # HR + baseline du 1er pair, gardes tels quels
+                merged_cases = cases
+            else:
+                merged_sweep[model_key] = sweep_res[model_key]
+
+    ts_label = f"Comparaison appariée ({', '.join(e.name for e in entries)})"
+    if merged_ref:
+        merged_ref['_ts_label'] = ts_label
+        _plot_ref(merged_ref, canonical_ts, out)
+    if merged_sweep:
+        merged_sweep['_ts_label'] = ts_label
+        _plot_sweep(merged_sweep, merged_cases, canonical_ts, out)
+        _save_summary_csv(merged_ref, merged_sweep, out / 'summary.csv')
+
+    # Figure de sensibilité additionnelle, une courbe ou barre par modèle et jamais
+    # la baseline. Pas de tableau ici : summary_table.png ci-dessus couvre déjà ce rôle.
+    if merged_ref or merged_sweep:
+        methods, col_labels, _rows, raw = _summary_methods_rows(merged_ref or {}, merged_sweep)
+        model_names = methods[-len(entries):]
+        model_raw = raw[-len(entries):]
+        if model_raw:
+            _plot_paired_sensitivity(col_labels, model_raw, model_names, out)
+
+    elapsed = time.perf_counter() - t0
+    print(f"\nTerminé en {elapsed:.1f}s (mode apparié fusionné), résultats dans {out}/")
+
+
+def _plot_paired_sensitivity(col_labels: list, raw: list, names: list, out_dir: Path) -> None:
+    """Courbes métrique vs N_wall quand un N numérique est extrait des noms de modèles
+    (convention 'N<N>' ou 'Nw<N>'), sinon barres groupées sur un axe catégoriel. Même
+    dégradé RdYlGn_r que summary_table.png."""
+    import re
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize, LogNorm
+
+    metric_labels = col_labels[1:]  # sans 'Méthode'
+    raw = np.asarray(raw, dtype=float)  # (n_models, n_metrics), memes colonnes que metric_labels
+    # 'Temps/cas' n'a pas sa place dans un panel de qualité, exclu en amont pour que
+    # la grille de subplots n'ait pas de case vide.
+    metric_idx = [i for i, lbl in enumerate(metric_labels) if lbl != 'Temps/cas']
+    metric_labels = [metric_labels[i] for i in metric_idx]
+    n_metrics = len(metric_labels)
+    if n_metrics == 0:
+        return
+
+    x_num = []
+    for nm in names:
+        m = re.search(r'Nw?(\d+)', nm)
+        x_num.append(int(m.group(1)) if m else None)
+    has_numeric_x = all(x is not None for x in x_num) and len(set(x_num)) > 1
+
+    cmap = plt.get_cmap('RdYlGn_r')
+    ncols = min(n_metrics, 4)
+    nrows = -(-n_metrics // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.2 * ncols, 3.4 * nrows), dpi=140, squeeze=False)
+    axes_flat = axes.flatten()
+    for k, (label, col_i) in enumerate(zip(metric_labels, metric_idx)):
+        axp = axes_flat[k]
+        col = raw[:, col_i]
+        vmin, vmax = float(np.nanmin(col)), float(np.nanmax(col))
+        norm = ((LogNorm(vmin=vmin, vmax=vmax) if (vmin > 0 and vmax / vmin > 5)
+                 else Normalize(vmin=vmin, vmax=vmax)) if vmax > vmin else None)
+        colors = [cmap(norm(v)) if norm is not None else '#2c3e50' for v in col]
+        if has_numeric_x:
+            order = np.argsort(x_num)
+            xs = np.array(x_num)[order]
+            ys = col[order]
+            axp.plot(xs, ys, '-', color='#c9c9c9', zorder=1)
+            axp.scatter(xs, ys, c=[colors[i] for i in order], s=90,
+                       edgecolors='#2c3e50', linewidths=0.8, zorder=2)
+            axp.set_xlabel('N_wall (capteurs)')
+        else:
+            axp.bar(range(len(names)), col, color=colors, edgecolor='#2c3e50', linewidth=0.8)
+            axp.set_xticks(range(len(names))); axp.set_xticklabels(names, rotation=30, ha='right')
+        clean_label = label.replace('$', '').replace('\\', '').replace('{', '').replace('}', '')
+        axp.set_title(clean_label)
+        axp.set_yscale('log')
+        axp.grid(True, alpha=0.3)
+    for k in range(n_metrics, len(axes_flat)):
+        axes_flat[k].axis('off')
+    fig.suptitle('Sensibilité par modèle (mode apparié)', fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    sens_path = out_dir / 'paired_sensitivity.png'
+    plt.savefig(sens_path, dpi=140, bbox_inches='tight'); plt.close(fig)
+    print(f"  > {sens_path.name}")
+
+
 def main():
     p = argparse.ArgumentParser(
         description='Évaluation SR-CFD',
@@ -55,6 +207,12 @@ def main():
 
             # exclure les cas Mach>2 (tf solveur raccourci sur la plupart des géométries, cf. logs/euler/*)
             %(prog)s --data data/ --models m.pkl --testsets naca0012 --mach_max 2.0
+
+            # mode apparie : modele[i] evalue uniquement sur testset[i], pas de produit
+            # croise. Ex. plusieurs FAMWall entraines chacun sur son propre N_wall.
+            %(prog)s --data data/ --paired \\
+                --models m_84.pkl m_42.pkl m_21.pkl m_10.pkl \\
+                --testsets diamond diamond_half diamond_quarter diamond_nw10
             """)
     p.add_argument('--data', required=True, help='Racine des données (ex: data/)')
     p.add_argument('--models', nargs='+', required=True, help='Chemins vers les checkpoints (.pkl)')
@@ -82,17 +240,24 @@ def main():
                    help="Override geom_cfg_scale (guidance CFG sur la geometrie, FAM/SIAM ; "
                         "1.0 = desactive, defaut: valeur du checkpoint)")
     p.add_argument('--n_steps_sweep', type=int, nargs='+', default=None,
-                   help='Balaie plusieurs n_steps pour UN SEUL modèle (--models à 1 checkpoint) : '
-                        'toutes les valeurs sont évaluées ensemble et apparaissent sur les mêmes graphes.')
+                   help="Balaie plusieurs n_steps pour --models[0] : toutes les valeurs sont "
+                        "évaluées ensemble et apparaissent sur les mêmes graphes. Les modèles "
+                        "--models[1:] sont ajoutés tels quels, une seule fois, hors sweep.")
     p.add_argument('--n_samples_sweep', type=int, nargs='+', default=None,
-                   help='Balaie plusieurs n_samples pour UN SEUL modèle (--models à 1 checkpoint), '
+                   help='Balaie plusieurs n_samples pour --models[0] (cf. --n_steps_sweep), '
                         'combiné en produit cartésien avec --n_steps_sweep si les deux sont donnés.')
     p.add_argument('--geom_cfg_scale_sweep', type=float, nargs='+', default=None,
-                   help='Balaie plusieurs geom_cfg_scale pour UN SEUL modèle (--models à 1 checkpoint), '
+                   help='Balaie plusieurs geom_cfg_scale pour --models[0] (cf. --n_steps_sweep), '
                         'combiné en produit cartésien avec --n_steps_sweep/--n_samples_sweep si donnés.')
     p.add_argument('--cfg_scale_sweep', type=float, nargs='+', default=None,
-                   help='Balaie plusieurs cfg_scale (guidance Mach/AoA) pour UN SEUL modèle '
-                        '(--models à 1 checkpoint), combiné en produit cartésien avec les autres sweeps si donnés.')
+                   help='Balaie plusieurs cfg_scale (guidance Mach/AoA) pour --models[0] '
+                        '(cf. --n_steps_sweep), combiné en produit cartésien avec les autres sweeps si donnés.')
+    p.add_argument('--paired', action='store_true',
+                   help="Chaque --models[i] evalue uniquement sur --testsets[i] (appariement "
+                        "1:1 au lieu du produit croise habituel), pour comparer des modeles "
+                        "ayant chacun leur propre distribution d'entree (ex. FAMWall entraines "
+                        "a des N_wall differents). --models et --testsets doivent avoir la "
+                        "meme longueur.")
     args = p.parse_args()
 
     data_root = Path(args.data)
@@ -116,12 +281,17 @@ def main():
 
     primary_layout = testsets[0].layout
 
+    if args.paired:
+        if len(args.models) != len(testsets):
+            p.error("--paired requiert autant de --models que de --testsets "
+                    f"({len(args.models)} vs {len(testsets)})")
+        return _run_paired(args, testsets, out_dir)
+
     print("\n── Chargement des modèles ──────────────────────────────────")
     model_entries = []
     if args.n_steps_sweep or args.n_samples_sweep or args.geom_cfg_scale_sweep or args.cfg_scale_sweep:
-        if len(args.models) != 1:
-            p.error('--n_steps_sweep/--n_samples_sweep/--geom_cfg_scale_sweep/--cfg_scale_sweep '
-                    'requiert exactement un modèle dans --models')
+        # Le sweep s'applique au premier modele de --models. Les suivants (ex. un DAM de
+        # reference) sont ajoutes tels quels, une seule fois, comme au chemin sans sweep.
         base_entry = load_model(Path(args.models[0]), primary_layout)
         graphdef, state = nnx.split(base_entry.model)
         steps_vals = args.n_steps_sweep or [args.n_steps]
@@ -153,6 +323,18 @@ def main():
                                            cfg=base_entry.cfg, layout=base_entry.layout)
                         print(f"  {entry.name} [{entry.kind}]  OK")
                         model_entries.append(entry)
+        for ckpt in args.models[1:]:
+            entry = load_model(Path(ckpt), primary_layout)
+            if args.n_steps is not None and hasattr(entry.model, 'n_steps'):
+                entry.model.n_steps = args.n_steps
+            if args.n_samples is not None and hasattr(entry.model, 'n_samples'):
+                entry.model.n_samples = args.n_samples
+            if args.cfg_scale is not None and hasattr(entry.model, 'cfg_scale'):
+                entry.model.cfg_scale = args.cfg_scale
+            if args.geom_cfg_scale is not None and hasattr(entry.model, 'geom_cfg_scale'):
+                entry.model.geom_cfg_scale = args.geom_cfg_scale
+            print(f"  {entry.name} [{entry.kind}]  OK  (référence fixe, hors sweep)")
+            model_entries.append(entry)
     else:
         for ckpt in args.models:
             entry = load_model(Path(ckpt), primary_layout)
