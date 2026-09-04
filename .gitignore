@@ -4,10 +4,10 @@ uv.lock
 *.egg-info
 results/**/*.npy 
 logs/
-results_bkp/
+results_bkp
 .DS_Store
 results/
-figures/
+figures
 data/
 data_figures/
 res_bkp/
@@ -16,5 +16,6 @@ archive/
 tex/
 *.log
 report/
-_archive/
+_archive
 configs/experiments/
+biblio/
