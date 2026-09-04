@@ -116,6 +116,9 @@ class FAM(SRModel):
         # conditionnement (Mach, AoA, LR, géométrie), entraînée par une loss auxiliaire
         self._learned_res_scale = bool(flow.get('learned_res_scale', False))
         self.lambda_res_scale = float(flow.get('lambda_res_scale', 0.1))
+        # false reproduit le comportement d'avant le fix du token nul (rs_pred = rs_raw,
+        # jamais le geom_id droppe), reserve a l'ablation A/B.
+        self._res_scale_fix = bool(flow.get('res_scale_fix', True))
         if self._learned_res_scale:
             # Tous les nouveaux attributs (y compris log_scale_bias) doivent être initialisés à zéro
             # pour que la prédiction initiale de res_scale soit identique au buffer calibré sur la vérité terrain (res_scale.value).
@@ -318,11 +321,15 @@ class FAM(SRModel):
         v = self.velocity(x_t, t, ctx, knn_g, scal=scal_used)
         loss = aux['loss_fn'](v, r - x0, wt)
         if self._learned_res_scale and self.lambda_res_scale > 0:
-            # Loss auxiliaire : régresse rs_raw (avec gradient) vers le std réel du résidu
-            # de CE cas (r*rs = résidu physique)
+            # Loss auxiliaire : régresse la prédiction de res_scale vers le std réel du
+            # résidu de CE cas, cible calculée sur le vrai geom_id. rs_pred reprend le ctx
+            # d'APRÈS le dropout CFG, sans quoi la ligne du token nul de scale_geom_emb
+            # ne recevrait jamais de gradient alors que c'est elle qui sert en OOD.
+            rs_pred = (self._predicted_res_scale(ctx)
+                       if self.geom_cfg_prob > 0 and self._res_scale_fix else rs_raw)
             true_std = jnp.maximum((r * rs).std(axis=0), 1e-6)
             loss = loss + self.lambda_res_scale * jnp.mean(
-                (jnp.log(rs_raw) - jnp.log(true_std)) ** 2)
+                (jnp.log(rs_pred) - jnp.log(true_std)) ** 2)
         # r_hat = x_t + (1-t)*v : extrapolation Euler un pas vers t=1 (endpoint prédit).
         # Si v == v* = r - x0 exactement, r_hat == r quel que soit t -- sert de base à la
         # fois au soft-loss physique et à la loss d'endpoint direct ci-dessous.

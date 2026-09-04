@@ -505,9 +505,14 @@ class FAMWall(_WallBackboneMixin, SRModel):
         v = self.velocity(x_t, t, ctx, knn_g, scal=scal_used)
         loss = aux['loss_fn'](v, r - x0, wt)
         if self._learned_res_scale and self.lambda_res_scale > 0:
+            # Loss auxiliaire : régresse la prédiction de res_scale vers le std réel du
+            # résidu de CE cas, cible calculée sur le vrai geom_id. rs_pred reprend le ctx
+            # d'APRÈS le dropout CFG, sans quoi la ligne du token nul de scale_geom_emb
+            # ne recevrait jamais de gradient alors que c'est elle qui sert en OOD.
+            rs_pred = self._predicted_res_scale(ctx) if self.geom_cfg_prob > 0 else rs_raw
             true_std = jnp.maximum((r * rs).std(axis=0), 1e-6)
             loss = loss + self.lambda_res_scale * jnp.mean(
-                (jnp.log(rs_raw) - jnp.log(true_std)) ** 2)
+                (jnp.log(rs_pred) - jnp.log(true_std)) ** 2)
         if aux['lambda_phys'] > 0 or aux['lambda_enthalpy'] > 0 or aux.get('use_endpoint', False):
             r_hat = x_t + (1.0 - t) * v
             if aux.get('use_endpoint', False):
