@@ -144,7 +144,11 @@ def export_snapshot(W, mesh, t, cfg, out_dirs, helper, inlet=None):
     return diagnostics
 
 
-def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=None, converged=None, stopping_step=None):
+def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=None, converged=None,
+                       stopping_step=None, compile_time_s=None, solve_time_s=None,
+                       stationarity_patience=None, engineering_converged=None,
+                       engineering_stopping_step=None, engineering_target_cd=None,
+                       engineering_target_cl=None):
     return {
         "case": cfg["case"],
         "h": mesh.metadata.get("h"),
@@ -157,7 +161,18 @@ def build_run_summary(cfg, mesh, cd, cl, delta_s, wall_time_s, stationarity_rel=
         "stopping_step": int(stopping_step) if stopping_step is not None else None,
         "stationarity_threshold": float(cfg.get("stationarity_threshold")) if cfg.get("stationarity_threshold") is not None else None,
         "stationarity_check_every": int(cfg.get("stationarity_check_every")) if cfg.get("stationarity_check_every") is not None else None,
+        # Patience du critère résidu et découpage compilation XLA / résolution
+        # effective de wall_time_s, cf. euler/main.py::run.
+        "stationarity_patience": int(stationarity_patience) if stationarity_patience is not None else None,
         "wall_time_s": float(wall_time_s),
+        "compile_time_s": float(compile_time_s) if compile_time_s is not None else None,
+        "solve_time_s": float(solve_time_s) if solve_time_s is not None else None,
+        # Critère ingénieur optionnel (Cd/Cl vs cible), suivi en parallèle du critère
+        # résidu qui reste seul maître de l'arrêt du solveur.
+        "engineering_converged": bool(engineering_converged) if engineering_converged is not None else None,
+        "engineering_stopping_step": int(engineering_stopping_step) if engineering_stopping_step is not None else None,
+        "engineering_target_cd": float(engineering_target_cd) if engineering_target_cd is not None else None,
+        "engineering_target_cl": float(engineering_target_cl) if engineering_target_cl is not None else None,
         "time_scheme": cfg["time_scheme"],
         "flux": cfg["flux"],
         "reconstruction": cfg["reconstruction"],

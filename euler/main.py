@@ -56,6 +56,62 @@ def run(W, mesh, inlet, cfg, out_dirs):
     exp = cfg["export"]
     stationarity_threshold = float(cfg.get("stationarity_threshold"))
     stationarity_check_every = int(cfg.get("stationarity_check_every"))
+    # Nombre de checks consécutifs sous le seuil requis avant de déclarer la stationnarité
+    stationarity_patience = max(1, int(cfg.get("stationarity_patience", 1)))
+
+    # Critère ingénieur, suivi en parallèle du critère résidu qui reste seul maître
+    # de l'arrêt du solveur : à quelle itération C_D et C_L entrent-ils durablement
+    # dans une tolérance relative de leurs cibles (typiquement celles du champ HR) ?
+    # Inactif sans cibles fournies, donc jamais en génération de dataset.
+    target_cd = cfg.get("engineering_target_cd")
+    target_cl = cfg.get("engineering_target_cl")
+    track_engineering = target_cd is not None and target_cl is not None
+    if track_engineering:
+        # tolérances relatives (fraction de |cible|) : Cd/Cl varient de plusieurs
+        # ordres de grandeur selon Mach/AoA.
+        cd_tol_abs = float(cfg.get("engineering_cd_tol", 0.001)) * max(abs(target_cd), 1e-8)
+        cl_tol_abs = float(cfg.get("engineering_cl_tol", 0.001)) * max(abs(target_cl), 1e-8)
+        engineering_patience = max(1, int(cfg.get("engineering_patience", stationarity_patience)))
+        rho_inf, p_inf, gamma_cfg = cfg["rho_inf"], cfg["p_inf"], cfg["gamma"]
+        U_inf_eng = cfg["Mach"] * float(np.sqrt(gamma_cfg * p_inf / rho_inf))
+        L_ref_eng = mesh.metadata.get("obstacle_length")
+        if L_ref_eng is None:
+            raise ValueError(
+                "engineering_target_cd/cl fournis mais mesh.metadata ne contient pas "
+                "'obstacle_length' (cas sans coefficients de force ?).")
+
+        wall_marker = int(helper._mesh_metadata(mesh).get("force_marker", 2))
+        face_markers_np = np.asarray(mesh.face_markers)
+        face_conn_np = np.asarray(mesh.face_connectivity)
+        wall_faces_np = np.where(face_markers_np == wall_marker)[0]
+        if wall_faces_np.size == 0:
+            raise ValueError(f"Aucune face de paroi trouvée (force_marker={wall_marker}) pour ce maillage.")
+        cell_ids_np = np.array([int(np.argmax(np.any(face_conn_np == fid, axis=1))) for fid in wall_faces_np])
+        local_faces_np = np.array([int(np.argmax(face_conn_np[cid] == fid))
+                                    for cid, fid in zip(cell_ids_np, wall_faces_np)])
+        cell_ids_eng = jnp.asarray(cell_ids_np)
+        normals_wall = np.asarray(mesh.normals)[cell_ids_np, local_faces_np]
+        nx_wall = jnp.asarray(normals_wall[:, 0])
+        ny_wall = jnp.asarray(normals_wall[:, 1])
+        ds_wall = jnp.asarray(np.asarray(mesh.surface)[wall_faces_np])
+        q_inf_eng = 0.5 * rho_inf * U_inf_eng ** 2
+
+        def _forces(W_state):
+            P = helper.getPrimitive(W_state)[:, 3]
+            P_wall = P[cell_ids_eng]
+            cd = jnp.sum(P_wall * nx_wall * ds_wall) / (q_inf_eng * L_ref_eng)
+            cl = jnp.sum(P_wall * ny_wall * ds_wall) / (q_inf_eng * L_ref_eng)
+            return cd, cl
+
+        # Le premier check n'arrive qu'au pas stationarity_check_every
+        cd0, cl0 = _forces(W)
+        eng_ok0 = jnp.logical_and(jnp.abs(cd0 - target_cd) <= cd_tol_abs,
+                                   jnp.abs(cl0 - target_cl) <= cl_tol_abs)
+        eng_streak_init = jnp.where(eng_ok0, 1, 0).astype(jnp.int32)
+        eng_streak_start_init = jnp.asarray(0, dtype=jnp.int32)
+    else:
+        eng_streak_init = jnp.asarray(0, dtype=jnp.int32)
+        eng_streak_start_init = jnp.asarray(0, dtype=jnp.int32)
 
     # Calcul dt selon CFL (fixe dans ce cas)
     if 0.6 < cfg["Mach"] < 1.1 and cfg["CFL"] > 0.45:
@@ -81,10 +137,10 @@ def run(W, mesh, inlet, cfg, out_dirs):
 
     if verbose:
         print("\nRésolution numérique en cours...")
-    start_time = time.time()
 
     def scan_body(carry, _):
-        W, W_ref, ref_step, last_stationarity_rel, stop, current_step, stopping_step = carry
+        (W, W_ref, ref_step, last_stationarity_rel, stop, current_step, stopping_step,
+         streak, streak_start, eng_stop, eng_streak, eng_streak_start, eng_stopping_step) = carry
         next_step = current_step + 1
 
         W_next = jax.lax.cond(stop, lambda _: W, lambda _: fn(W, mesh, dt, **kw), operand=None)
@@ -94,12 +150,35 @@ def run(W, mesh, inlet, cfg, out_dirs):
             block_steps = jnp.maximum(1, next_step - ref_step)
             delta_W = W_next - W_ref
             rel = jnp.linalg.norm(delta_W) / (block_steps * (jnp.linalg.norm(W_ref) + 1e-16))
-            stop_new = rel <= stationarity_threshold
-            stopping_step_new = jnp.where(jnp.logical_and(jnp.logical_not(stop), stop_new), next_step, stopping_step)
-            return (W_next, W_next, next_step, rel, jnp.logical_or(stop, stop_new), next_step, stopping_step_new), None
+            under = rel <= stationarity_threshold
+            new_streak = jnp.where(under, streak + 1, 0)
+            new_streak_start = jnp.where(jnp.logical_and(under, streak == 0), next_step, streak_start)
+            confirmed = jnp.logical_and(new_streak >= stationarity_patience, jnp.logical_not(stop))
+            stop_new = jnp.logical_or(stop, confirmed)
+            stopping_step_new = jnp.where(confirmed, new_streak_start, stopping_step)
+
+            if track_engineering:
+                cd, cl = _forces(W_next)
+                eng_under = jnp.logical_and(jnp.abs(cd - target_cd) <= cd_tol_abs,
+                                             jnp.abs(cl - target_cl) <= cl_tol_abs)
+                new_eng_streak = jnp.where(eng_under, eng_streak + 1, 0)
+                new_eng_streak_start = jnp.where(
+                    jnp.logical_and(eng_under, eng_streak == 0), next_step, eng_streak_start)
+                eng_confirmed = jnp.logical_and(new_eng_streak >= engineering_patience,
+                                                 jnp.logical_not(eng_stop))
+                eng_stop_new = jnp.logical_or(eng_stop, eng_confirmed)
+                eng_stopping_step_new = jnp.where(eng_confirmed, new_eng_streak_start, eng_stopping_step)
+            else:
+                new_eng_streak, new_eng_streak_start = eng_streak, eng_streak_start
+                eng_stop_new, eng_stopping_step_new = eng_stop, eng_stopping_step
+
+            return (W_next, W_next, next_step, rel, stop_new, next_step, stopping_step_new,
+                    new_streak, new_streak_start, eng_stop_new, new_eng_streak,
+                    new_eng_streak_start, eng_stopping_step_new), None
 
         def no_check(_):
-            return (W_next, W_ref, ref_step, last_stationarity_rel, stop, next_step, stopping_step), None
+            return (W_next, W_ref, ref_step, last_stationarity_rel, stop, next_step, stopping_step,
+                    streak, streak_start, eng_stop, eng_streak, eng_streak_start, eng_stopping_step), None
 
         return jax.lax.cond(check_now, do_check, no_check, operand=None)
 
@@ -111,22 +190,48 @@ def run(W, mesh, inlet, cfg, out_dirs):
         jnp.asarray(False),
         jnp.asarray(0, dtype=jnp.int32),
         jnp.asarray(N, dtype=jnp.int32),
+        jnp.asarray(0, dtype=jnp.int32),
+        jnp.asarray(0, dtype=jnp.int32),
+        jnp.asarray(False),
+        eng_streak_init,
+        eng_streak_start_init,
+        jnp.asarray(N, dtype=jnp.int32),
     )
-    final_carry, _ = jax.lax.scan(scan_body, init_carry, None, length=N)
-    W, _, _, last_stationarity_rel, converged, stopping_step, stopping_step = final_carry
-    jax.block_until_ready(W)
+
+    def _run_scan(carry0):
+        return jax.lax.scan(scan_body, carry0, None, length=N)
+
+    # Compilation XLA et exécution mesurées séparément : la compilation est quasi
+    # fixe et indépendante du nombre d'itérations, donc la compter fait paraître un
+    # warm-start rapide moins rapide qu'il ne l'est (cf. eval/convergence_case.py).
+    if verbose:
+        print("\nCompilation JIT du solveur (scan complet)...")
+    compile_start = time.time()
+    compiled_scan = jax.jit(_run_scan).lower(init_carry).compile()
+    compile_time_s = time.time() - compile_start
+
+    solve_start = time.time()
+    final_carry, _ = compiled_scan(init_carry)
+    jax.block_until_ready(final_carry)
+    solve_time_s = time.time() - solve_start
+
+    (W, _, _, last_stationarity_rel, converged, _, stopping_step,
+     _, _, eng_converged, _, _, eng_stopping_step) = final_carry
 
     current_step = int(stopping_step)
     converged = bool(converged)
     stopping_step = int(stopping_step)
     last_stationarity_rel = float(last_stationarity_rel)
+    eng_converged = bool(eng_converged) if track_engineering else None
+    eng_stopping_step = int(eng_stopping_step) if track_engineering else None
 
     W_probe = fn(W, mesh, dt, **kw)
     jax.block_until_ready(W_probe)
     final_residual = float(jnp.linalg.norm(W_probe - W) / (jnp.linalg.norm(W) + 1e-16))
-    
-    end_time = time.time()
-    wall_time_s = end_time - start_time
+
+    # wall_time_s = compilation + résolution ; le probe de résidu final, un seul pas
+    # déjà compilé, est négligeable et n'est pas compté.
+    wall_time_s = compile_time_s + solve_time_s
     final_time = current_step * float(dt)
     snapshot_name = format_snapshot_name(cfg, final_time)
     if verbose:
@@ -148,8 +253,17 @@ def run(W, mesh, inlet, cfg, out_dirs):
         delta_S = helper.get_entropy_creation(W_initial, W, mesh, gamma=cfg["gamma"])
         if verbose:
             print(f"C_D = {C_D:.6f}, C_L = {C_L:.6f}, ΔS = {delta_S:.6e}")
-        summary = build_run_summary(cfg, mesh, C_D, C_L, delta_S, wall_time_s,
-            stationarity_rel=final_residual, converged=converged, stopping_step=stopping_step)
+            if track_engineering:
+                print(f"Critère ingénieur (Cd/Cl à ±{cfg.get('engineering_cd_tol', 0.01):.1%} de la cible, "
+                      f"{engineering_patience} checks consécutifs) : "
+                      f"converged={eng_converged}, stopping_step={eng_stopping_step}")
+        summary = build_run_summary(
+            cfg, mesh, C_D, C_L, delta_S, wall_time_s,
+            stationarity_rel=final_residual, converged=converged, stopping_step=stopping_step,
+            compile_time_s=compile_time_s, solve_time_s=solve_time_s,
+            stationarity_patience=stationarity_patience,
+            engineering_converged=eng_converged, engineering_stopping_step=eng_stopping_step,
+            engineering_target_cd=target_cd, engineering_target_cl=target_cl)
 
     if exp.get("summary", True) and summary is not None:
         export_run_summary(out_dirs, summary, snapshot_name, verbose=verbose)

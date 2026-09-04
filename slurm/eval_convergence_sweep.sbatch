@@ -41,7 +41,15 @@ HR_RES="${HR_RES:-0.025}"
 STRIDE_MACH="${STRIDE_MACH:-4}"
 STRIDE_AOA="${STRIDE_AOA:-4}"
 MAX_CASES="${MAX_CASES:-60}"
-CONVERGENCE_THRESHOLD="${CONVERGENCE_THRESHOLD:-}"
+# Hystérésis du critère résidu (nb de checks consécutifs sous le seuil) et
+# tolérances relatives du critère ingénieur (Cd/Cl vs cible HR). Défauts de
+# eval.live_fvm si non fournis, cf. eval/convergence_case.py.
+PATIENCE="${PATIENCE:-}"
+CD_TOL="${CD_TOL:-}"
+CL_TOL="${CL_TOL:-}"
+N_STEPS="${N_STEPS:-}"
+NO_IDW="${NO_IDW:-0}"
+NO_PIPELINE_TIME="${NO_PIPELINE_TIME:-0}"
 OUT_DIR="${OUT_DIR:-results/convergence_sweep/}"
 
 mkdir -p logs "${OUT_DIR}"
@@ -69,7 +77,12 @@ nvidia-smi || true
 echo "##############################################################"
 
 EXTRA_ARGS=()
-[[ -n "${CONVERGENCE_THRESHOLD}" ]] && EXTRA_ARGS+=(--convergence_threshold "${CONVERGENCE_THRESHOLD}")
+[[ -n "${PATIENCE}" ]] && EXTRA_ARGS+=(--patience "${PATIENCE}")
+[[ -n "${CD_TOL}" ]] && EXTRA_ARGS+=(--cd_tol "${CD_TOL}")
+[[ -n "${CL_TOL}" ]] && EXTRA_ARGS+=(--cl_tol "${CL_TOL}")
+[[ -n "${N_STEPS}" ]] && EXTRA_ARGS+=(--n_steps "${N_STEPS}")
+[[ "${NO_IDW}" == "1" ]] && EXTRA_ARGS+=(--no_idw)
+[[ "${NO_PIPELINE_TIME}" == "1" ]] && EXTRA_ARGS+=(--no_pipeline_time)
 
 echo "[$(date +%T)] Démarrage campagne de convergence"
 

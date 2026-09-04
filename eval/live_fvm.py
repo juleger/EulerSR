@@ -25,6 +25,7 @@ _DEFAULT_THRESHOLD = 1e-8
 _TIME_LINE_RE = re.compile(r'Simulation termin.+? en ([\d.]+)s')
 _SUMMARY_JSON_RE = re.compile(r'^FVM_SUMMARY_JSON=(.+)$', re.MULTILINE)
 _PROBE_JSON_RE = re.compile(r'^FVM_PROBE_JSON=(.+)$', re.MULTILINE)
+_FORCES_JSON_RE = re.compile(r'^FVM_FORCES_JSON=(.+)$', re.MULTILINE)
 
 _CACHE_PATH = REPO_ROOT / 'results' / 'eval_case' / '_fvm_time_cache.json'
 _SCRATCH_DIR = REPO_ROOT / 'results' / 'eval_case' / '_fvm_scratch'
@@ -37,6 +38,13 @@ _DEFAULT_CHECK_EVERY = 5
 # Seuil par défaut de solve_convergence, distinct de _DEFAULT_THRESHOLD (celui
 # de la génération du dataset, trop strict pour reconverger en pratique).
 _DEFAULT_CONVERGENCE_THRESHOLD = 1e-5
+# Nb de checks consécutifs sous le seuil avant de déclarer la stationnarité :
+# sans ça, un creux transitoire de résidu gèle le champ sur un seul point de
+# contrôle. >1 ici, contrairement au défaut du solveur qui reste 1 pour ne rien
+# changer à la génération de dataset.
+_DEFAULT_PATIENCE = 3
+# Tolérance relative par défaut du critère ingénieur (Cd/Cl vs cible HR).
+_DEFAULT_ENGINEERING_TOL = 0.001
 
 
 def _cache_key(geometry: str, res_h: float, mach: float, aoa: float) -> str:
@@ -44,10 +52,20 @@ def _cache_key(geometry: str, res_h: float, mach: float, aoa: float) -> str:
 
 
 def _convergence_cache_key(geometry: str, res_h: float, mach: float, aoa: float, label: str,
-                            tf: float | None, check_every: int, threshold: float) -> str:
+                            tf: float | None, check_every: int, threshold: float,
+                            patience: int = 1, target_cd: float | None = None,
+                            target_cl: float | None = None, cd_tol: float = _DEFAULT_ENGINEERING_TOL,
+                            cl_tol: float = _DEFAULT_ENGINEERING_TOL,
+                            engineering_patience: int | None = None) -> str:
     safe_label = re.sub(r'[^A-Za-z0-9_.-]+', '_', label).strip('_') or 'run'
+    # patience et cibles ingénieur inclus dans la clé : changer le critère de
+    # convergence doit invalider le cache, pas réutiliser un résumé calculé avec
+    # l'ancien critère.
+    eng = (f'|target_cd={target_cd!r}|target_cl={target_cl!r}|cd_tol={cd_tol:g}|'
+           f'cl_tol={cl_tol:g}|eng_patience={engineering_patience!r}'
+           if target_cd is not None else '')
     return (f'{geometry}|h={res_h:g}|M={mach:.4f}|AoA={aoa:.4f}|label={safe_label}|'
-            f'tf={tf!r}|check_every={check_every}|threshold={threshold:.6e}')
+            f'tf={tf!r}|check_every={check_every}|threshold={threshold:.6e}|patience={patience}{eng}')
 
 
 def _load_cache(cache_path: Path) -> dict:
@@ -124,11 +142,22 @@ def solve_case_cached(layout, mach: float, aoa: float, res_h: float,
 def solve_convergence(layout, mach: float, aoa: float, res_h: float,
                        init_prim: np.ndarray | None = None,
                        tf: float | None = None, threshold: float = _DEFAULT_CONVERGENCE_THRESHOLD,
-                       check_every: int = _DEFAULT_CHECK_EVERY,
+                       check_every: int = _DEFAULT_CHECK_EVERY, patience: int = _DEFAULT_PATIENCE,
+                       target_cd: float | None = None, target_cl: float | None = None,
+                       cd_tol: float = _DEFAULT_ENGINEERING_TOL, cl_tol: float = _DEFAULT_ENGINEERING_TOL,
+                       engineering_patience: int | None = None,
                        scratch_dir: Path = _SCRATCH_DIR, label: str = 'run') -> dict:
     """Résout (mach, aoa) jusqu'à stationnarité, depuis l'IC freestream
     (init_prim=None, cold start) ou un champ de primitives fourni (warm
-    start). Retourne le résumé de run (stopping_step, converged, ...)."""
+    start). Retourne le résumé de run (stopping_step, converged, ...).
+
+    'patience' checks consécutifs sous 'threshold' sont requis avant de déclarer la
+    stationnarité, et c'est toujours ce critère qui gèle le solveur.
+
+    Si 'target_cd'/'target_cl' sont fournis (typiquement les Cd/Cl du champ HR, via
+    probe_forces), un critère ingénieur est suivi en parallèle : itération à partir
+    de laquelle Cd et Cl restent dans cd_tol/cl_tol de leur cible. Il n'affecte
+    jamais l'arrêt du solveur."""
     geometry = layout.geometry
     if tf is None:
         tf = _DEFAULT_TF.get(geometry, _DEFAULT_TF_FALLBACK)
@@ -143,7 +172,13 @@ def solve_convergence(layout, mach: float, aoa: float, res_h: float,
            '--mach', str(float(mach)), '--aoa', str(float(aoa)),
            '--tf', str(float(tf)), '--stationarity-threshold', str(float(threshold)),
            '--stationarity-check-every', str(int(check_every)),
+           '--stationarity-patience', str(int(patience)),
            '--scratch-dir', str(scratch), '--emit-summary']
+
+    if target_cd is not None and target_cl is not None:
+        cmd += ['--target-cd', str(float(target_cd)), '--target-cl', str(float(target_cl)),
+                '--cd-tol', str(float(cd_tol)), '--cl-tol', str(float(cl_tol)),
+                '--engineering-patience', str(int(engineering_patience if engineering_patience is not None else patience))]
 
     if init_prim is not None:
         init_path = scratch / 'init_field.npy'
@@ -175,20 +210,28 @@ def solve_convergence(layout, mach: float, aoa: float, res_h: float,
 def solve_convergence_cached(layout, mach: float, aoa: float, res_h: float,
                               init_prim: np.ndarray | None = None, tf: float | None = None,
                               threshold: float = _DEFAULT_CONVERGENCE_THRESHOLD,
-                              check_every: int = _DEFAULT_CHECK_EVERY,
+                              check_every: int = _DEFAULT_CHECK_EVERY, patience: int = _DEFAULT_PATIENCE,
+                              target_cd: float | None = None, target_cl: float | None = None,
+                              cd_tol: float = _DEFAULT_ENGINEERING_TOL, cl_tol: float = _DEFAULT_ENGINEERING_TOL,
+                              engineering_patience: int | None = None,
                               scratch_dir: Path = _SCRATCH_DIR,
                               label: str = 'run', force: bool = False,
                               cache_path: Path = _CONVERGENCE_CACHE_PATH) -> dict:
     """Comme solve_convergence, mais met en cache le résumé sur disque par
-    (géométrie, h, mach, aoa, label, tf, check_every, threshold)."""
-    key = _convergence_cache_key(layout.geometry, res_h, mach, aoa, label, tf, check_every, threshold)
+    (géométrie, h, mach, aoa, label, tf, check_every, threshold, patience,
+    cibles ingénieur) : changer un de ces paramètres invalide le cache."""
+    key = _convergence_cache_key(layout.geometry, res_h, mach, aoa, label, tf, check_every, threshold,
+                                  patience=patience, target_cd=target_cd, target_cl=target_cl,
+                                  cd_tol=cd_tol, cl_tol=cl_tol, engineering_patience=engineering_patience)
     cache = _load_cache(cache_path)
 
     if not force and key in cache:
         return {**cache[key], 'from_cache': True}
 
     summary = solve_convergence(layout, mach, aoa, res_h, init_prim=init_prim, tf=tf,
-                                 threshold=threshold, check_every=check_every,
+                                 threshold=threshold, check_every=check_every, patience=patience,
+                                 target_cd=target_cd, target_cl=target_cl, cd_tol=cd_tol, cl_tol=cl_tol,
+                                 engineering_patience=engineering_patience,
                                  scratch_dir=scratch_dir, label=label)
     cache[key] = summary
     _save_cache(cache_path, cache)
@@ -228,6 +271,43 @@ def probe_residual(layout, mach: float, aoa: float, res_h: float, prim: np.ndarr
     if m is None:
         raise RuntimeError(
             f"Impossible de récupérer le résidu depuis la sortie du probe "
+            f"(géométrie={geometry}, h={res_h}, M={mach}, AoA={aoa}).\n"
+            f"stdout:\n{proc.stdout[-2000:]}")
+    return json.loads(m.group(1))
+
+
+def probe_forces(layout, mach: float, aoa: float, res_h: float, prim: np.ndarray,
+                  scratch_dir: Path = _SCRATCH_DIR) -> dict:
+    """C_D/C_L d'un champ de primitives (N,4), sans évolution temporelle. Fournit
+    les cibles du critère ingénieur dans eval.convergence_case."""
+    geometry = layout.geometry
+    scratch = Path(scratch_dir) / geometry / f'h{res_h:g}' / 'forces'
+    scratch.mkdir(parents=True, exist_ok=True)
+    _JAX_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    init_path = scratch / f'forces_field_M{mach:.4f}_A{aoa:.4f}.npy'
+    np.save(init_path, np.asarray(prim, dtype=np.float64))
+
+    cmd = [sys.executable, str(_WORKER),
+           '--case', geometry, '--mesh-path', str(layout.mesh_path(res_h)),
+           '--mach', str(float(mach)), '--aoa', str(float(aoa)),
+           '--tf', '1.0', '--stationarity-threshold', '1e-30',
+           '--scratch-dir', str(scratch), '--init-field', str(init_path), '--forces-only']
+
+    env = {**os.environ,
+           'JAX_ENABLE_X64': 'true',
+           'JAX_COMPILATION_CACHE_DIR': str(_JAX_CACHE_DIR)}
+
+    proc = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Échec du probe Cd/Cl (géométrie={geometry}, h={res_h}, M={mach}, "
+            f"AoA={aoa}) :\n{proc.stderr[-4000:]}")
+
+    m = _FORCES_JSON_RE.search(proc.stdout)
+    if m is None:
+        raise RuntimeError(
+            f"Impossible de récupérer Cd/Cl depuis la sortie du probe "
             f"(géométrie={geometry}, h={res_h}, M={mach}, AoA={aoa}).\n"
             f"stdout:\n{proc.stdout[-2000:]}")
     return json.loads(m.group(1))

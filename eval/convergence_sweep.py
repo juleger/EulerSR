@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 
 from eval.single_case import run_single_case
 from eval.convergence_case import run_convergence_case
+from eval.live_fvm import _DEFAULT_PATIENCE, _DEFAULT_ENGINEERING_TOL
 from utils.layout import load_sample
 
 
@@ -40,8 +41,13 @@ def select_sweep_cases(test_cases: list[dict], stride_mach: int = 4, stride_aoa:
 
 def run_convergence_sweep(ts, models, idw_knn, knn_map, cases: list[dict], res_h: float,
                            tf: float | None = None,
-                           check_every: int | None = None) -> list[dict]:
-    """Lance eval.convergence_case.run_convergence_case sur chaque cas de 'cases' """
+                           check_every: int | None = None,
+                           patience: int = _DEFAULT_PATIENCE,
+                           cd_tol: float = _DEFAULT_ENGINEERING_TOL,
+                           cl_tol: float = _DEFAULT_ENGINEERING_TOL,
+                           include_idw: bool = True,
+                           lr_solve_time_s: float | None = None) -> list[dict]:
+    """Lance eval.convergence_case.run_convergence_case sur chaque cas de 'cases'."""
     from eval.live_fvm import _DEFAULT_CHECK_EVERY
     check_every = _DEFAULT_CHECK_EVERY if check_every is None else check_every
 
@@ -53,10 +59,12 @@ def run_convergence_sweep(ts, models, idw_knn, knn_map, cases: list[dict], res_h
               f"AoA={case['aoa_in']:+.1f}°) ===")
         try:
             d = load_sample(case['path'], case.get('raw_hr_path'))
-            results = run_single_case(models, ts, case, d, idw_knn, knn_map, n_repeat=1)
+            results = run_single_case(models, ts, case, d, idw_knn if include_idw else None, knn_map,
+                                       n_repeat=1)
             summaries = run_convergence_case(
                 results, ts.layout, case['mach_in'], case['aoa_in'], res_h,
-                tf=tf, check_every=check_every)
+                tf=tf, check_every=check_every, patience=patience, cd_tol=cd_tol, cl_tol=cl_tol,
+                include_idw=include_idw, lr_solve_time_s=lr_solve_time_s)
         except Exception as e:
             print(f"  [ERREUR] cas {label} sauté : {e}")
             continue
@@ -75,35 +83,128 @@ def _fmt(value, spec: str | None = None) -> str:
 
 
 def print_sweep_summary(rows: list[dict]) -> None:
+    """Deux blocs, comme print_convergence_table : le résidu puis l'ingénieur. Les
+    deux ratios de speedup (itérations et temps de résolution) sont côte à côte dans
+    le bloc résidu ; ils divergent surtout pour les warm-starts rapides."""
     names = list(dict.fromkeys(r['name'] for r in rows))  # ordre d'apparition, dédupliqué
     header = (f"{'Champ initial':<28}{'n cas':>8}{'converged':>12}"
-              f"{'itér. moy.':>14}{'itér. médiane':>16}{'accél. moy.':>14}")
-    print('\n' + header)
+              f"{'itér. moy.':>14}{'itér. médiane':>16}{'accél. itér.':>14}{'accél. temps':>14}"
+              f"{'accél. pipeline':>17}")
+    print('\n=== Critère résidu (arrêt réel du solveur) ===')
+    print(header)
     print('-' * len(header))
     for name in names:
         sub = [r for r in rows if r['name'] == name]
         steps = [r['stopping_step'] for r in sub if r.get('stopping_step') is not None]
-        speedups = [r['speedup_vs_coldstart'] for r in sub if r.get('speedup_vs_coldstart') is not None]
+        speedups_it = [r['speedup_iterations'] for r in sub if r.get('speedup_iterations') is not None]
+        speedups_t = [r['speedup_solve_time'] for r in sub if r.get('speedup_solve_time') is not None]
+        speedups_p = [r['speedup_pipeline'] for r in sub if r.get('speedup_pipeline') is not None]
         n_conv = sum(1 for r in sub if r.get('converged'))
         print(
             f"{name:<28}{len(sub):>8}{f'{n_conv}/{len(sub)}':>12}"
             f"{_fmt(np.mean(steps) if steps else None, '.1f'):>14}"
             f"{_fmt(np.median(steps) if steps else None, '.1f'):>16}"
-            f"{_fmt(np.mean(speedups) if speedups else None, '.2f'):>14}"
+            f"{_fmt(np.mean(speedups_it) if speedups_it else None, '.2f'):>14}"
+            f"{_fmt(np.mean(speedups_t) if speedups_t else None, '.2f'):>14}"
+            f"{_fmt(np.mean(speedups_p) if speedups_p else None, '.2f'):>17}"
         )
+
+    if any(r.get('engineering_target_cd') is not None for r in rows):
+        header2 = (f"{'Champ initial':<28}{'n cas':>8}{'converged':>12}"
+                   f"{'itér. moy.':>14}{'itér. médiane':>16}{'accél. moy.':>14}")
+        print('\n=== Critère ingénieur (Cd/Cl vs cible HR) ===')
+        print(header2)
+        print('-' * len(header2))
+        for name in names:
+            sub = [r for r in rows if r['name'] == name]
+            steps = [r['engineering_stopping_step'] for r in sub if r.get('engineering_stopping_step') is not None]
+            speedups = [r['speedup_engineering'] for r in sub if r.get('speedup_engineering') is not None]
+            n_conv = sum(1 for r in sub if r.get('engineering_converged'))
+            print(
+                f"{name:<28}{len(sub):>8}{f'{n_conv}/{len(sub)}':>12}"
+                f"{_fmt(np.mean(steps) if steps else None, '.1f'):>14}"
+                f"{_fmt(np.median(steps) if steps else None, '.1f'):>16}"
+                f"{_fmt(np.mean(speedups) if speedups else None, '.2f'):>14}"
+            )
 
 
 def save_sweep_csv(rows: list[dict], path: Path) -> None:
+    """Détail brut, une ligne par (cas, champ initial). Pour un rapport, plutôt
+    save_sweep_summary_csv."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = ['case_label', 'mach', 'aoa', 'name', 'stopping_step', 'converged',
-              'stationarity_rel', 'threshold_used', 'speedup_vs_coldstart',
-              'wall_time_s', 'h', 'n_cells']
+              'stationarity_rel', 'threshold_used', 'speedup_iterations', 'speedup_solve_time',
+              'speedup_pipeline', 'engineering_stopping_step', 'engineering_converged',
+              'speedup_engineering', 'engineering_target_cd', 'engineering_target_cl',
+              'wall_time_s', 'compile_time_s', 'solve_time_s', 'infer_time_s',
+              'total_pipeline_time_s', 'h', 'n_cells']
     with open(path, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction='ignore')
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+
+
+def save_sweep_summary_csv(rows: list[dict], path: Path) -> None:
+    """Synthèse pour rapport : une ligne par champ initial, stats globales du sweep
+    seulement. Les deux critères restent dans des colonnes préfixées distinctes."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    names = list(dict.fromkeys(r['name'] for r in rows))
+
+    def _stats(vals):
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            return (None, None, None)
+        return (float(np.mean(vals)), float(np.median(vals)), float(np.std(vals)))
+
+    fields = ['name', 'n_cases',
+              'residual_n_converged', 'residual_convergence_rate',
+              'residual_iterations_mean', 'residual_iterations_median', 'residual_iterations_std',
+              'residual_speedup_iterations_mean', 'residual_speedup_iterations_median',
+              'residual_speedup_solve_time_mean', 'residual_speedup_solve_time_median',
+              'residual_speedup_pipeline_mean', 'residual_speedup_pipeline_median',
+              'pipeline_time_s_mean', 'pipeline_time_s_median',
+              'engineering_n_converged', 'engineering_convergence_rate',
+              'engineering_iterations_mean', 'engineering_iterations_median',
+              'engineering_speedup_mean', 'engineering_speedup_median']
+
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fields)
+        writer.writeheader()
+        for name in names:
+            sub = [r for r in rows if r['name'] == name]
+            n = len(sub)
+            it_mean, it_med, it_std = _stats([r.get('stopping_step') for r in sub])
+            sp_it_mean, sp_it_med, _ = _stats([r.get('speedup_iterations') for r in sub])
+            sp_t_mean, sp_t_med, _ = _stats([r.get('speedup_solve_time') for r in sub])
+            sp_pipe_mean, sp_pipe_med, _ = _stats([r.get('speedup_pipeline') for r in sub])
+            pipe_mean, pipe_med, _ = _stats([r.get('total_pipeline_time_s') for r in sub])
+            eng_it_mean, eng_it_med, _ = _stats([r.get('engineering_stopping_step') for r in sub])
+            sp_eng_mean, sp_eng_med, _ = _stats([r.get('speedup_engineering') for r in sub])
+            n_conv = sum(1 for r in sub if r.get('converged'))
+            n_eng_conv = sum(1 for r in sub if r.get('engineering_converged'))
+            writer.writerow({
+                'name': name, 'n_cases': n,
+                'residual_n_converged': n_conv,
+                'residual_convergence_rate': n_conv / n if n else None,
+                'residual_iterations_mean': it_mean, 'residual_iterations_median': it_med,
+                'residual_iterations_std': it_std,
+                'residual_speedup_iterations_mean': sp_it_mean,
+                'residual_speedup_iterations_median': sp_it_med,
+                'residual_speedup_solve_time_mean': sp_t_mean,
+                'residual_speedup_solve_time_median': sp_t_med,
+                'residual_speedup_pipeline_mean': sp_pipe_mean,
+                'residual_speedup_pipeline_median': sp_pipe_med,
+                'pipeline_time_s_mean': pipe_mean, 'pipeline_time_s_median': pipe_med,
+                'engineering_n_converged': n_eng_conv,
+                'engineering_convergence_rate': n_eng_conv / n if n else None,
+                'engineering_iterations_mean': eng_it_mean,
+                'engineering_iterations_median': eng_it_med,
+                'engineering_speedup_mean': sp_eng_mean,
+                'engineering_speedup_median': sp_eng_med,
+            })
 
 
 def _build_grid(rows: list[dict], name: str, value_key: str):
@@ -117,10 +218,18 @@ def _build_grid(rows: list[dict], name: str, value_key: str):
     return np.array(machs), np.array(aoas), grid
 
 
+_TRIVIAL_SPEEDUP_LABELS = {'cold-start (freestream)', 'HR (référence)'}
+
+
 def plot_convergence_heatmaps(rows: list[dict], out_dir: Path,
                                value_key: str = 'stopping_step') -> Path | None:
-    """Heatmap Mach/AoA du nb d'itérations pour chaque champ initial (name) de rows, sauvegardée dans out_dir."""
+    """Heatmap Mach/AoA du nb d'itérations pour chaque champ initial (name) de rows, sauvegardée dans out_dir.
+
+    Pour les value_key 'speedup_*', le cold-start et le HR de référence sont exclus :
+    leur accélération vis-à-vis d'eux-mêmes est triviale et ne montre rien."""
     names = list(dict.fromkeys(r['name'] for r in rows))
+    if value_key.startswith('speedup_'):
+        names = [n for n in names if n not in _TRIVIAL_SPEEDUP_LABELS]
     grids = {name: _build_grid(rows, name, value_key) for name in names}
     grids = {k: v for k, v in grids.items() if v[0].size >= 2 and v[1].size >= 2}
     if not grids:

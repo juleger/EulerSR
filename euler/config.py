@@ -40,6 +40,7 @@ def build_config_from_cli(default_cfg):
     parser.add_argument("--aoa", type=float, default=default_cfg.get("aoa", 0.0), help="Angle d'attaque en degrés (utilisé pour le cas diamond)")
     parser.add_argument("--stationarity-threshold", type=float, default=default_cfg.get("stationarity_threshold", 1e-6), help="Seuil d'arrêt sur le résidu relatif")
     parser.add_argument("--stationarity-check-every", type=int, default=default_cfg.get("stationarity_check_every", 25), help="Nombre de pas entre deux tests de stationnarité")
+    parser.add_argument("--stationarity-patience", type=int, default=default_cfg.get("stationarity_patience", 1), help="Nb de checks consécutifs sous le seuil requis avant de déclarer la stationnarité (1 = pas d'hystérésis, comportement historique)")
     parser.add_argument("--verbose", dest="verbose", action="store_true", default=default_cfg.get("verbose", True), help="Affiche les logs détaillés de la simulation")
     parser.add_argument("--quiet", dest="verbose", action="store_false", help="Mode concis : uniquement les infos principales au début et le temps de simulation à la fin")
     args = parser.parse_args()
@@ -54,6 +55,7 @@ def build_config_from_cli(default_cfg):
     cfg["aoa"] = float(args.aoa)
     cfg["stationarity_threshold"] = float(args.stationarity_threshold)
     cfg["stationarity_check_every"] = max(1, int(args.stationarity_check_every))
+    cfg["stationarity_patience"] = max(1, int(args.stationarity_patience))
     cfg["verbose"] = bool(args.verbose)
     return cfg
 
@@ -163,7 +165,7 @@ def print_config(cfg, mesh, out_dirs):
     print("Solveur")
     print(f"  scheme FVM : {cfg['flux']}, {reconstruction}, {time_scheme}")
     print(f"  CFL : {cfg['CFL']}, tf={cfg['tf']}")
-    print(f"  stationarity_threshold={cfg.get('stationarity_threshold', 'n/a')} | check_every={cfg.get('stationarity_check_every', 'n/a')}")
+    print(f"  stationarity_threshold={cfg.get('stationarity_threshold', 'n/a')} | check_every={cfg.get('stationarity_check_every', 'n/a')} | patience={cfg.get('stationarity_patience', 1)}")
     try:
         import jax
         print(f"  Parallélisation JAX : {jax.default_backend()} (device count: {jax.device_count()})")

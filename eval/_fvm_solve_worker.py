@@ -7,6 +7,10 @@ JAX_ENABLE_X64 doit être true ici mais false pour le reste de l'outil.
 Par défaut, imprime juste le temps solveur. --emit-summary ajoute le résumé
 de run en JSON. --init-field démarre en warm start depuis un champ fourni au
 lieu de l'IC freestream. --probe-only ne calcule que le résidu d'un pas.
+--forces-only ne calcule que C_D/C_L d'un champ fourni, sans évolution.
+--stationarity-patience pilote l'hystérésis du critère résidu, et
+--target-cd/--target-cl/--cd-tol/--cl-tol le critère ingénieur suivi en
+parallèle (cf. euler/main.py::run).
 """
 from __future__ import annotations
 import argparse
@@ -35,12 +39,27 @@ def main() -> int:
     ap.add_argument('--scratch-dir', required=True)
     ap.add_argument('--stationarity-check-every', type=int, default=None,
                      help='Override de stationarity_check_every (défaut config.toml : 10000)')
+    ap.add_argument('--stationarity-patience', type=int, default=1,
+                     help="Nb de checks consécutifs sous le seuil avant de déclarer la stationnarité "
+                          "(hystérésis anti faux-positif ; 1 = comportement historique)")
+    ap.add_argument('--target-cd', type=float, default=None,
+                     help="Active le critère ingénieur : cible C_D (typiquement celle du champ HR)")
+    ap.add_argument('--target-cl', type=float, default=None,
+                     help="Active le critère ingénieur : cible C_L (typiquement celle du champ HR)")
+    ap.add_argument('--cd-tol', type=float, default=0.001,
+                     help="Tolérance RELATIVE sur C_D (fraction de |target-cd|, défaut 0.1%%)")
+    ap.add_argument('--cl-tol', type=float, default=0.001,
+                     help="Tolérance RELATIVE sur C_L (fraction de |target-cl|, défaut 0.1%%)")
+    ap.add_argument('--engineering-patience', type=int, default=None,
+                     help="Patience du critère ingénieur (défaut : même valeur que --stationarity-patience)")
     ap.add_argument('--init-field', default=None,
                      help='Chemin vers un .npy (N,4) de primitives pour démarrer en warm-start')
     ap.add_argument('--emit-summary', action='store_true',
                      help="Imprime le résumé de run en JSON ('FVM_SUMMARY_JSON=...')")
     ap.add_argument('--probe-only', action='store_true',
                      help="Avec --init-field : résidu d'UN pas seulement ('FVM_PROBE_JSON=...')")
+    ap.add_argument('--forces-only', action='store_true',
+                     help="Avec --init-field : C_D/C_L de ce champ seul, sans évolution ('FVM_FORCES_JSON=...')")
     args = ap.parse_args()
 
     from euler import main as euler_main
@@ -53,6 +72,15 @@ def main() -> int:
                verbose=False)
     if args.stationarity_check_every is not None:
         cfg['stationarity_check_every'] = args.stationarity_check_every
+    cfg['stationarity_patience'] = max(1, int(args.stationarity_patience))
+    if args.target_cd is not None and args.target_cl is not None:
+        cfg['engineering_target_cd'] = float(args.target_cd)
+        cfg['engineering_target_cl'] = float(args.target_cl)
+        cfg['engineering_cd_tol'] = float(args.cd_tol)
+        cfg['engineering_cl_tol'] = float(args.cl_tol)
+        cfg['engineering_patience'] = (int(args.engineering_patience)
+                                        if args.engineering_patience is not None
+                                        else cfg['stationarity_patience'])
     # Aucune écriture de champ/figure sous data/raw/ : seul le résumé JSON
     # (scratch uniquement) est optionnellement exporté, via --emit-summary.
     cfg['export'] = dict(results=False, figures=[], graph=False,
@@ -75,6 +103,19 @@ def main() -> int:
                 f"({mesh.area.shape[0]}, 4) pour ce maillage.")
         W = euler_main.helper.getConserved(
             euler_main.jnp.asarray(prim_init), gamma=cfg['gamma'], M=1.0)
+
+    if args.forces_only:
+        if not args.init_field:
+            raise SystemExit('--forces-only nécessite --init-field.')
+        rho_inf, p_inf, gamma = cfg['rho_inf'], cfg['p_inf'], cfg['gamma']
+        U_inf = cfg['Mach'] * float((gamma * p_inf / rho_inf) ** 0.5)
+        L_ref = mesh.metadata.get('obstacle_length')
+        if L_ref is None:
+            raise SystemExit(f"mesh.metadata ne contient pas 'obstacle_length' (case='{args.case}').")
+        cd = float(euler_main.helper.get_drag_coefficient(W, mesh, rho_inf=rho_inf, U_inf=U_inf, L_ref=L_ref))
+        cl = float(euler_main.helper.get_lift_coefficient(W, mesh, rho_inf=rho_inf, U_inf=U_inf, L_ref=L_ref))
+        print('FVM_FORCES_JSON=' + json.dumps({'cd': cd, 'cl': cl}))
+        return 0
 
     if args.probe_only:
         if not args.init_field:
