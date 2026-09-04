@@ -81,12 +81,33 @@ def _maybe_recalibrate(models: list[ModelEntry], ts: TestSet, knn_map: dict[str,
 
     Utilise les stats d'entraînement du modèle (mu_train/sig_train) pour normaliser les features et les targets.
     """
+    # Seuls les FAM à res_scale buffer sont concernés : avec learned_res_scale,
+    # FAM._res_scale ignore le buffer qu'on recalibrerait ici, donc la calibration
+    # serait sans effet tout en consommant des cas du sweep.
+    needs_calib = [m for m in models
+                   if type(m.model).__name__ == 'FAM' and not m.model._learned_res_scale]
+    if not needs_calib:
+        return set()
+
     val_cases = _find_val_cases(ts.layout)
     pool = val_cases or ts.test_cases or ts.ref_cases
     if not pool:
         return set()
-    calib_cases = _stratified_sample(pool, n_calib)
-    excluded = set() if val_cases else {c['path'] for c in calib_cases}
+    if val_cases:
+        calib_cases = _stratified_sample(pool, n_calib)
+        excluded = set()
+    elif len(pool) <= 1:
+        # Pool trop petit pour separer calibration et sweep : on accepte de calibrer
+        # et de noter sur le meme cas plutot que de vider le sweep.
+        calib_cases = pool
+        excluded = set()
+    else:
+        # Pool = les cas de sweep eux-memes (geometrie ou resolution OOD sans split
+        # 'val') : les exclure du sweep apres calibration. Plafonne a len(pool)-1 pour
+        # qu'un petit pool ne soit pas entierement mange par la calibration.
+        n_calib_capped = min(n_calib, len(pool) - 1)
+        calib_cases = _stratified_sample(pool, n_calib_capped)
+        excluded = {c['path'] for c in calib_cases}
 
     pool_aoa = [c['aoa_in'] for c in pool]
     calib_aoa = [c['aoa_in'] for c in calib_cases]
@@ -95,9 +116,7 @@ def _maybe_recalibrate(models: list[ModelEntry], ts: TestSet, knn_map: dict[str,
           f"  AoA calib=[{min(calib_aoa):.2f}, {max(calib_aoa):.2f}]"
           f"  vs pool=[{min(pool_aoa):.2f}, {max(pool_aoa):.2f}]")
 
-    for entry in models:
-        if type(entry.model).__name__ != 'FAM':
-            continue
+    for entry in needs_calib:
         ood_kind = ts.ood_kind(entry)
         mu, sig = _train_stats(entry, ts.stats)
         trained_lr = (entry.cfg or {}).get('resolution', {}).get('lr', 0.1)
@@ -162,15 +181,19 @@ def evaluate(models: list[ModelEntry], ts: TestSet, out_dir: Path,
         cases = test_cases[:n_eval] if n_eval > 0 else test_cases
         print(f"\n── Sweep test set ({len(cases)} cas) ──"
               f"───────────────────────────────")
-        mesh_hr = np.load(ts.layout.mesh_path(ts.hr_res), allow_pickle=True).item()
-        mu_gt = ts.stats['mu'].astype(np.float64)
-        gt_cache = load_or_build_gt_cache(ts.layout, cases, ts.wc,
-                                          mesh=mesh_hr, mu=mu_gt)
-        sweep_results = _run_sweep(models, ts, knn_map, cases, gt_cache, batch_size,
-                                   idw_knn, mesh_hr=mesh_hr)
-        sweep_results['_ts_label'] = ts_label
-        _plot_sweep(sweep_results, cases, ts, out)
-        _save_summary_csv(ref_results, sweep_results, out / 'summary.csv')
+        if not cases:
+            # Rien à sweeper : on saute plutôt que de planter sur all_data[0].
+            print("  (0 cas, sweep sauté)")
+        else:
+            mesh_hr = np.load(ts.layout.mesh_path(ts.hr_res), allow_pickle=True).item()
+            mu_gt = ts.stats['mu'].astype(np.float64)
+            gt_cache = load_or_build_gt_cache(ts.layout, cases, ts.wc,
+                                              mesh=mesh_hr, mu=mu_gt)
+            sweep_results = _run_sweep(models, ts, knn_map, cases, gt_cache, batch_size,
+                                       idw_knn, mesh_hr=mesh_hr)
+            sweep_results['_ts_label'] = ts_label
+            _plot_sweep(sweep_results, cases, ts, out)
+            _save_summary_csv(ref_results, sweep_results, out / 'summary.csv')
 
     print(f"\nDone — {out}/")
     return {'ref': ref_results, 'sweep': sweep_results,
@@ -344,7 +367,10 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         all_data: list[dict] = list(ex.map(lambda c: load_sample(c['path'], c.get('raw_hr_path')), cases))
 
     print("  Pré-calcul des features...")
-    geom = mesh_geom_from_case(all_data[0])
+    # 'domain' explicite (pas le defaut 'object') : ce geom partage sert a la baseline
+    # IDW et aux modeles coord_norm='domain'. 'object' echouerait ici faute de
+    # mesh_meta, et les modeles 'object' recalculent de toute facon leur propre geom_e.
+    geom = mesh_geom_from_case(all_data[0], 'domain')
     # lr_feats avec ts.stats (pour IDW et modèles in-distrib), les modèles
     # OOD géométrique reconstruisent leurs propres features avec leurs training stats.
     lr_feats = [build_lr_feat(geom, d, mu, sig) for d in all_data]

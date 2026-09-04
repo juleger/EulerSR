@@ -148,7 +148,7 @@ def plot_reference_grid(results: dict, triang, out_path: Path):
 
             if sc_row is not None:
                 _p = cb_axs[ri].get_position()
-                _h = _p.height * 0.80
+                _h = _p.height * 0.62
                 cb_axs[ri].set_position([_p.x0, _p.y0 + (_p.height - _h) / 2, _p.width, _h])
                 fig.colorbar(sc_row, cax=cb_axs[ri], label='Mach')
 
@@ -491,6 +491,14 @@ def _heatmap_metric(dataset_results: dict, all_cases: list[dict], out_dir: Path,
 
     machs = np.array([c['mach_in'] for c in all_cases])
     aoas = np.array([c['aoa_in'] for c in all_cases])
+    # La triangulation de Delaunay exige au moins 4 points non alignes dans le plan
+    # (Mach, AoA) : sur un sweep tronque, les cas partagent souvent le meme AoA et
+    # font planter tout le run sur un QhullError.
+    if len(np.unique(machs)) < 2 or len(np.unique(aoas)) < 2 or len(machs) < 4:
+        print(f"  [saut] heatmap {metric_label} : "
+              f"{len(machs)} cas sur {len(np.unique(machs))} Mach x "
+              f"{len(np.unique(aoas))} AoA, triangulation impossible")
+        return
     m_grid = np.linspace(machs.min(), machs.max(), 60)
     a_grid = np.linspace(aoas.min(), aoas.max(), 40)
     MM, AA = np.meshgrid(m_grid, a_grid)
@@ -628,7 +636,7 @@ def plot_regime_heatmap(dataset_results: dict, all_cases: list[dict], out_dir: P
 def _fmt_metric(v: float) -> str:
     if not np.isfinite(v):
         return 'N/A'
-    return f'{v:.2e}'
+    return f'{v:.3e}'
 
 
 def _fmt_time(v: float) -> str:
@@ -780,15 +788,13 @@ def _load_fvm_times(path: Path = _FVM_TIMES_PATH) -> dict | None:
 
 
 def _fvm_time_at(fvm: dict, geometry: str, res: float) -> float | None:
-    """Temps FVM moyen (s/cas) pour (géométrie, résolution) exacte ; à défaut,
-    repli silencieux sur la moyenne globale de la géométrie (toutes
-    résolutions confondues)."""
+    """Temps FVM moyen (s/cas) pour (géométrie, résolution) exacte, ou None si cette
+    résolution n'a jamais été mesurée. Plus de repli sur la moyenne toutes résolutions
+    confondues : sur diamond elles vont de ~1.5 s/cas (h=0.3) à ~200 s/cas (h=0.0125),
+    donc cette moyenne n'approxime aucune résolution et affiche un chiffre trompeur."""
     geo = fvm.get('by_geometry_resolution', {}).get(geometry, {})
     key = next((k for k in geo if abs(float(k) - res) < 1e-6), None)
-    if key is not None:
-        return geo[key]['time_mean_s']
-    geo_stats = fvm.get('by_geometry', {}).get(geometry)
-    return geo_stats['time_mean_s'] if geo_stats else None
+    return geo[key]['time_mean_s'] if key is not None else None
 
 
 def _fvm_avg_time_text(geometry: str | None, hr_res: float | None,

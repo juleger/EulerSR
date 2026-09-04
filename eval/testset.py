@@ -220,7 +220,11 @@ class TestSet:
             # Résolutions LR vues pour CETTE géométrie précisément (une branche peut
             # couvrir plusieurs lr_res, ex. diamond: [0.05, 0.1, 0.2])
             branch = next((d for d in datasets if d.get('name', '') == self.geometry), None)
-            trained_lr_set = set(branch.get('lr_res', [default_lr])) if branch else {default_lr}
+            if branch:
+                _lr = branch.get('lr_res', [default_lr])
+                trained_lr_set = set(_lr) if isinstance(_lr, list) else {_lr}
+            else:
+                trained_lr_set = {default_lr}
         else:
             # Modèle single-géométrie : lire la clé 'geometry'
             single = cfg.get('geometry', '')
@@ -257,15 +261,19 @@ class TestSet:
 
         Réutilise entry.knn si celui-ci a été construit pour ce TestSet exact.
         Sinon reconstruit à partir des maillages du layout.
+
+        Le test porte sur entry.layout, la résolution effective de entry.knn, et non
+        sur celle déclarée dans le cfg du modèle : entry.knn est construit par
+        load_model avec le layout du premier testset passé à evaluate.py, pas à la
+        résolution d'entraînement. Comparer au cfg faisait matcher un knn construit à
+        une autre résolution, donc un gather silencieusement hors-distribution.
         """
-        trained_lr = (entry.cfg or {}).get('resolution', {}).get('lr', 0.1)
-        trained_hr = (entry.cfg or {}).get('resolution', {}).get('hr', 0.025)
         knn_matches = (
             entry.layout is not None
             and entry.layout.geometry == self.geometry
             and entry.layout.root.resolve() == self.layout.root.resolve()
-            and abs(trained_lr - self.lr_res) < 1e-6
-            and abs(trained_hr - self.hr_res) < 1e-6
+            and abs(entry.layout.lr_res - self.lr_res) < 1e-6
+            and abs(entry.layout.hr_res - self.hr_res) < 1e-6
         )
         if knn_matches:
             return entry.knn
@@ -383,7 +391,9 @@ class TestSet:
             label += f', HR h={hr_res:g}'
         if mach_max is not None:
             tag += f'_machle{mach_max:g}'
-            label += f', Mach≤{mach_max:g}'
+            # Pas d'ajout au label affiché : le plafond Mach est un réglage global du
+            # run, pas une propriété du test set à répéter sur chaque figure. Il reste
+            # visible via le tag (noms de fichiers) et les logs.
         return cls._build(tag, label, layout, ref_specs, mach_max=mach_max)
 
     @classmethod
