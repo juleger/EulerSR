@@ -100,7 +100,7 @@ def _maybe_recalibrate(models: list[ModelEntry], ts: TestSet, knn_map: dict[str,
         ood_kind = ts.ood_kind(entry)
         mu, sig = _train_stats(entry, ts.stats)
         trained_lr = (entry.cfg or {}).get('resolution', {}).get('lr', 0.1)
-        coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+        coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'object')
         print(f"\n── Recalibration res_scale [{entry.name}]"
               f"  ({ood_kind})  LR train={trained_lr} → eval={ts.lr_res} ──")
         lr_feats, tg_list = [], []
@@ -202,7 +202,7 @@ def _run_ref_cases(models: list[ModelEntry], ts: TestSet, knn_map: dict[str, dic
         for entry in models:
             _gid = ts.geom_id_for(entry)
             _mu, _sig = _train_stats(entry, ts.stats)
-            _coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+            _coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'object')
             _is_wall = hasattr(entry.model, 'wall_encoder')
             _hf, _lf, *_ = build_features(_d0, _c0['mach_in'], _c0['aoa_in'],
                                            {'mu': _mu, 'sig': _sig}, _gid,
@@ -377,7 +377,7 @@ def _run_sweep(models: list[ModelEntry], ts: TestSet,
         nm = ts.display_name(entry)
         gid = ts.geom_id_for(entry)
         mu_e, sig_e = _train_stats(entry, ts.stats)
-        coord_norm_e = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+        coord_norm_e = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'object')
         mach_norm_e = _resolve_mach_norm(entry.cfg)
         geom_e = geom if coord_norm_e == 'domain' else mesh_geom_from_case(
             all_data[0], coord_norm_e, ts.hr_mesh_meta)

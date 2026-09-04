@@ -51,7 +51,7 @@ def plot_training_curves(train_losses, val_losses, val_l2s, out_path,
 
 
 def _snapshot_feats(d, mach_in: float, aoa_in: float, stats,
-                    coord_norm: str = 'domain', mesh_meta: dict | None = None,
+                    coord_norm: str = 'object', mesh_meta: dict | None = None,
                     mach_norm: tuple[float, float] | None = None):
     """Construit (hr_feat, lr_feat) jnp pour predict() + primitives physiques du snapshot.
 
@@ -108,7 +108,7 @@ def _tri(mesh):
 def plot_val_panels(model: SRModel, knn: dict, cases: list, stats,
                     mesh_hr, mesh_lr, out_path: str | Path,
                     title: str | None = None, dpi: int = _DPI,
-                    coord_norm: str = 'domain',
+                    coord_norm: str = 'object',
                     mach_norm: tuple[float, float] | None = None):
     # Panneau de suivi : une ligne par cas, colonnes LR / IDW / SR / HR (champ Mach).
     if not cases:

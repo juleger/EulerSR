@@ -25,7 +25,7 @@ class _MeshGeom:
     lr_n: np.ndarray  # (N_lr, 2)
 
 
-def mesh_geom_from_case(d: dict, coord_norm: str = 'domain',
+def mesh_geom_from_case(d: dict, coord_norm: str = 'object',
                         mesh_meta: dict | None = None) -> _MeshGeom:
     hr_pos = d['hr_node_pos'].astype(np.float64)
     lr_pos = d['lr_node_pos'].astype(np.float64)
@@ -92,7 +92,7 @@ def build_wall_feat(d: dict, mu: np.ndarray, sig: np.ndarray, mesh_meta: dict) -
 
 
 def build_features(d: dict, mach_in: float, aoa_in: float,
-                   stats: dict, geom_id: int = 0, coord_norm: str = 'domain',
+                   stats: dict, geom_id: int = 0, coord_norm: str = 'object',
                    mesh_meta: dict | None = None, is_wall: bool = False,
                    mach_norm: tuple[float, float] = (_MACH_MID, _MACH_SCALE)) -> tuple:
     mu = stats['mu'].astype(np.float32)
@@ -145,7 +145,7 @@ def predict_wall_baseline(d: dict, mach_in: float, aoa_in: float,
 def predict_det(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
                 stats: dict, knn: dict | None = None,
                 geom_id: int = 0, mesh_meta: dict | None = None) -> tuple[np.ndarray, float]:
-    coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+    coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'object')
     is_wall = hasattr(entry.model, 'wall_encoder')
     hr_feat, cond_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
                                                     coord_norm, mesh_meta, is_wall=is_wall,
@@ -162,7 +162,7 @@ def predict_ensemble(entry: ModelEntry, d: dict, mach_in: float, aoa_in: float,
                      key: jax.Array | None = None, mesh_meta: dict | None = None,
                      ) -> tuple[np.ndarray, np.ndarray, float]:
     """Ensemble stochastique (SDE ou FAMWall) : renvoie (mean, std, t_ms) en unites physiques."""
-    coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+    coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'object')
     is_wall = hasattr(entry.model, 'wall_encoder')
     hr_feat, cond_feat, _, mu, sig = build_features(d, mach_in, aoa_in, stats, geom_id,
                                                     coord_norm, mesh_meta, is_wall=is_wall,

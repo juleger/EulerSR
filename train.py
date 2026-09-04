@@ -150,7 +150,7 @@ def main():
     mach_range = _parse_range(args.mach) or (tuple(tr['mach_range']) if tr.get('mach_range') else None)
     aoa_range = _parse_range(args.aoa)
     use_lr_grad = cfg.get('architecture', {}).get('use_lr_grad', False)
-    coord_norm = cfg.get('architecture', {}).get('coord_norm', 'domain')
+    coord_norm = cfg.get('architecture', {}).get('coord_norm', 'object')
     # (mid, scale) du conditionnement Mach pour CE run
     _mn_range = mach_range if mach_range is not None else (0.7, 3.0)
     mach_norm = ((_mn_range[0] + _mn_range[1]) / 2, (_mn_range[1] - _mn_range[0]) / 2)

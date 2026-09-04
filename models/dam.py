@@ -204,7 +204,7 @@ def load_hierarchical_knn(layout: DataLayout, default_levels: list,
     k_up = arch.get('k_up', 4)
     k_self = arch.get('k_self', 9)
     k_cond = arch.get('k_cond', _IDW_K)
-    coord_norm = arch.get('coord_norm', 'domain')
+    coord_norm = arch.get('coord_norm', 'object')
 
     d = np.load(_ensure_knn(layout, hr_res, lr_res, max(k_cond, _IDW_K)))
     knn = {'idx': jnp.array(d['indices']),

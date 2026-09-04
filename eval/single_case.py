@@ -94,7 +94,7 @@ def run_single_case(models: list[ModelEntry], ts: TestSet, case: dict, d: dict,
     for entry in models:
         gid = ts.geom_id_for(entry)
         mu_e, sig_e = _train_stats(entry, ts.stats)
-        coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'domain')
+        coord_norm = (entry.cfg or {}).get('architecture', {}).get('coord_norm', 'object')
         is_wall = hasattr(entry.model, 'wall_encoder')
         hf, lf, *_ = build_features(d, case['mach_in'], case['aoa_in'],
                                      {'mu': mu_e, 'sig': sig_e}, gid,

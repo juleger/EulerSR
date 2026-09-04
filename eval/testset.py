@@ -132,7 +132,7 @@ def _build_hierarchical_knn(mesh_paths: dict[float, Path], lr_res: float, cfg: d
     k_up = arch.get('k_up', 4)
     k_self = arch.get('k_self', 9)
     k_cond = arch.get('k_cond', 6)
-    coord_norm = arch.get('coord_norm', 'domain')
+    coord_norm = arch.get('coord_norm', 'object')
 
     def _bary(r: float) -> np.ndarray:
         return np.asarray(

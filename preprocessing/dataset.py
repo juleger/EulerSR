@@ -51,7 +51,7 @@ class SRDataset:
                  shock_weight_factor: float = 1.0,
                  geom_id: int = 0,
                  train_fraction: float = 1.0,
-                 coord_norm: str = 'domain',
+                 coord_norm: str = 'object',
                  mach_norm: tuple[float, float] | None = None):
         split_dir = layout.proc_dir() / split
         d = np.load(layout.stats_path)

@@ -26,6 +26,7 @@ architecture:
   k_cond: 6               # voisins kNN pour le conditionnement
   use_lr_grad: true       # ajoute les gradients LR en features d'entree
   use_bf16: true
+  coord_norm: object      # centre/echelle sur corde+centre obstacle (cf euler/meshing)
 
 flow:
   n_steps: 12              # pas d'integration ODE a l'inference

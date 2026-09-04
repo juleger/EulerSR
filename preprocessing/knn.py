@@ -41,7 +41,7 @@ def build(fine_centroids: np.ndarray, coarse_centroids: np.ndarray,
 
 
 def build_hierarchy(lvl_pos: list, lr_pos: np.ndarray, k_pool: int, k_up: int, k_self: int, k_cond: int,
-                    coord_norm: str = 'domain', mesh_meta: dict | None = None) -> dict:
+                    coord_norm: str = 'object', mesh_meta: dict | None = None) -> dict:
     # Tables kNN entre niveaux + PE Fourier + poids IDW, rel_pos normalisées par l'échelle locale.
     import sys
     from pathlib import Path as _Path
