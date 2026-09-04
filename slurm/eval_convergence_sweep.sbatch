@@ -48,6 +48,7 @@ PATIENCE="${PATIENCE:-}"
 CD_TOL="${CD_TOL:-}"
 CL_TOL="${CL_TOL:-}"
 N_STEPS="${N_STEPS:-}"
+N_WALL="${N_WALL:-}"
 NO_IDW="${NO_IDW:-0}"
 NO_PIPELINE_TIME="${NO_PIPELINE_TIME:-0}"
 OUT_DIR="${OUT_DIR:-results/convergence_sweep/}"
@@ -72,6 +73,7 @@ echo "data_root         : ${DATA_ROOT}"
 echo "geometry          : ${GEOMETRY}"
 echo "stride mach / aoa : ${STRIDE_MACH} / ${STRIDE_AOA}"
 echo "max_cases         : ${MAX_CASES}"
+echo "n_wall            : ${N_WALL:-<complet>}"
 echo "out_dir           : ${OUT_DIR}"
 nvidia-smi || true
 echo "##############################################################"
@@ -81,6 +83,7 @@ EXTRA_ARGS=()
 [[ -n "${CD_TOL}" ]] && EXTRA_ARGS+=(--cd_tol "${CD_TOL}")
 [[ -n "${CL_TOL}" ]] && EXTRA_ARGS+=(--cl_tol "${CL_TOL}")
 [[ -n "${N_STEPS}" ]] && EXTRA_ARGS+=(--n_steps "${N_STEPS}")
+[[ -n "${N_WALL}" ]] && EXTRA_ARGS+=(--n_wall "${N_WALL}")
 [[ "${NO_IDW}" == "1" ]] && EXTRA_ARGS+=(--no_idw)
 [[ "${NO_PIPELINE_TIME}" == "1" ]] && EXTRA_ARGS+=(--no_pipeline_time)
 

@@ -671,6 +671,12 @@ class SRModel(nnx.Module):
             ep_loss, n = 0.0, 0
             _ep_gnorm_sum, _ep_gnorm_n, _ep_n_clipped = 0.0, 0, 0
 
+            # Nouveau N_wall tire par epoque (cf. training.wall_k_range), jamais par
+            # batch : un batch JAX exige un nombre de points de bord uniforme. No-op
+            # sur les datasets qui n'exposent pas roll_wall_k.
+            if hasattr(train_ds, 'roll_wall_k'):
+                train_ds.roll_wall_k(rng)
+
             if cfg.lambda_endpoint_warmup_epochs > 0:
                 lam_ep_val = lambda_endpoint * min(1.0, epoch / cfg.lambda_endpoint_warmup_epochs)
             else:

@@ -1,0 +1,65 @@
+model: fam_wall
+data_root: data/
+geometry: diamond
+
+# Variante de fam_wall_sd.yaml avec sous-echantillonnage aleatoire du nombre de
+# capteurs de bord a l'entrainement (training.wall_k_range) : un seul modele peut-il
+# etre robuste a un N_wall variable ? La campagne de sensibilite montre que les
+# modeles a N_wall fixe s'effondrent des que N differe de leur entrainement, alors
+# que l'architecture attentionnelle n'impose aucune taille fixe.
+#
+# Repro : uv run python train_wall.py --config configs/fam_wall_sd_wallsub.yaml --run_name FAMWALL_Ngen
+
+resolution:
+  hr: 0.025
+  lr: 0.1                 # proxy wall_decay_length (wd_exp), pas une branche LR volumique
+
+architecture:
+  levels: [0.1]           # 1 niveau grossier (AMNet reduit)
+  embed_dim: 96
+  cond_dim: 128           # dimension du vecteur de conditionnement
+  wall_embed_dim: 128     # dimension de l'embedding des observations de bord
+  n_heads: 4
+  n_global_blocks: 1      # blocs d'attention globale au niveau grossier (AMNet reduit)
+  n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
+  mlp_ratio: 4
+  n_wall_self_blocks: 2   # profondeur du WallEncoder
+  wall_dist_bias: true    # biais de distance appris dans WallCondBlock
+  use_geom_cond: false    # mono-geometrie (seul N_wall varie ici, pas la geometrie)
+  n_geoms: 1
+  coord_norm: object      # impose pour FAMWall
+  use_bf16: false
+
+flow:
+  n_steps: 16             # pas d'integration ODE a l'inference
+  use_residual: true      # predit le residu sur la baseline IDW (bord)
+  n_samples: 4            # echantillons moyennes par prediction
+  n_val_gen: 16           # nombre de cas evalues en validation
+  sample_seed: 42
+  t_dist: logit_normal    # distribution du temps d'entrainement
+  sigma_t: 1.2            # ecart-type du temps si t_dist = logit_normal
+  cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement
+  cfg_scale: 1.0          # echelle de guidance a l'inference
+  learned_res_scale: true  # quasi obligatoire pour FAMWall (pas de HR au deploiement)
+  lambda_res_scale: 0.1   # poids de la loss auxiliaire qui entraine la tete
+
+training:
+  epochs: 200
+  lr: 0.0005
+  weight_decay: 0.00001
+  val_every: 5
+  seed: 42
+  loss: shock_weighted_rel_mse   # options: mse, rel_mse, shock_weighted_mse, shock_weighted_rel_mse, w2
+  shock_weight_factor: 1.0       # poids des zones de choc dans la loss (0 = uniforme)
+  schedule: cosine               # options: cosine, constant
+  warmup_epochs: 5
+  grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
+  save_best: true
+  batch_size: 8
+  lambda_phys: 0.05              # plus fort que le SR volumique (probleme plus sous-contraint)
+  lambda_enthalpy: 0.02          # poids de la perte de conservation d'enthalpie (0 = desactive)
+  ema_decay: 0.999
+  preload: true
+  train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
+  mach_range: [0.7, 3.0]         # store processed regenere jusqu'a Mach 3
+  wall_k_range: [10, 84]         # N_wall tire dans cet intervalle a chaque epoque

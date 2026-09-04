@@ -46,8 +46,13 @@ def run_convergence_sweep(ts, models, idw_knn, knn_map, cases: list[dict], res_h
                            cd_tol: float = _DEFAULT_ENGINEERING_TOL,
                            cl_tol: float = _DEFAULT_ENGINEERING_TOL,
                            include_idw: bool = True,
-                           lr_solve_time_s: float | None = None) -> list[dict]:
-    """Lance eval.convergence_case.run_convergence_case sur chaque cas de 'cases'."""
+                           lr_solve_time_s: float | None = None,
+                           n_wall: int | None = None) -> list[dict]:
+    """Lance eval.convergence_case.run_convergence_case sur chaque cas de 'cases'.
+
+    n_wall : sous-échantillonne les observations de bord des modèles FAMWall et
+    DAMWall à n_wall capteurs (le maillage et le solve FVM restent inchangés, seule
+    l'entrée du modèle est réduite). Sans effet sur les modèles volumiques."""
     from eval.live_fvm import _DEFAULT_CHECK_EVERY
     check_every = _DEFAULT_CHECK_EVERY if check_every is None else check_every
 
@@ -60,7 +65,7 @@ def run_convergence_sweep(ts, models, idw_knn, knn_map, cases: list[dict], res_h
         try:
             d = load_sample(case['path'], case.get('raw_hr_path'))
             results = run_single_case(models, ts, case, d, idw_knn if include_idw else None, knn_map,
-                                       n_repeat=1)
+                                       n_repeat=1, n_wall=n_wall)
             summaries = run_convergence_case(
                 results, ts.layout, case['mach_in'], case['aoa_in'], res_h,
                 tf=tf, check_every=check_every, patience=patience, cd_tol=cd_tol, cl_tol=cl_tol,
@@ -87,6 +92,7 @@ def print_sweep_summary(rows: list[dict]) -> None:
     deux ratios de speedup (itérations et temps de résolution) sont côte à côte dans
     le bloc résidu ; ils divergent surtout pour les warm-starts rapides."""
     names = list(dict.fromkeys(r['name'] for r in rows))  # ordre d'apparition, dédupliqué
+
     header = (f"{'Champ initial':<28}{'n cas':>8}{'converged':>12}"
               f"{'itér. moy.':>14}{'itér. médiane':>16}{'accél. itér.':>14}{'accél. temps':>14}"
               f"{'accél. pipeline':>17}")

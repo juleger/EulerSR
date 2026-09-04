@@ -274,6 +274,31 @@ class WallSRDataset:
             _mb = sum(sum(a.nbytes for a in item) for item in self._cache) / 1e6
             print(f" {_mb:.0f} Mo  ({time.time()-_t0:.1f}s)")
 
+        # Sous-echantillonnage aleatoire du nombre de capteurs de bord (desactive par
+        # defaut, cf. training.wall_k_range), pour un modele qui ne soit pas esclave
+        # d'un N_wall fixe.
+        self._wall_k_range: tuple[int, int] | None = None
+        self._wall_k: int | None = None
+
+    def enable_wall_subsample(self, k_range: tuple[int, int]) -> None:
+        """Active le sous-echantillonnage sur le train_ds uniquement : le val_ds reste
+        a taille pleine pour une courbe de validation comparable d'une epoque a l'autre."""
+        self._wall_k_range = k_range
+
+    def roll_wall_k(self, py_rng) -> None:
+        """Tire un nouveau N_wall pour l'epoque a venir (no-op si pas active).
+        py_rng : np.random.Generator partage avec fit() (reproductibilite via cfg.seed)."""
+        if self._wall_k_range is not None:
+            lo, hi = self._wall_k_range
+            self._wall_k = int(py_rng.integers(lo, hi + 1))
+
+    def _subsample_wall(self, item: tuple) -> tuple:
+        hr_feat, wall_feat, target, weights, grad_p_target = item
+        n_avail = wall_feat.shape[0]
+        k = min(self._wall_k, n_avail)
+        chosen = np.random.default_rng().choice(n_avail, size=k, replace=False)
+        return hr_feat, wall_feat[chosen], target, weights, grad_p_target
+
     def __len__(self):
         return len(self.entries)
 
@@ -317,9 +342,10 @@ class WallSRDataset:
         return hr_feat, wall_feat, target, weights, grad_p_target
 
     def __getitem__(self, idx: int) -> tuple:
-        if self._cache is not None:
-            return self._cache[idx]
-        return self._load(idx)
+        item = self._cache[idx] if self._cache is not None else self._load(idx)
+        if self._wall_k is not None:
+            item = self._subsample_wall(item)
+        return item
 
 
 class MultiSRDataset:
@@ -350,6 +376,17 @@ class MultiSRDataset:
         else:
             total_w = sum(weights)
             self.weights = [w / total_w for w in weights]
+
+    def enable_wall_subsample(self, k_range: tuple[int, int]) -> None:
+        """Relais vers chaque branche, no-op sur celles qui ne le supportent pas."""
+        for d in self.datasets:
+            if hasattr(d, 'enable_wall_subsample'):
+                d.enable_wall_subsample(k_range)
+
+    def roll_wall_k(self, py_rng) -> None:
+        for d in self.datasets:
+            if hasattr(d, 'roll_wall_k'):
+                d.roll_wall_k(py_rng)
 
     def __len__(self) -> int:
         return sum(len(d) for d in self.datasets)

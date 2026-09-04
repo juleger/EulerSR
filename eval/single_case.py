@@ -64,10 +64,13 @@ def _timed_repeat(call_fn: Callable[[], tuple], n_repeat: int):
 
 def run_single_case(models: list[ModelEntry], ts: TestSet, case: dict, d: dict,
                      idw_knn: dict | None, knn_map: dict[str, dict],
-                     n_repeat: int = 5) -> dict:
+                     n_repeat: int = 5, n_wall: int | None = None) -> dict:
     """Inférence + métriques de tous les modèles sur un cas. 'case' : dict
     {'path', 'mach_in', 'aoa_in', 'label', ...}. 'd' : échantillon déjà chargé
-    via utils.layout.load_sample."""
+    via utils.layout.load_sample.
+
+    n_wall : si donné, sous-échantillonne les observations de bord à n_wall capteurs
+    pour les modèles à bord (FAMWall/DAMWall), ignoré pour les autres."""
     wc = ts.wc
     dxy_edges = np.linalg.norm(
         wc.bary[wc.cell_adj_edges[:, 0]] - wc.bary[wc.cell_adj_edges[:, 1]], axis=1
@@ -100,7 +103,8 @@ def run_single_case(models: list[ModelEntry], ts: TestSet, case: dict, d: dict,
         hf, lf, *_ = build_features(d, case['mach_in'], case['aoa_in'],
                                      {'mu': mu_e, 'sig': sig_e}, gid,
                                      coord_norm, ts.hr_mesh_meta, is_wall=is_wall,
-                                     mach_norm=_resolve_mach_norm(entry.cfg))
+                                     mach_norm=_resolve_mach_norm(entry.cfg),
+                                     n_wall=n_wall if is_wall else None)
         print(f"  [{entry.name}] warmup JIT...")
         jax.block_until_ready(entry.model.predict(hf, lf, knn_map[entry.name]))
 
@@ -112,7 +116,7 @@ def run_single_case(models: list[ModelEntry], ts: TestSet, case: dict, d: dict,
     if idw_knn is not None and (is_wall_bl or 'idx' in idw_knn):
         if is_wall_bl:
             call_fn = lambda: predict_wall_baseline(
-                d, case['mach_in'], case['aoa_in'], idw_knn['wd_exp'], k=6)
+                d, case['mach_in'], case['aoa_in'], idw_knn['wd_exp'], k=6, n_wall=n_wall)
         else:
             idx_idw = np.asarray(idw_knn['idx'])[:, :6].astype(np.int32)
             dist_idw = np.asarray(idw_knn['dist'])[:, :6].astype(np.float32)
@@ -146,13 +150,14 @@ def run_single_case(models: list[ModelEntry], ts: TestSet, case: dict, d: dict,
             def _call(entry=entry, stats_e=stats_e, gid=gid):
                 mean, _std, t_ms = predict_ensemble(
                     entry, d, case['mach_in'], case['aoa_in'], stats_e,
-                    knn=knn_map[entry.name], geom_id=gid, mesh_meta=ts.hr_mesh_meta)
+                    knn=knn_map[entry.name], geom_id=gid, mesh_meta=ts.hr_mesh_meta,
+                    n_wall=n_wall)
                 return mean, t_ms
         else:
             def _call(entry=entry, stats_e=stats_e, gid=gid):
                 return predict_det(entry, d, case['mach_in'], case['aoa_in'],
                                     stats_e, knn=knn_map[entry.name], geom_id=gid,
-                                    mesh_meta=ts.hr_mesh_meta)
+                                    mesh_meta=ts.hr_mesh_meta, n_wall=n_wall)
 
         prim0, times = _timed_repeat(_call, n_repeat)
         mach = to_mach(prim0)

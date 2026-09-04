@@ -94,6 +94,14 @@ def main():
     mach_range = tuple(train_cfg['mach_range']) if 'mach_range' in train_cfg else None
     aoa_range = tuple(train_cfg['aoa_range']) if 'aoa_range' in train_cfg else None
     aoa_step = train_cfg.get('aoa_step')
+    wall_k_range = tuple(train_cfg['wall_k_range']) if 'wall_k_range' in train_cfg else None
+
+    # (mid, scale) du conditionnement Mach pour CE run, meme convention que train.py.
+    # Persiste dans cfg pour que _build_backbone calibre mach_mid/mach_scale des la
+    # construction du modele.
+    _mn_range = mach_range if mach_range is not None else (0.7, 3.0)
+    mach_norm = ((_mn_range[0] + _mn_range[1]) / 2, (_mn_range[1] - _mn_range[0]) / 2)
+    cfg['mach_norm'] = list(_mn_range)
 
     rngs = nnx.Rngs(train_cfg.get('seed', 42))
 
@@ -113,7 +121,7 @@ def main():
         for b in branches:
             common = dict(mach_range=b['mach_range'], aoa_range=b['aoa_range'],
                           aoa_step=b['aoa_step'], shock_weight_factor=sw_factor,
-                          geom_id=b['geom_id'], coord_norm='object')
+                          geom_id=b['geom_id'], coord_norm='object', mach_norm=mach_norm)
             train_list.append(WallSRDataset(b['layout'], split='train', preload=preload,
                               train_fraction=b['train_fraction'], **common))
             val_list.append(WallSRDataset(b['layout'], split='val', preload=preload, **common))
@@ -128,13 +136,27 @@ def main():
     else:
         layout = DataLayout.from_root(data_root, geometry, lr_res, hr_res)
         common = dict(mach_range=mach_range, aoa_range=aoa_range, aoa_step=aoa_step,
-                      shock_weight_factor=sw_factor, geom_id=0, coord_norm='object')
+                      shock_weight_factor=sw_factor, geom_id=0, coord_norm='object',
+                      mach_norm=mach_norm)
         train_ds = WallSRDataset(layout, split='train', preload=preload,
                                  train_fraction=default_train_fraction, **common)
         val_ds = WallSRDataset(layout, split='val', preload=preload, **common)
         knn = cls.load_knn(layout, cfg)
 
+    if wall_k_range is not None:
+        if not hasattr(train_ds, 'enable_wall_subsample'):
+            raise ValueError("training.wall_k_range demande mais le dataset ne supporte pas "
+                             "le sous-echantillonnage (WallSRDataset/MultiSRDataset attendu).")
+        print(f"  Sous-echantillonnage N_wall active : train_ds tire un N_wall dans "
+              f"{wall_k_range} a chaque epoque (val_ds reste a taille pleine).")
+        train_ds.enable_wall_subsample(wall_k_range)
+
     model = cls(rngs, cfg)
+    if hasattr(model, 'mach_mid'):
+        # Garantie explicite, meme si cfg portait deja une autre valeur de mach_norm.
+        import jax.numpy as _jnp
+        model.mach_mid.value = _jnp.array(mach_norm[0], _jnp.float32)
+        model.mach_scale.value = _jnp.array(mach_norm[1], _jnp.float32)
 
     valid_fields = TrainConfig.__dataclass_fields__
     tcfg = TrainConfig(**{k: v for k, v in train_cfg.items() if k in valid_fields})

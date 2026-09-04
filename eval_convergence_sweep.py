@@ -97,6 +97,11 @@ def main():
     p.add_argument('--no_pipeline_time', action='store_true',
                    help="Désactive le calcul du temps de pipeline complet (LR + inférence "
                         "+ warm-start HR), actif par défaut via data/fvm_times.json.")
+    p.add_argument('--n_wall', type=int, default=None,
+                   help="Sous-échantillonne les observations de bord des modèles FAMWall "
+                        "et DAMWall à N capteurs répartis uniformément : le maillage et le "
+                        "solve FVM restent ceux de --geometry, seule l'entrée du modèle est "
+                        "réduite. Sans effet sur les modèles volumiques.")
 
     p.add_argument('--out_dir', default='results/convergence_sweep/')
     args = p.parse_args()
@@ -155,7 +160,7 @@ def main():
         ts, model_entries, idw_knn, knn_map, cases, ts.hr_res, tf=args.tf,
         check_every=args.convergence_check_every, patience=patience, cd_tol=cd_tol, cl_tol=cl_tol,
         include_idw=include_idw,
-        lr_solve_time_s=lr_solve_time_s)
+        lr_solve_time_s=lr_solve_time_s, n_wall=args.n_wall)
     elapsed = time.perf_counter() - t0
 
     out_dir = Path(args.out_dir) / ts.tag
