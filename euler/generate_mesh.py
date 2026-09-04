@@ -35,6 +35,8 @@ GEOMS["bump"] = (
                                        chord=1.0, center=1.5, out_dir=out_dir),
     [0.05, 0.02],
 )
+# "cylinder" (cercle, cas test classique, hors distribution des formes en
+# train) est déjà couvert par la boucle GEOMS ci-dessus via AIRFOILS.
 
 # Variantes OOD du diamond (translation / demi-angle) et du rae2822
 # (translation), pour évaluer la robustesse géométrique des modèles SR.
@@ -60,6 +62,14 @@ GEOMS["diamond_sym"] = (
     lambda h, out_dir: diamond.build_mesh(Lx=4.0, Ly=4.0, h=h, chord=1.0,
                                           height=tan(radians(5)), cx=1.5, cy=2.0,
                                           case="diamond_sym", symmetric=True, out_dir=out_dir),
+    _DEFAULT_H,
+)
+# Domaine agrandi (6x4 -> 6x6) a position du diamant inchangee (cx=1.5, cy=2.0) :
+# isole l'effet du farfield sans le melanger a une translation.
+GEOMS["diamond_big"] = (
+    lambda h, out_dir: diamond.build_mesh(Lx=6.0, Ly=6.0, h=h, chord=1.0,
+                                          height=tan(radians(5)), cx=1.5, cy=2.0,
+                                          case="diamond_big", out_dir=out_dir),
     _DEFAULT_H,
 )
 GEOMS["rae2822_txy"] = (

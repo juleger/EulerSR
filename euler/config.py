@@ -14,7 +14,7 @@ repo_root = Path(__file__).resolve().parents[1]
 # existant partagent sa physique et doivent simplement être ajoutées ici.
 AOA_CASES = ("diamond", "naca0012", "naca2412", "rae2822", "oneraD", "oa209",
              "diamond_tx", "diamond_txy", "diamond_alpha10", "rae2822_txy",
-             "diamond_sym", "naca23012")
+             "diamond_sym", "naca23012", "diamond_big", "cylinder")
 # Tous les cas connus (inclut "bump", qui n'a pas d'incidence).
 KNOWN_CASES = ("bump",) + AOA_CASES
 _AOA_CASES_LC = tuple(c.lower() for c in AOA_CASES)

@@ -22,6 +22,9 @@ AIRFOILS = {
     "rae2822_txy": dict(kind="dat", dat="rae2822.dat", fmt="rae", symmetric=False),
     # NACA 5 chiffres 23012 (classique aérodynamique)
     "naca23012": dict(kind="dat", dat="naca23012.dat", fmt="selig", symmetric=False),
+    # Cylindre (cercle) : cas test classique, courbure constante sur tout le
+    # contour, hors distribution des formes vues en entrainement.
+    "cylinder": dict(kind="circle", symmetric=True),
 }
 
 
@@ -155,7 +158,33 @@ def _prepare_dat(spec, chord, x_le, cx, cy):
     return dense, t_max, hole_pt, extra
 
 
-_PREPARE = {"naca": _prepare_naca, "dat": _prepare_dat}
+def _circle_contour(chord, x0, y0, n_pts):
+    """Contour dense du cercle au même format que _naca_contour/_dat_contour :
+    demi-cercle supérieur LE->TE (paramétré en angle, donc espacement uniforme
+    en arc, pas seulement en x) suivi du demi-cercle inférieur TE->LE."""
+    R = chord / 2.0
+    cx = x0 + R
+    beta = np.linspace(0.0, np.pi, n_pts)
+    upper = np.column_stack([cx - R * np.cos(beta), y0 + R * np.sin(beta)])
+    lower = np.column_stack([cx - R * np.cos(beta), y0 - R * np.sin(beta)])[::-1]
+    return np.concatenate([upper, lower[1:-1]])
+
+
+def _prepare_circle(spec, chord, x_le, cx, cy):
+    dense = _circle_contour(chord, x_le, cy, 2000)
+    # local_size_kdtree utilise ce t_max comme longueur de croissance : la distance
+    # à la paroi sur laquelle la maille grossit de growth_rate. Pour les profils c'est
+    # leur épaisseur (~0.1 chord) ; le diamètre du cercle (=chord) donnerait une
+    # croissance ~8x plus lente et un maillage quasi uniforme, d'où ce calibrage sur
+    # le même ordre de grandeur que les autres géométries. Le rayon de courbure reste
+    # pris en compte via kappa et pilote seul la finesse collée à la paroi.
+    t_max_growth = 0.12 * chord
+    hole_pt = (cx, cy)
+    extra = dict(thickness=1.0, height=chord, center={"cx": cx, "cy": cy}, radius=chord / 2.0)
+    return dense, t_max_growth, hole_pt, extra
+
+
+_PREPARE = {"naca": _prepare_naca, "dat": _prepare_dat, "circle": _prepare_circle}
 
 
 def build_mesh(name, Lx=4.0, Ly=4.0, h=0.05, chord=1.0, cx=None, cy=None,

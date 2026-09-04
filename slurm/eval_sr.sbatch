@@ -41,6 +41,7 @@ TESTSETS="${TESTSETS:-diamond naca0012}"
 LR_RES="${LR_RES:-0.1}"
 HR_RES="${HR_RES:-0.025}"
 MACH_MAX="${MACH_MAX:-}"
+REF_CASES="${REF_CASES:-}"
 OUT_DIR="${OUT_DIR:-results/eval/${SLURM_JOBID}/}"
 OUT_DIRS="${OUT_DIRS:-}"
 FULL_EVAL="${FULL_EVAL:-1}"
@@ -93,6 +94,7 @@ if [[ "${FULL_EVAL}" == "1" ]]; then
     fi
 fi
 [[ -n "${MACH_MAX}"  ]] && EXTRA_ARGS+=(--mach_max  "${MACH_MAX}")
+[[ -n "${REF_CASES}" ]] && EXTRA_ARGS+=(--ref_cases ${REF_CASES})
 [[ -n "${N_STEPS}"   ]] && EXTRA_ARGS+=(--n_steps   "${N_STEPS}")
 [[ -n "${N_SAMPLES}" ]] && EXTRA_ARGS+=(--n_samples "${N_SAMPLES}")
 [[ -n "${CFG_SCALE}" ]] && EXTRA_ARGS+=(--cfg_scale "${CFG_SCALE}")

@@ -67,6 +67,9 @@ def main():
                         '(doit avoir autant d\'entrées que --testsets).')
     p.add_argument('--lr_res', type=float, default=0.1, help='Résolution LR par défaut (défaut: 0.1)')
     p.add_argument('--hr_res', type=float, default=0.025, help='Résolution HR par défaut (défaut: 0.025)')
+    p.add_argument('--ref_cases', nargs='+', default=None, metavar='MACH:AOA',
+                   help="Cas de reference epingles (figures), ex: --ref_cases 0.8:3 1.5:0. "
+                        "Par defaut : les cas de utils/refs.py propres a la geometrie.")
     p.add_argument('--mach_max', type=float, default=None,
                    help="Exclut du sweep (et des cas de référence) tout cas Mach > valeur")
     p.add_argument('--full_eval', action='store_true', help='Sweep complet du test set (timing, distributions, aéro)')
@@ -95,12 +98,20 @@ def main():
     data_root = Path(args.data)
     out_dir = Path(args.out_dir)
 
+    ref_specs = None
+    if args.ref_cases:
+        ref_specs = []
+        for spec in args.ref_cases:
+            mach, aoa = (float(v) for v in spec.split(':'))
+            ref_specs.append((mach, aoa, f"M{mach:.2f}".replace('.', '') + f"_AoA{aoa:+g}"))
+        print(f"  Cas de reference surcharges : {[r[2] for r in ref_specs]}")
+
     print("\n── Construction des TestSets ───────────────────────────────")
     testsets: list[TestSet] = []
     for spec in args.testsets:
         layout = _parse_testset_spec(spec, data_root, args.lr_res, args.hr_res)
         ts = TestSet.from_dir(data_root, layout.geometry, layout.lr_res, layout.hr_res,
-                              mach_max=args.mach_max)
+                              mach_max=args.mach_max, ref_specs=ref_specs)
         testsets.append(ts)
 
     primary_layout = testsets[0].layout

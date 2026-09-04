@@ -25,6 +25,24 @@ NACA_REFERENCE_CASES = [
     (1.50, 0.0, 'M150_AoA0'),
 ]
 
+# Cas de reference pour le test d'extrapolation Mach 3->4 (diamond_mach34,
+# hors distribution d'entrainement qui s'arrete a Mach 3.0), choisis pour
+# donner des structures de choc bien visibles sur les figures.
+DIAMOND_MACH34_REFERENCE_CASES = [
+    (3.2, 3.0, 'M32_AoA3'),
+    (3.6, -2.0, 'M36_AoA-2'),
+    (4.0, 0.0, 'M40_AoA0'),
+]
+
+# Cylindre : géométrie hors distribution des formes vues en entrainement. AoA=0
+# partout, le cercle ne voit pas l'incidence ; seul le régime Mach change
+# l'écoulement (subsonique, choc détaché naissant, choc détaché formé).
+CYLINDER_REFERENCE_CASES = [
+    (0.8, 0.0, 'M080_AoA0'),
+    (1.2, 0.0, 'M120_AoA0'),
+    (2.0, 0.0, 'M20_AoA0'),
+]
+
 _CASE_RE = re.compile(r'^aoa([+-]?\d+\.\d+)_m(\d+\.\d+)$')
 
 

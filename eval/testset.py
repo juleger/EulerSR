@@ -10,7 +10,9 @@ import matplotlib.tri as mtri
 
 from eval.loader import ModelEntry
 from utils.aero import WallCache, build_wall_cache
-from utils.refs import REFERENCE_CASES, NACA_REFERENCE_CASES, find_ref_file, _PROC_RE
+from utils.refs import (REFERENCE_CASES, NACA_REFERENCE_CASES,
+                        DIAMOND_MACH34_REFERENCE_CASES, CYLINDER_REFERENCE_CASES,
+                        find_ref_file, _PROC_RE)
 from utils.layout import DataLayout
 from models.dam import _LR_REF
 
@@ -370,7 +372,8 @@ class TestSet:
     @classmethod
     def from_dir(cls, data_root: str | Path, geometry: str,
                  lr_res: float = 0.1, hr_res: float = 0.025,
-                 mach_max: float | None = None) -> 'TestSet':
+                 mach_max: float | None = None,
+                 ref_specs: list | None = None) -> 'TestSet':
         """Construit un TestSet depuis la racine des données et le nom de géométrie.
 
         mach_max : si donné, exclut du sweep (et des cas de référence) tout cas
@@ -380,9 +383,13 @@ class TestSet:
         polluer silencieusement les métriques agrégées.
         """
         layout = DataLayout.from_root(data_root, geometry, lr_res, hr_res)
-        ref_specs = {
+        # ref_specs surcharge les cas epingles par defaut, pour produire une planche
+        # de figures a un regime precis sans toucher utils/refs.py.
+        ref_specs = ref_specs or {
             'diamond': REFERENCE_CASES,
             'naca0012': NACA_REFERENCE_CASES,
+            'diamond_mach34': DIAMOND_MACH34_REFERENCE_CASES,
+            'cylinder': CYLINDER_REFERENCE_CASES,
         }.get(geometry, REFERENCE_CASES)
         tag = f'{geometry}_lr{lr_res:g}'
         label = f'{_geom_label(geometry)} (LR h={lr_res:g})'
@@ -433,6 +440,7 @@ _GEOM_LABELS = {
     'naca0012': 'NACA 0012',
     'rae2822': 'RAE 2822',
     'oneraD': 'ONERA D',
+    'cylinder': 'Cylinder',
 }
 
 def _geom_label(geometry: str) -> str:
