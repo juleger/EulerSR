@@ -1,12 +1,14 @@
-model: fam_wall
+model: dam_wall
 data_root: data/
 geometry: diamond
 
-# FAMWall mono-geometrie (diamond) : reconstruction du champ HR depuis des
-# observations de bord seules. AMNet reduit (n_levels=1, n_global_blocks=1),
-# retenu par la campagne d'ablation (cf. memoire projet "famwall-ablation-results").
+# DAMWall mono-geometrie (diamond) : modele de controle deterministe pour FAMWall,
+# meme backbone (WallEncoder + WallCondBlock + AMNet reduit) et memes hyperparametres
+# d'architecture que fam_wall_sd.yaml, mais prediction directe du delta sur la
+# baseline, sans flow matching (cf. models/fam_wall.py:DAMWall). Sert a isoler ce
+# qu'apporte la partie generative de FAMWall par rapport a une simple regression.
 #
-# Repro : uv run python train_wall.py --config configs/fam_wall_sd.yaml --run_name FAMWALL_N84
+# Repro : uv run python train_wall.py --config configs/dam_wall_sd.yaml --run_name DAMWALL_N84
 
 resolution:
   hr: 0.025
@@ -25,21 +27,8 @@ architecture:
   wall_dist_bias: true    # biais de distance appris dans WallCondBlock
   use_geom_cond: false    # mono-geometrie
   n_geoms: 1
-  coord_norm: object      # impose pour FAMWall
+  coord_norm: object      # impose pour DAMWall/FAMWall
   use_bf16: false
-
-flow:
-  n_steps: 16             # pas d'integration ODE a l'inference
-  use_residual: true      # predit le residu sur la baseline IDW (bord)
-  n_samples: 4            # echantillons moyennes par prediction
-  n_val_gen: 16           # nombre de cas evalues en validation
-  sample_seed: 42
-  t_dist: logit_normal    # distribution du temps d'entrainement
-  sigma_t: 1.2            # ecart-type du temps si t_dist = logit_normal
-  cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement
-  cfg_scale: 1.0          # echelle de guidance a l'inference
-  learned_res_scale: true  # quasi obligatoire pour FAMWall (pas de HR au deploiement)
-  lambda_res_scale: 0.1   # poids de la loss auxiliaire qui entraine la tete
 
 training:
   epochs: 200
@@ -54,8 +43,9 @@ training:
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
   batch_size: 8
-  lambda_phys: 0.05              # plus fort que le SR volumique (probleme plus sous-contraint)
+  lambda_phys: 0.05              # meme convention que fam_wall_sd (probleme sous-contraint)
   lambda_enthalpy: 0.02          # poids de la perte de conservation d'enthalpie (0 = desactive)
   ema_decay: 0.999
   preload: true
   train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
+  mach_range: [0.7, 3.0]         # store processed regenere jusqu'a Mach 3

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=eval-sr
-#SBATCH --partition=gpu-a40,gpu-l40
+#SBATCH --partition=gpu-a40,gpu-l40,gpu-rtx6000
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=48G
+#SBATCH --mem=16G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/eval/eval-sr_%j.out
 #SBATCH --error=logs/eval/eval-sr_%j.err
@@ -53,7 +53,7 @@ OUT_DIR="${OUT_DIR:-results/eval/${SLURM_JOBID}/}"
 OUT_DIRS="${OUT_DIRS:-}"
 FULL_EVAL="${FULL_EVAL:-1}"
 N_EVAL="${N_EVAL:-0}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
+BATCH_SIZE="${BATCH_SIZE:-4}"
 N_STEPS="${N_STEPS:-}"
 N_SAMPLES="${N_SAMPLES:-}"
 CFG_SCALE="${CFG_SCALE:-}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=conv-sweep
-#SBATCH --partition=gpu-a40,gpu-l40
+#SBATCH --partition=gpu-a40,gpu-l40,gpu-rtx6000
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1

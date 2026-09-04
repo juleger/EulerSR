@@ -1,11 +1,12 @@
 model: fam
 data_root: data/
-geometry: diamond
+geometry: naca0012
 
-# FAM mono-geometrie (diamond). learned_res_scale, n_steps=12 et batch_size=8
-# issus des campagnes d'ablation FAM (cf. memoire projet pour le detail).
+# FAM mono-geometrie (naca0012), calque sur fam_sd.yaml (diamond) : meme
+# archi/hyperparams (learned_res_scale, n_steps=12), seule la geometrie
+# change (batch_size adapte a l'A40).
 #
-# Repro : uv run python train.py --config configs/fam_sd.yaml --run_name fam_sd
+# Repro : uv run python train.py --config configs/fam_naca12.yaml --run_name fam_naca12
 
 resolution:
   hr: 0.025
@@ -56,7 +57,7 @@ training:
   warmup_epochs: 20
   grad_clip: 4.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 12
+  batch_size: 8                  # adapte pour A40 (24G, vs 12 sur L40)
   ema_decay: 0.9995
   train_fraction: 1.0
   preload: true

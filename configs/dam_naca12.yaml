@@ -1,11 +1,11 @@
 model: dam
 data_root: data/
-geometry: diamond
+geometry: naca0012
 
-# DAM mono-geometrie (diamond), reglages repris de la base historique du projet
-# (pas d'ablation DAM dediee).
+# DAM mono-geometrie (naca0012), calque sur dam_sd.yaml (diamond) : meme
+# archi/hyperparams, seule la geometrie change (batch_size adapte a l'A40).
 #
-# Repro : uv run python train.py --config configs/dam_sd.yaml --run_name dam_sd
+# Repro : uv run python train.py --config configs/dam_naca12.yaml --run_name dam_naca12
 
 resolution:
   hr: 0.025
@@ -41,7 +41,7 @@ training:
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 12
+  batch_size: 8                  # adapte pour A40 (24G, vs 12 sur L40)
   ema_decay: 0.999
   train_fraction: 1.0            # fraction des donnees d'entrainement utilisee
   preload: true

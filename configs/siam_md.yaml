@@ -14,7 +14,7 @@ architecture:
   levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
   embed_dim: 96
   cond_dim: 96            # dimension du vecteur de conditionnement
-  t_dim: 64                # dimension de l'embedding du temps de pont
+  t_dim: 64               # dimension de l'embedding du temps de pont
   n_heads: 3
   n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
   n_global_blocks: 3      # blocs d'attention globale au niveau grossier
@@ -27,28 +27,28 @@ architecture:
   use_bf16: true
 
 flow:
-  n_steps: 8                # pas d'integration PF-ODE a l'inference
-  n_samples: 1               # PF-ODE deterministe : un echantillon suffit
-  n_val_gen: 16               # nombre de cas evalues en validation
+  n_steps: 8              # pas d'integration PF-ODE a l'inference
+  n_samples: 1            # PF-ODE deterministe : un echantillon suffit
+  n_val_gen: 16           # nombre de cas evalues en validation
   sample_seed: 42
-  path: linear               # chemin du pont IDW -> HR. options: linear, trig
-  gamma: sin2                 # enveloppe de bruit du pont (sin2 = pont brownien)
-  sigma_bridge: 0.1           # echelle du bruit median du pont
-  t_dist: beta                # distribution du temps d'entrainement. options: uniform, logit_normal, beta
-  t_alpha: 0.2                 # parametre alpha de t_dist=beta
-  t_beta: 0.8                  # parametre beta de t_dist=beta
-  sigma_t: 1.2                 # inutilise (t_dist=beta), garde pour compat
-  use_residual: false          # pont direct IDW->HR (pas de residu type DAM)
-  cfg_prob: 0.1                # proba de dropout du conditionnement a l'entrainement (0 = desactive)
-  cfg_scale: 1.0               # echelle de guidance a l'inference (1 = desactive)
-  sampler: ode              # 'sde' disponible (learn_score+sigma_bridge>0) mais pas active par defaut
-  learn_score: true         # entraine la tete denoiser en plus, garde l'option ensemble SDE sans retrain
-  lambda_score: 1.0         # poids de la loss auxiliaire de denoising
-  learned_res_scale: true   # noise_scale predite depuis Mach/AoA/LR/geometrie
-  lambda_res_scale: 0.1     # poids de la loss auxiliaire qui entraine la tete
-  eps_schedule: gamma        # reglages du sampler SDE (inutilises en mode ode par defaut)
+  path: linear            # chemin du pont IDW -> HR. options: linear, trig
+  gamma: sin2             # enveloppe de bruit du pont (sin2 = pont brownien)
+  sigma_bridge: 0.1       # echelle du bruit median du pont
+  t_dist: beta            # distribution du temps d'entrainement. options: uniform, logit_normal, beta
+  t_alpha: 0.2            # parametre alpha de t_dist=beta
+  t_beta: 0.8             # parametre beta de t_dist=beta
+  sigma_t: 1.2            # inutilise (t_dist=beta), garde pour compat
+  use_residual: false     # pont direct IDW->HR (pas de residu type DAM)
+  cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement (0 = desactive)
+  cfg_scale: 1.0          # echelle de guidance a l'inference (1 = desactive)
+  sampler: ode            # 'sde' disponible (learn_score+sigma_bridge>0) mais pas active par defaut
+  learn_score: true       # entraine la tete denoiser en plus, garde l'option ensemble SDE sans retrain
+  lambda_score: 1.0       # poids de la loss auxiliaire de denoising
+  learned_res_scale: true  # noise_scale predite depuis Mach/AoA/LR/geometrie
+  lambda_res_scale: 0.1   # poids de la loss auxiliaire qui entraine la tete
+  eps_schedule: gamma     # reglages du sampler SDE (inutilises en mode ode par defaut)
   eps0: 1.0
-  n_sde_steps: 32             # pas d'integration Euler-Maruyama si sampler=sde
+  n_sde_steps: 32         # pas d'integration Euler-Maruyama si sampler=sde
 
 # Une seule geometrie mais deux branches de resolution LR.
 datasets:
@@ -70,8 +70,8 @@ training:
   warmup_epochs: 20
   grad_clip: 5.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 8              # 32 OOM sur A40 a cette resolution HR (plein champ)
+  batch_size: 8                  # 32 OOM sur A40 a cette resolution HR (plein champ)
   ema_decay: 0.9995
   train_fraction: 1.0
   preload: true
-  mach_range: [0.7, 2.0]     # exclut Mach>2 (solveur de generation moins fiable au-dela)
+  mach_range: [0.7, 3.0]         # store processed regenere jusqu'a Mach 3

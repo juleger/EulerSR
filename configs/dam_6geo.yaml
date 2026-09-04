@@ -13,7 +13,7 @@ resolution:
 architecture:
   levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
   embed_dim: 128
-  cond_dim: 128          # dimension du vecteur de conditionnement
+  cond_dim: 128           # dimension du vecteur de conditionnement
   n_heads: 4
   n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
   n_global_blocks: 3      # blocs d'attention globale au niveau grossier
@@ -32,34 +32,34 @@ architecture:
 # Entrainement multi-branche : une branche = (geometrie, resolution LR).
 datasets:
   - name: diamond
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
 
   - name: naca0012
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
 
   - name: naca2412
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
 
   - name: oa209
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
 
   - name: rae2822
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
 
   - name: oneraD
-    lr_res:         [0.1, 0.2]
-    weight:         [2,   2]
-    train_fraction: [1.0, 1.0]
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
 
 training:
   epochs: 200
@@ -74,8 +74,8 @@ training:
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 12           # max sans OOM observe sur L40 a cette echelle
+  batch_size: 12                 # max sans OOM observe sur L40 a cette echelle
   ema_decay: 0.999
-  train_fraction: 1.0      # repli documentaire, shadow par datasets: ci-dessus
-  preload: false            # pool 6geo trop volumineux pour un preload RAM confortable
-  mach_range: [0.7, 2.0]    # exclut Mach>2 (solveur de generation moins fiable au-dela)
+  train_fraction: 1.0            # repli documentaire, shadow par datasets: ci-dessus
+  preload: false                 # pool 6geo trop volumineux pour un preload RAM confortable
+  mach_range: [0.7, 3.0]         # store processed regenere jusqu'a Mach 3

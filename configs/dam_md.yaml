@@ -48,8 +48,8 @@ training:
   warmup_epochs: 20
   grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
-  batch_size: 12                 # mode multi-branche plus gourmand en memoire que dam_sd.yaml (batch=32)
+  batch_size: 12
   ema_decay: 0.999
   train_fraction: 1.0            # repli documentaire, shadow par datasets: ci-dessus
   preload: true
-  mach_range: [0.7, 2.0]         # exclut Mach>2 (solveur de generation moins fiable au-dela)
+  mach_range: [0.7, 3.0]         # store processed regenere jusqu'a Mach 3

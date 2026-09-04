@@ -1,15 +1,21 @@
-model: fam
+model: dam
 data_root: data/
 
-# FAM 2 geometries (diamond + naca0012), etape intermediaire vers le 6geo.
+# DAM 5 geometries (diamond/naca0012/naca2412/rae2822/oneraD). oa209 exclu
+# volontairement : son raw bas-Mach (0.7-2.0) a ete perdu lors d'une resynchro
+# preprocess.py, a reintegrer en 6geo une fois regenere. naca23012 reste le
+# test OOD.
 #
-# Repro : uv run python train.py --config configs/fam_2geo.yaml --run_name fam_2geo
+# Repro : uv run python train.py --config configs/dam_5geo.yaml --run_name dam_5geo
+
+resolution:
+  hr: 0.025
+  lr: 0.1
 
 architecture:
   levels: [0.05, 0.1]     # niveaux de pooling multi-echelle internes
   embed_dim: 128
   cond_dim: 128           # dimension du vecteur de conditionnement
-  t_dim: 64               # dimension de l'embedding du temps de flow
   n_heads: 4
   n_hr_blocks: 2          # blocs d'attention a pleine resolution HR
   n_global_blocks: 3      # blocs d'attention globale au niveau grossier
@@ -22,24 +28,8 @@ architecture:
   use_bf16: true
   coord_norm: object      # centre/echelle sur corde+centre obstacle (cf euler/meshing)
   use_geom_cond: true     # embedding de geometrie, avec dropout CFG (geom_cfg_prob)
-  n_geoms: 2              # nombre de geometries distinctes (auto-recalcule par train.py)
-  geom_cfg_prob: 0.35     # meilleur sur le sweep 6geo 0.15/0.25/0.35 (OOD-geometrie)
-
-resolution:
-  hr: 0.025
-  lr: 0.1
-
-flow:
-  n_steps: 12             # pas d'integration ODE a l'inference
-  use_residual: true      # predit le residu sur la baseline IDW
-  n_samples: 4            # echantillons moyennes par prediction
-  n_val_gen: 16           # nombre de cas evalues en validation
-  sample_seed: 42
-  t_dist: logit_normal    # distribution du temps d'entrainement. options: logit_normal, uniform, beta
-  sigma_t: 1.2            # ecart-type du temps si t_dist = logit_normal
-  cfg_prob: 0.1           # proba de dropout du conditionnement a l'entrainement (0 = desactive)
-  cfg_scale: 1.0          # echelle de guidance a l'inference (1 = desactive)
-  learned_res_scale: true  # res_scale predite depuis Mach/AoA/LR/geometrie
+  n_geoms: 5              # nombre de geometries distinctes (auto-recalcule par train.py)
+  geom_cfg_prob: 0.25     # meilleur sur le sweep 6geo 0.15/0.25/0.35 (OOD-geometrie)
 
 # Entrainement multi-branche : une branche = (geometrie, resolution LR).
 datasets:
@@ -49,6 +39,21 @@ datasets:
     train_fraction: 1.0
 
   - name: naca0012
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
+
+  - name: naca2412
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
+
+  - name: rae2822
+    lr_res:         0.1
+    weight:         2
+    train_fraction: 1.0
+
+  - name: oneraD
     lr_res:         0.1
     weight:         2
     train_fraction: 1.0
@@ -64,10 +69,10 @@ training:
   lambda_enthalpy: 0.01          # poids de la perte de conservation d'enthalpie (0 = desactive)
   schedule: cosine               # options: cosine, constant
   warmup_epochs: 20
-  grad_clip: 4.0                 # clipping de la norme du gradient (0 = desactive)
+  grad_clip: 2.0                 # clipping de la norme du gradient (0 = desactive)
   save_best: true
   batch_size: 12                 # max sans OOM observe sur L40 a cette echelle
-  ema_decay: 0.9995
-  train_fraction: 1.0
-  preload: true                  # pool 2geo assez petit (contrairement au 6geo, preload=false)
+  ema_decay: 0.999
+  train_fraction: 1.0            # repli documentaire, shadow par datasets: ci-dessus
+  preload: false                 # pool 5geo trop volumineux pour un preload RAM confortable
   mach_range: [0.7, 3.0]         # store processed regenere jusqu'a Mach 3
