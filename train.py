@@ -142,6 +142,10 @@ def main():
         batch_size = _get(args.batch_size, 'batch_size', 1),
         save_best = (not args.no_save_best) and tr.get('save_best', True),
         ema_decay = tr.get('ema_decay', 0.0),
+        gradmix = tr.get('gradmix', False),
+        gradnorm = tr.get('gradnorm', False),
+        gradnorm_alpha = tr.get('gradnorm_alpha', 1.5),
+        gradnorm_lr = tr.get('gradnorm_lr', 0.025),
     )
 
     res_cfg = cfg.get('resolution', {})

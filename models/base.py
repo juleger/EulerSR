@@ -113,6 +113,13 @@ class TrainConfig:
     lambda_endpoint_warmup_epochs: int = 0  # rampe lineaire 0 -> lambda_endpoint (0 = pas de warmup)
     warmup_epochs: int = 0
     ema_decay: float = 0.0
+    gradmix: bool = False           # multi-branche : melange les gradients de toutes les
+                                    # branches par meta-step au lieu d'un update sequentiel
+                                    # mono-branche (cf. fit)
+    gradnorm: bool = False          # ponderation dynamique GradNorm des branches (Chen et al.
+                                    # 2018) au lieu des poids statiques 'weight:', cf. fit
+    gradnorm_alpha: float = 1.5     # force de rappel vers l'equilibrage (0 = pas de rappel)
+    gradnorm_lr: float = 0.025      # pas de descente sur les poids w_i (SGD, 4-8 scalaires)
 
 class Buffer(nnx.Variable):
     """Variable non entrainable pour stocker des valeurs"""
@@ -218,7 +225,7 @@ def _validate(eval_model, all_names, all_val, all_step_fns, train_ds, is_multi,
 
 def _log_epoch(epoch, cfg, metrics, *, train_loss, lr_now, elapsed, is_best, mem,
                gnorm_sum, gnorm_n, n_clipped, idw_ref, idw_refs,
-               all_names, is_multi, has_flow, csv_path, csv_fields) -> None:
+               all_names, is_multi, has_flow, csv_path, csv_fields, gn_w=None) -> None:
     """Écrit la ligne CSV de l'epoch et imprime le résumé console."""
     vl, vl2, vmach = metrics['vl'], metrics['vl2'], metrics['vmach']
     enth_acc, enth_ref_acc = metrics['enth_acc'], metrics['enth_ref_acc']
@@ -246,6 +253,7 @@ def _log_epoch(epoch, cfg, metrics, *, train_loss, lr_now, elapsed, is_best, mem
         'enthalpy_gt': round(float(enth_ref_acc / n_val), 8) if has_flow else '',
         'idw_enthalpy': round(float(idw_ref.get('enthalpy', float('nan'))), 8) if has_flow else '',
         **({f'val_{nm}': round(float(per_geom[nm]['vl']), 8) for nm in all_names} if is_multi else {}),
+        **({f'gn_w_{nm}': round(float(gn_w[nm]), 5) for nm in all_names} if gn_w is not None else {}),
         'ram_gb': '' if np.isnan(ram) else round(ram, 3),
         'gpu_gb': '' if np.isnan(gpu) else round(gpu, 3),
         'gpu_peak_gb': '' if np.isnan(gpup) else round(gpup, 3),
@@ -272,10 +280,11 @@ def _log_epoch(epoch, cfg, metrics, *, train_loss, lr_now, elapsed, is_best, mem
             ref = idw_refs[g_name]
             ht_g = (f"  Ht={gm['enth']:.3e}(gt={gm['enth_ref']:.3e})"
                     if gm['enth'] is not None else "")
+            gn_g = f"  w={gn_w[g_name]:.2f}" if gn_w is not None else ""
             print(f"    [{g_name:<{w}}]  val={gm['vl']:.4f}  "
                   + _prims_str(gm['vl2'], ref['l2'])
                   + f"  M={_delta(gm['vmach'], ref['mach'])}"
-                  + ht_g)
+                  + ht_g + gn_g)
     else:
         ht_str = f"  Ht={enth_acc/n_val:.3e}(gt={enth_ref_acc/n_val:.3e})" if has_flow else ""
         print(f"  ep {epoch:4d}/{cfg.epochs}  "
@@ -406,10 +415,15 @@ class SRModel(nnx.Module):
 
         self._pre_fit(_branch_pairs, cfg)
 
-        # Mode multi-branche : un meta-step = un micro-batch par branche (cf.
-        # iter_grouped_batches), donc le nombre de steps/epoque cale sur la plus grosse branche.
-        if isinstance(train_ds, MultiSRDataset):
+        if isinstance(train_ds, MultiSRDataset) and cfg.gradmix:
+            # gradmix : un meta-step = un micro-batch de CHAQUE branche (iter_grouped_batches),
+            # donc le nombre de steps/epoque cale sur la plus grosse branche.
             _steps_per_epoch = max(math.ceil(len(ds) / max(cfg.batch_size, 1))
+                                   for ds in train_ds.datasets)
+        elif isinstance(train_ds, MultiSRDataset):
+            # sequentiel : un update = un micro-batch d'UNE SEULE branche (iter_batches),
+            # donc le nombre de steps/epoque est la somme sur toutes les branches.
+            _steps_per_epoch = sum(math.ceil(len(ds) / max(cfg.batch_size, 1))
                                    for ds in train_ds.datasets)
         else:
             _steps_per_epoch = math.ceil(len(train_ds) / max(cfg.batch_size, 1))
@@ -567,9 +581,33 @@ class SRModel(nnx.Module):
             leaves = jax.tree_util.tree_leaves(grads)
             return float(jnp.sqrt(sum(jnp.sum(g ** 2) for g in leaves if hasattr(g, 'shape'))))
 
+        def _shared_grad_norm(grads) -> float:
+            """Norme L2 du gradient sur le tronc partage : tout sauf les embeddings
+            specifiques a la geometrie (geom_emb, scale_geom_emb). Reference de
+            GradNorm ; le conditionnement geometrique etant fondu partout, on prend
+            tout le tronc plutot qu'une couche 'derniere partagee'.
+            """
+            leaves = jax.tree_util.tree_flatten_with_path(grads)[0]
+            total = 0.0
+            for path, leaf in leaves:
+                if leaf is None or 'geom_emb' in jax.tree_util.keystr(path):
+                    continue
+                total = total + jnp.sum(jnp.asarray(leaf) ** 2)
+            return float(jnp.sqrt(total))
+
         rng = np.random.default_rng(cfg.seed)
         base_key = jax.random.PRNGKey(cfg.seed)
         train_losses, val_losses, val_l2s = [], [], []
+        # Etat GradNorm : w_i par branche, cote host (4-8 scalaires, inutile de passer
+        # par jit). L_i(0) rempli au tout premier meta-step.
+        _gradmix = _is_multi and cfg.gradmix
+        _gradnorm = _is_multi and cfg.gradnorm
+        if _gradnorm and not cfg.gradmix:
+            raise ValueError(
+                "gradnorm=true necessite gradmix=true (ponderation dynamique calculee sur le "
+                "meta-step groupe de iter_grouped_batches, sans equivalent en mode sequentiel).")
+        _gn_w = np.ones(len(_all_names), dtype=np.float64) if _gradnorm else None
+        _gn_l0 = np.full(len(_all_names), np.nan, dtype=np.float64) if _gradnorm else None
         best_val, best_state = float('inf'), None
         _ep_gnorm_sum, _ep_gnorm_n, _ep_n_clipped = 0.0, 0, 0
         t0 = time.time()
@@ -580,6 +618,7 @@ class SRModel(nnx.Module):
                        + [f'idw_{v}' for v in VAR_LABELS] + ['idw_mach']
                        + ['enthalpy', 'enthalpy_gt', 'idw_enthalpy']
                        + ([f'val_{nm}' for nm in _all_names] if _is_multi else [])  # val_loss par branche
+                       + ([f'gn_w_{nm}' for nm in _all_names] if _gradnorm else [])  # poids GradNorm
                        + ['ram_gb', 'gpu_gb', 'gpu_peak_gb', 'is_best'])
         _csv_path = out_dir / f'{run_name}.csv'
         with open(_csv_path, 'w', newline='') as _f:
@@ -594,11 +633,13 @@ class SRModel(nnx.Module):
             extra_loss += f"  lambda_endpoint={lambda_endpoint}{ep_warm}"
         warmup_str = f"  warmup={cfg.warmup_epochs}ep" if cfg.warmup_epochs > 0 else ""
         _ema_str = f"  ema={decay}" if decay > 0 else ""
-        _multi_str = f"  datasets={_all_names}" if _is_multi else ""
+        _multi_str = (f"  datasets={_all_names}  mode={'gradmix' if _gradmix else 'sequentiel'}"
+                     if _is_multi else "")
+        _gn_str = f"  gradnorm=alpha{cfg.gradnorm_alpha}/lr{cfg.gradnorm_lr}" if _gradnorm else ""
         print(f"\nTraining {self.__class__.__name__}  "
               f"epochs={cfg.epochs}  lr={cfg.lr}  loss={cfg.loss}{extra_loss}  "
               f"schedule={cfg.schedule}{warmup_str}  grad_clip={cfg.grad_clip}  "
-              f"batch={batch_size}{_ema_str}{_multi_str}")
+              f"batch={batch_size}{_ema_str}{_multi_str}{_gn_str}")
 
         # Baseline IDW sur le jeu de validation -- une référence par géométrie.
         # eval_idw suppose un champ LR volumique, absent pour les modèles bord-seul
@@ -636,21 +677,45 @@ class SRModel(nnx.Module):
                 lam_ep_val = lambda_endpoint
             lam_ep = jnp.asarray(lam_ep_val, jnp.float32)
 
-            if _is_multi:
-                # Mode multi-dataset : un meta-step = un micro-batch de CHAQUE branche,
-                # gradients moyennés (pondérés) puis UN SEUL optimizer.update évite
-                # le tug-of-war d'un update séquentiel mono-branche par step.
+            if _gradmix:
+                # gradmix : un meta-step = un micro-batch de CHAQUE branche, gradients
+                # moyennes (ponderes) puis un seul optimizer.update. Opt-in : l'ablation
+                # DAM/FAM 2geo n'a pas confirme de gain net face au mode sequentiel.
                 for group in train_ds.iter_grouped_batches(batch_size, rng):
                     step_key = jax.random.fold_in(base_key, _n_grad_steps)
-                    grads_list, w_list = [], []
+                    grads_list, geom_idxs, branch_losses = [], [], []
                     loss_acc, B_acc = 0.0, 0
                     for raw, geom_idx in group:
                         sfns = _all_step_fns[_all_names[geom_idx]]
                         b_key = jax.random.fold_in(step_key, geom_idx)
                         loss_c, B_r, grads = _do_one_batch_grad(raw, sfns, b_key, lam_ep)
                         grads_list.append(grads)
-                        w_list.append(train_ds.weights[geom_idx])
+                        geom_idxs.append(geom_idx)
+                        branch_losses.append(loss_c / max(B_r, 1))
                         loss_acc += loss_c; B_acc += B_r
+
+                    if _gradnorm:
+                        # w_i mis a jour avant de moyenner ce meta-step, comme dans le
+                        # papier. Indexation par geom_idxs et non par position : un
+                        # meta-step de fin d'epoque peut ne pas contenir toutes les branches.
+                        idxs_arr = np.array(geom_idxs)
+                        Lt = np.array(branch_losses, dtype=np.float64)
+                        missing_l0 = np.isnan(_gn_l0[idxs_arr])
+                        if missing_l0.any():
+                            _gn_l0[idxs_arr[missing_l0]] = Lt[missing_l0] + 1e-8
+                        g_i = np.array([_shared_grad_norm(g) for g in grads_list])
+                        r_i = Lt / _gn_l0[idxs_arr]
+                        r_i = r_i / (r_i.mean() + 1e-8)          # taux d'entrainement relatif
+                        w_cur = _gn_w[idxs_arr]
+                        Gw = w_cur * g_i                          # norme de gradient ponderee courante
+                        target = Gw.mean() * (r_i ** cfg.gradnorm_alpha)  # traite comme constante
+                        grad_w = np.sign(Gw - target) * g_i       # d|Gw_i - target_i|/dw_i (L1)
+                        w_new = np.clip(w_cur - cfg.gradnorm_lr * grad_w, 1e-3, None)
+                        w_new *= len(idxs_arr) / w_new.sum()      # renormalise sum(w)=n_branches presentes
+                        _gn_w[idxs_arr] = w_new
+                        w_list = list(w_new)
+                    else:
+                        w_list = [train_ds.weights[gi] for gi in geom_idxs]
                     wsum = sum(w_list)
                     w_norm = [w / wsum for w in w_list]
                     avg_grads = jax.tree.map(
@@ -658,6 +723,19 @@ class SRModel(nnx.Module):
                     gn = _tree_grad_norm(avg_grads)
                     _apply_update(optimizer, avg_grads)
                     ep_loss += loss_acc; n += B_acc; _n_grad_steps += 1
+                    _ep_gnorm_sum += gn; _ep_gnorm_n += 1
+                    if cfg.grad_clip > 0 and gn > cfg.grad_clip:
+                        _ep_n_clipped += 1
+                    if ema is not None:
+                        ema = _ema_update(ema, nnx.state(optimizer.model, nnx.Param))
+            elif _is_multi:
+                # Mode sequentiel : un update = un micro-batch d'UNE SEULE branche par
+                # step, sfns choisi selon la geometrie du batch tire.
+                for raw, geom_idx in train_ds.iter_batches(batch_size, rng):
+                    sfns = _all_step_fns[_all_names[geom_idx]]
+                    step_key = jax.random.fold_in(base_key, _n_grad_steps)
+                    loss_c, B_r, gn = _do_one_batch(raw, sfns, step_key, lam_ep)
+                    ep_loss += loss_c; n += B_r; _n_grad_steps += 1
                     _ep_gnorm_sum += gn; _ep_gnorm_n += 1
                     if cfg.grad_clip > 0 and gn > cfg.grad_clip:
                         _ep_n_clipped += 1
@@ -711,7 +789,8 @@ class SRModel(nnx.Module):
                 _log_epoch(epoch, cfg, metrics, train_loss=train_losses[-1], lr_now=lr_now, elapsed=_elapsed,
                         is_best=is_best, mem=_get_mem(), gnorm_sum=_ep_gnorm_sum, gnorm_n=_ep_gnorm_n,
                         n_clipped=_ep_n_clipped, idw_ref=idw_ref, idw_refs=_idw_refs, all_names=_all_names,
-                        is_multi=_is_multi, has_flow=_has_flow, csv_path=_csv_path, csv_fields=_csv_fields)
+                        is_multi=_is_multi, has_flow=_has_flow, csv_path=_csv_path, csv_fields=_csv_fields,
+                        gn_w=(dict(zip(_all_names, _gn_w.tolist())) if _gradnorm else None))
 
         # Si besoin, sauvegarde le meilleur modèle trouvé pendant l'entraînement (en fonction de la val)
         if cfg.save_best and best_state is not None:
