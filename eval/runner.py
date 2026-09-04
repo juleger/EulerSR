@@ -571,7 +571,7 @@ def _plot_sweep(results: dict, cases: list[dict], ts: TestSet, out: Path):
     from utils.viz.eval import (
         plot_global_errors, plot_distributions,
         plot_cl_cd_distributions, plot_error_kde,
-        plot_error_heatmap, plot_summary_table,
+        plot_error_heatmap, plot_regime_heatmap, plot_summary_table,
     )
     print("\n── Plots : sweep ───────────────────────────────────────────")
     plot_global_errors(results, out)
@@ -579,6 +579,7 @@ def _plot_sweep(results: dict, cases: list[dict], ts: TestSet, out: Path):
     plot_cl_cd_distributions(results, out)
     plot_error_kde(results, out)
     plot_error_heatmap(results, cases, out)
+    plot_regime_heatmap(results, cases, out)
     plot_summary_table({}, results, out, hr_res=ts.hr_res, lr_res=ts.lr_res, geometry=ts.geometry)
 
 def _print_header(ts: TestSet, models: list[ModelEntry]):

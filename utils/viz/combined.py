@@ -18,17 +18,16 @@ from utils.viz.eval import (_build_palette, _display_name, _kde_or_hist,
                             _color_table_gradient, _fmt_metric, _fmt_time)
 from eval.core import IDW_BASELINE_NAMES
 
-# Tableau global : les métriques essentielles (erreurs aéro/paroi + distributionnelle + coût)
+# Tableau global : les métriques essentielles (erreurs aéro/paroi + distributionnelle
+# + coût). Cp paroi plutôt que Mach paroi, même convention que _GLOBAL_SUMMARY_METRICS.
 _TABLE_METRICS = [
     ('w2_mach', r'$W_2$ Mach'),
     ('CL_err', r'$\Delta C_L$'),
     ('CD_err', r'$\Delta C_D$'),
-    ('wall_mach_l2', r'$M_{wall}$ L2'),
+    ('wall_cp_l2', r'$C_p$ paroi L2'),
     ('times', 't (ms/cas)'),
 ]
-# Table récapitulative unique (une ligne par modèle, moyennée sur tous les
-# testsets) : mêmes erreurs que _TABLE_METRICS mais Cp paroi plutôt que Mach
-# paroi -- Cp est la grandeur directement comparée aux mesures/litté aéro.
+# Table récapitulative unique (une ligne par modèle, moyennée sur tous les testsets).
 _GLOBAL_SUMMARY_METRICS = [
     ('w2_mach', r'$W_2$'),
     ('CL_err', r'$\Delta C_L$'),
@@ -40,7 +39,7 @@ _GLOBAL_SUMMARY_METRICS = [
 _ERR_METRICS = [
     ('l2w_mach', r'$L_{2w}$ Mach'),
     ('w2_mach', r'$W_2$ Mach'),
-    ('wall_mach_l2', r'$M_{wall}$ L2'),
+    ('wall_cp_l2', r'$C_p$ paroi L2'),
 ]
 # Colonnes du CSV (superset, pour garder aussi L2w/Linf sous la main)
 _CSV_KEYS = ['w2_mach', 'l2w_mach', 'linf_mach', 'CL_err', 'CD_err',
@@ -162,7 +161,7 @@ def combined_global_table(ts_results: dict, out_dir: Path, min_groups: int = 2):
             for j in range(len(tags)):
                 if not np.isfinite(M[i, j]):
                     continue
-                txt = f'{M[i, j]:.2f}' if key == 'times' else f'{M[i, j]:.3f}'
+                txt = f'{M[i, j]:.2f}' if key == 'times' else f'{M[i, j]:.4f}'
                 ax.text(j, i, txt, ha='center', va='center', fontsize=7,
                         color='black')
         ax.set_xticks(np.arange(-.5, len(tags), 1), minor=True)
@@ -170,7 +169,7 @@ def combined_global_table(ts_results: dict, out_dir: Path, min_groups: int = 2):
         ax.grid(which='minor', color='white', linewidth=1.2)
         ax.tick_params(which='minor', length=0)
 
-    _suptitle(fig, 'Tableau global — moyenne par test (plus bas = mieux)', C)
+    _suptitle(fig, 'Tableau global — moyenne par test', C)
     out_path = Path(out_dir) / 'global_table.png'
     plt.savefig(out_path, dpi=_DPI, bbox_inches='tight')
     plt.close(fig)
@@ -183,7 +182,7 @@ def combined_summary_table(ts_results: dict, out_dir: Path, min_groups: int = 2)
     combined_global_table (qui garde la ventilation par testset, utile pour
     diagnostiquer, mais illisible d'un coup d'œil dès qu'il y a beaucoup de
     testsets) par un classement global immédiat. Colonnes : W2 Mach, ΔCL,
-    ΔCD, Cp paroi L2 (Mwall exclu ici, cf. _GLOBAL_SUMMARY_METRICS), temps/cas.
+    ΔCD, Cp paroi L2, temps/cas (cf. _GLOBAL_SUMMARY_METRICS).
     """
     C = collect(ts_results)
     tags, models = C['tags'], C['models']

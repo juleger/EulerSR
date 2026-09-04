@@ -534,6 +534,97 @@ def plot_error_heatmap(dataset_results: dict, all_cases: list[dict], out_dir: Pa
                     'w2_mach', r'$W_2$ Mach', 'error_heatmap_w2.png')
 
 
+# 4 métriques les plus lues (champ, aéro, paroi) pour plot_regime_heatmap. Cp paroi
+# plutôt que Mach paroi, cf. has_cp dans _summary_methods_rows.
+_REGIME_METRICS = [
+    ('w2_mach', r'$W_2$'),
+    ('CL_err', r'$\Delta C_L$'),
+    ('CD_err', r'$\Delta C_D$'),
+    ('wall_cp_l2', r'$C_p$ paroi L2'),
+]
+
+
+def plot_regime_heatmap(dataset_results: dict, all_cases: list[dict], out_dir: Path,
+                        n_bins: int = 6):
+    """error_heatmap_{l2w,w2}.png croisent Mach × AoA pour une seule métrique. Ici
+    l'inverse : on agrège l'AoA par régime de Mach pour caser 4 métriques × toutes
+    les méthodes sur une image, et répondre à « quel régime est le plus dur, et pour
+    quelle métrique ? ».
+
+    Bornes de régime par quantiles plutôt qu'à largeur fixe, les cas d'un sweep
+    n'étant pas échantillonnés uniformément en Mach. Échelle de couleur normalisée
+    par ligne : les 4 métriques n'ont ni la même unité ni le même ordre de grandeur."""
+    methods = [nm for nm in dataset_results
+               if not nm.startswith('_') and nm not in ({'GT', 'HR'} | IDW_BASELINE_NAMES)
+               and any(k in dataset_results.get(nm, {}) for k, _ in _REGIME_METRICS)]
+    if not methods:
+        return
+
+    machs = np.array([c['mach_in'] for c in all_cases], dtype=float)
+    if machs.size == 0 or not np.isfinite(machs).any():
+        return
+    edges = np.unique(np.nanquantile(machs, np.linspace(0, 1, n_bins + 1)))
+    if len(edges) < 3:
+        return  # pas assez de valeurs de Mach distinctes pour binner utilement
+    nb = len(edges) - 1
+    bin_idx = np.clip(np.digitize(machs, edges[1:-1], right=True), 0, nb - 1)
+    bin_labels = [f'{edges[i]:.2g}–{edges[i + 1]:.2g}' for i in range(nb)]
+
+    n_met, n_meth = len(_REGIME_METRICS), len(methods)
+    fig, axes = plt.subplots(n_met, n_meth,
+                             figsize=(max(1.15 * nb, 1.6) * n_meth + 1.0, 1.35 * n_met + 0.8),
+                             dpi=_DPI, constrained_layout=True, squeeze=False)
+    fig.suptitle(_ts_suptitle('Erreur par régime de Mach (AoA agrégé)', dataset_results),
+                 fontsize=11, fontweight='bold')
+
+    for ri, (key, mlabel) in enumerate(_REGIME_METRICS):
+        row_all = np.concatenate([
+            np.array(dataset_results[nm].get(key, []), dtype=float) for nm in methods
+        ]) if methods else np.array([])
+        row_all = row_all[np.isfinite(row_all)]
+        vmax = float(np.nanpercentile(row_all, 95)) if row_all.size else 1.0
+        vmax = vmax if vmax > 0 else 1.0
+
+        last_pc = None
+        for ci, nm in enumerate(methods):
+            ax = axes[ri][ci]
+            vals = np.asarray(dataset_results[nm].get(key, []), dtype=float)
+            if vals.shape[0] != bin_idx.shape[0]:
+                vals = np.full(bin_idx.shape[0], np.nan)
+            cell = np.full(nb, np.nan)
+            for b in range(nb):
+                sel = vals[bin_idx == b]
+                sel = sel[np.isfinite(sel)]
+                if sel.size:
+                    cell[b] = float(np.mean(sel))
+
+            last_pc = ax.pcolormesh(np.arange(nb + 1), [0, 1], cell[None, :],
+                                    cmap='YlOrRd', vmin=0, vmax=vmax, shading='flat')
+            for b in range(nb):
+                if np.isfinite(cell[b]):
+                    ax.text(b + 0.5, 0.5, f'{cell[b]:.3g}', ha='center', va='center',
+                            fontsize=7, color='white' if cell[b] > 0.6 * vmax else 'black')
+            ax.set_xticks(np.arange(nb) + 0.5)
+            ax.set_yticks([])
+            ax.set_xticklabels(bin_labels if ri == n_met - 1 else [],
+                               rotation=40, ha='right', fontsize=7)
+            if ri == 0:
+                ax.set_title(nm, fontsize=9, fontweight='bold')
+            if ci == 0:
+                ax.set_ylabel(mlabel, fontsize=9, fontweight='bold',
+                             rotation=0, ha='right', va='center')
+
+        if last_pc is not None:
+            fig.colorbar(last_pc, ax=list(axes[ri]), shrink=0.75, pad=0.015, aspect=14)
+
+    if n_met > 0:
+        axes[-1][0].set_xlabel('Mach', fontsize=8)
+
+    out_path = Path(out_dir) / 'regime_heatmap_mach.png'
+    plt.savefig(out_path, dpi=_DPI, bbox_inches='tight'); plt.close(fig)
+    print(f"  > {out_path.name}")
+
+
 def _fmt_metric(v: float) -> str:
     if not np.isfinite(v):
         return 'N/A'
@@ -585,10 +676,10 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
 
     has_aero = (dataset_results is not None and
                  any('CL_err' in dataset_results.get(nm, {}) for nm in methods))
+    # Cp plutôt que Mach paroi : c'est la grandeur directement comparée aux mesures
+    # et à la littérature aéro, même convention que combined._GLOBAL_SUMMARY_METRICS.
     has_cp = (dataset_results is not None and
                  any('wall_cp_l2' in dataset_results.get(nm, {}) for nm in methods))
-    has_mwall = (dataset_results is not None and
-                 any('wall_mach_l2' in dataset_results.get(nm, {}) for nm in methods))
     has_euler = (dataset_results is not None and
                  any(np.isfinite(np.asarray(dataset_results.get(nm, {}).get('euler_fvm', [np.nan]),
                                             dtype=float)).any() for nm in methods))
@@ -597,9 +688,7 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
     if has_aero:
         col_labels += [r'$\Delta C_L$', r'$\Delta C_D$']
     if has_cp:
-        col_labels += [r'$C_p$ L2']
-    if has_mwall:
-        col_labels += [r'$M_{wall}$ L2']
+        col_labels += [r'$C_p$ paroi L2']
     if has_euler:
         col_labels += [r'Résidu Euler']
     col_labels += ['Temps/cas']
@@ -611,8 +700,6 @@ def _summary_methods_rows(results_ref: dict, dataset_results: dict | None):
             raw_vals += [_raw(nm, 'CL_err'), _raw(nm, 'CD_err')]
         if has_cp:
             raw_vals += [_raw(nm, 'wall_cp_l2')]
-        if has_mwall:
-            raw_vals += [_raw(nm, 'wall_mach_l2')]
         if has_euler:
             raw_vals += [_raw(nm, 'euler_fvm')]
         raw_vals += [_raw_time(nm)]
@@ -982,6 +1069,7 @@ __all__ = [
     'plot_cl_cd_distributions',
     'plot_error_kde',
     'plot_error_heatmap',
+    'plot_regime_heatmap',
     'plot_global_errors',
     'plot_summary_table',
     'save_summary_csv',
